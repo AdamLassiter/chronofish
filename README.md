@@ -136,25 +136,27 @@ Run Rust tests:
 cargo test
 ```
 
-Build the WASM module:
+Start the local frontend and backend:
 
 ```sh
-npm run build:wasm
+./run
 ```
 
-Start the local frontend:
+The script builds the WASM engine and then starts the Rust server. Then open
+<http://localhost:5173>.
+
+You can also run the steps manually:
 
 ```sh
-npm run dev
+cargo build --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
+cargo run --bin chronofish-server
 ```
-
-Then open <http://localhost:5173>.
 
 For multiplayer across machines, run the same server on an address reachable by
 both players:
 
 ```sh
-HOST=0.0.0.0 PORT=5173 npm run dev
+HOST=0.0.0.0 PORT=5173 ./run
 ```
 
 Open the site, enter a room ID, and choose `Join White`, `Join Black`, or

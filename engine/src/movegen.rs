@@ -1,0 +1,473 @@
+impl Game {
+    fn is_in_check(&self, color: Color) -> bool {
+        let kings = self.king_positions(color);
+        kings
+            .iter()
+            .any(|king| self.is_square_attacked(*king, color.opposite()))
+    }
+
+    fn is_checkmate(&self, color: Color) -> bool {
+        if !self.is_in_check(color) {
+            return false;
+        }
+
+        let mut search = self.clone_for_search();
+        search.turn = color;
+        !search.has_legal_turn_completion(color)
+    }
+
+    fn has_legal_turn_completion(&self, color: Color) -> bool {
+        let max_depth = self
+            .timelines
+            .iter()
+            .filter(|timeline| self.is_active_timeline(timeline.id))
+            .count()
+            + 4;
+        self.has_legal_turn_completion_at_depth(color, 0, max_depth)
+    }
+
+    fn has_legal_turn_completion_at_depth(
+        &self,
+        color: Color,
+        depth: usize,
+        max_depth: usize,
+    ) -> bool {
+        if self.present_board().is_some_and(|board| board.side_to_move != color) {
+            return !self.is_in_check(color);
+        }
+
+        if depth >= max_depth {
+            return false;
+        }
+
+        for timeline in &self.timelines {
+            for board in &timeline.boards {
+                if !self.is_latest_board(timeline.id, board.time) || board.side_to_move != color {
+                    continue;
+                }
+
+                for y in 0..8 {
+                    for x in 0..8 {
+                        let from = Position {
+                            timeline_id: timeline.id,
+                            time: board.time,
+                            x,
+                            y,
+                        };
+                        if !self.piece_at(from).is_some_and(|piece| piece.color == color) {
+                            continue;
+                        }
+
+                        for target_timeline in &self.timelines {
+                            for target_board in &target_timeline.boards {
+                                for target_y in 0..8 {
+                                    for target_x in 0..8 {
+                                        let to = Position {
+                                            timeline_id: target_timeline.id,
+                                            time: target_board.time,
+                                            x: target_x,
+                                            y: target_y,
+                                        };
+                                        let Some((piece, move_kind)) =
+                                            self.legal_move_kind(from, to)
+                                        else {
+                                            continue;
+                                        };
+                                        let mut next = self.clone_for_search();
+                                        next.apply_move_unchecked(from, to, piece, move_kind);
+                                        if next.has_legal_turn_completion_at_depth(
+                                            color,
+                                            depth + 1,
+                                            max_depth,
+                                        ) {
+                                            return true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn king_positions(&self, color: Color) -> Vec<Position> {
+        let mut positions = Vec::new();
+        for timeline in &self.timelines {
+            for board in &timeline.boards {
+                if !self.is_latest_board(timeline.id, board.time) {
+                    continue;
+                }
+                for y in 0..8 {
+                    for x in 0..8 {
+                        if board.board[y][x]
+                            == Some(Piece {
+                                color,
+                                piece_type: PieceType::King,
+                            })
+                        {
+                            positions.push(Position {
+                                timeline_id: timeline.id,
+                                time: board.time,
+                                x: x as i32,
+                                y: y as i32,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        positions
+    }
+
+    fn is_square_attacked(&self, target: Position, by_color: Color) -> bool {
+        self.timelines.iter().any(|timeline| {
+            timeline.boards.iter().any(|board| {
+                self.is_latest_board(timeline.id, board.time)
+                    && board.board.iter().enumerate().any(|(y, rank)| {
+                        rank.iter().enumerate().any(|(x, piece)| {
+                            let Some(piece) = piece else {
+                                return false;
+                            };
+                            if piece.color != by_color {
+                                return false;
+                            }
+                            let from = Position {
+                                timeline_id: timeline.id,
+                                time: board.time,
+                                x: x as i32,
+                                y: y as i32,
+                            };
+                            self.attacks_square(*piece, from, target)
+                        })
+                    })
+            })
+        })
+    }
+
+    fn attacks_square(&self, piece: Piece, from: Position, target: Position) -> bool {
+        if !Self::in_bounds(target.x, target.y)
+            || from.timeline_id == target.timeline_id
+                && from.time == target.time
+                && from.x == target.x
+                && from.y == target.y
+        {
+            return false;
+        }
+
+        if (from.timeline_id != target.timeline_id || from.time != target.time)
+            && self
+                .board(target.timeline_id, target.time)
+                .is_some_and(|board| board.side_to_move != piece.color)
+        {
+            return false;
+        }
+
+        let delta = self.movement_delta(from, target);
+        let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
+        let non_zero: Vec<i32> = distances
+            .iter()
+            .copied()
+            .filter(|distance| *distance > 0)
+            .collect();
+
+        match piece.piece_type {
+            PieceType::Pawn => {
+                let forward = if piece.color == Color::White { 1 } else { -1 };
+                let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
+                (from.timeline_id == target.timeline_id
+                    && from.time == target.time
+                    && delta.x.abs() == 1
+                    && delta.y == forward)
+                    || (delta.t.abs() == 1
+                        && delta.l == timeline_forward
+                        && delta.x == 0
+                        && delta.y == 0)
+            }
+            PieceType::Knight => {
+                let mut sorted = distances;
+                sorted.sort_by(|a, b| b.cmp(a));
+                sorted[0] == 2 && sorted[1] == 1 && sorted[2] == 0 && sorted[3] == 0
+            }
+            PieceType::King => non_zero.iter().all(|distance| *distance == 1),
+            PieceType::Rook => non_zero.len() == 1 && self.is_path_clear(piece, from, target),
+            PieceType::Bishop => {
+                non_zero.len() == 2
+                    && non_zero[0] == non_zero[1]
+                    && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Queen => {
+                !non_zero.is_empty()
+                    && non_zero.iter().all(|distance| *distance == non_zero[0])
+                    && self.is_path_clear(piece, from, target)
+            }
+        }
+    }
+
+    fn move_kind_for(&self, piece: Piece, from: Position, to: Position) -> Option<MoveKind> {
+        let delta = self.movement_delta(from, to);
+        let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
+        let non_zero: Vec<i32> = distances
+            .iter()
+            .copied()
+            .filter(|distance| *distance > 0)
+            .collect();
+
+        if non_zero.is_empty() {
+            return None;
+        }
+
+        if piece.piece_type == PieceType::King {
+            if let Some(castle) = self.castle_kind(piece, from, to, delta) {
+                return Some(castle);
+            }
+        }
+
+        let legal = match piece.piece_type {
+            PieceType::Rook => non_zero.len() == 1 && self.is_path_clear(piece, from, to),
+            PieceType::Bishop => {
+                non_zero.len() == 2
+                    && non_zero[0] == non_zero[1]
+                    && self.is_path_clear(piece, from, to)
+            }
+            PieceType::Queen => {
+                non_zero.iter().all(|distance| *distance == non_zero[0])
+                    && self.is_path_clear(piece, from, to)
+            }
+            PieceType::King => non_zero.iter().all(|distance| *distance == 1),
+            PieceType::Knight => {
+                let mut sorted = distances;
+                sorted.sort_by(|a, b| b.cmp(a));
+                sorted[0] == 2 && sorted[1] == 1 && sorted[2] == 0 && sorted[3] == 0
+            }
+            PieceType::Pawn => return self.pawn_move_kind(piece, from, to, delta),
+        };
+
+        if !legal {
+            return None;
+        }
+
+        if from.timeline_id == to.timeline_id && from.time == to.time {
+            Some(MoveKind::Standard)
+        } else {
+            Some(MoveKind::Branch)
+        }
+    }
+
+    fn pawn_move_kind(
+        &self,
+        piece: Piece,
+        from: Position,
+        to: Position,
+        delta: Delta,
+    ) -> Option<MoveKind> {
+        let destination = self.piece_at(to);
+        let forward = if piece.color == Color::White { 1 } else { -1 };
+        let has_moved = if piece.color == Color::White {
+            from.y != 1
+        } else {
+            from.y != 6
+        };
+        let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
+
+        if same_board && delta.x == 0 && delta.y == forward && destination.is_none() {
+            return Some(MoveKind::Standard);
+        }
+
+        if same_board
+            && delta.x == 0
+            && delta.y == forward * 2
+            && !has_moved
+            && destination.is_none()
+        {
+            return self.board(from.timeline_id, from.time).and_then(|board| {
+                board.board[(from.y + forward) as usize][from.x as usize]
+                    .is_none()
+                    .then_some(MoveKind::Standard)
+            });
+        }
+
+        if same_board
+            && delta.x.abs() == 1
+            && delta.y == forward
+            && destination.is_some_and(|target| target.color != piece.color)
+        {
+            return Some(MoveKind::Standard);
+        }
+
+        let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
+        if !same_board
+            && delta.x == 0
+            && delta.y == 0
+            && delta.t == 0
+            && (delta.l == timeline_forward || delta.l == timeline_forward * 2 && !has_moved)
+            && destination.is_none()
+            && self.is_path_clear(piece, from, to)
+        {
+            return Some(MoveKind::Branch);
+        }
+
+        if same_board
+            && delta.x.abs() == 1
+            && delta.y == forward
+            && destination.is_none()
+            && self
+                .board(from.timeline_id, from.time)
+                .and_then(|board| board.en_passant)
+                .is_some_and(|target| target.x == to.x && target.y == to.y)
+        {
+            let target = self
+                .board(from.timeline_id, from.time)
+                .and_then(|board| board.en_passant)
+                .expect("checked en passant target");
+            return Some(MoveKind::EnPassant {
+                captured_x: target.captured_x,
+                captured_y: target.captured_y,
+            });
+        }
+
+        (delta.t.abs() == 1
+            && delta.l == timeline_forward
+            && delta.x == 0
+            && delta.y == 0
+            && destination.is_some_and(|target| target.color != piece.color))
+        .then_some(MoveKind::Branch)
+    }
+
+    fn castle_kind(
+        &self,
+        piece: Piece,
+        from: Position,
+        to: Position,
+        delta: Delta,
+    ) -> Option<MoveKind> {
+        if from.timeline_id != to.timeline_id
+            || from.time != to.time
+            || delta.y != 0
+            || delta.t != 0
+            || delta.l != 0
+            || delta.x.abs() != 2
+        {
+            return None;
+        }
+
+        let board = self.board(from.timeline_id, from.time)?;
+        let (home_y, kingside, queenside) = match piece.color {
+            Color::White => (
+                0,
+                board.castling.white_kingside,
+                board.castling.white_queenside,
+            ),
+            Color::Black => (
+                7,
+                board.castling.black_kingside,
+                board.castling.black_queenside,
+            ),
+        };
+        if from.x != 4 || from.y != home_y || to.y != home_y || self.piece_at(to).is_some() {
+            return None;
+        }
+
+        let (rook_from_x, rook_to_x, clear_files, right) = if delta.x == 2 {
+            (7, 5, [5, 6, -1], kingside)
+        } else {
+            (0, 3, [1, 2, 3], queenside)
+        };
+        if !right {
+            return None;
+        }
+        if board.board[home_y as usize][rook_from_x as usize]
+            != Some(Piece {
+                color: piece.color,
+                piece_type: PieceType::Rook,
+            })
+        {
+            return None;
+        }
+        if clear_files
+            .iter()
+            .filter(|file| **file >= 0)
+            .any(|file| board.board[home_y as usize][*file as usize].is_some())
+        {
+            return None;
+        }
+
+        Some(MoveKind::Castle {
+            rook_from_x,
+            rook_to_x,
+        })
+    }
+
+    fn is_path_clear(&self, piece: Piece, from: Position, to: Position) -> bool {
+        let delta = self.movement_delta(from, to);
+        let raw_delta = self.axis_delta(from, to);
+        let distance = delta
+            .x
+            .abs()
+            .max(delta.y.abs())
+            .max(delta.t.abs())
+            .max(delta.l.abs());
+        let step_x = delta.x.signum();
+        let step_y = delta.y.signum();
+        let step_t = if distance == 0 {
+            0
+        } else {
+            raw_delta.t / distance
+        };
+        let step_l = delta.l.signum();
+        let from_row = self
+            .timeline(from.timeline_id)
+            .map_or(0, |timeline| timeline.row);
+
+        for i in 1..distance {
+            let Some(timeline) = self
+                .timelines
+                .iter()
+                .find(|timeline| timeline.row == from_row + step_l * i)
+            else {
+                return false;
+            };
+            let Some(board) = self.board(timeline.id, from.time + step_t * i) else {
+                return false;
+            };
+            if step_t != 0 && board.side_to_move != piece.color {
+                continue;
+            }
+            let x = from.x + step_x * i;
+            let y = from.y + step_y * i;
+
+            if !Self::in_bounds(x, y) || board.board[y as usize][x as usize].is_some() {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn axis_delta(&self, from: Position, to: Position) -> Delta {
+        let from_row = self
+            .timeline(from.timeline_id)
+            .map_or(0, |timeline| timeline.row);
+        let to_row = self
+            .timeline(to.timeline_id)
+            .map_or(0, |timeline| timeline.row);
+
+        Delta {
+            x: to.x - from.x,
+            y: to.y - from.y,
+            t: to.time - from.time,
+            l: to_row - from_row,
+        }
+    }
+
+    fn movement_delta(&self, from: Position, to: Position) -> Delta {
+        let mut delta = self.axis_delta(from, to);
+        if (from.timeline_id != to.timeline_id || from.time != to.time) && delta.t % 2 == 0 {
+            delta.t /= 2;
+        }
+        delta
+    }
+}
