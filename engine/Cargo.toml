@@ -1,0 +1,8 @@
+[package]
+name = "chronofish-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Rust/WASM engine core for Chronofish"
+
+[lib]
+crate-type = ["cdylib", "rlib"]

@@ -1,0 +1,5 @@
+# Ignore build artifacts and temporary files
+/target
+
+# Ignore hidden files and directories
+.*
