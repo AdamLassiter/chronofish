@@ -27,10 +27,52 @@ function boardStatus({ game, presentGame, timeline, board, currentPresentTime })
   return board.time === committedLatestTime ? "Latest" : "Past";
 }
 
-function renderSquare({ position, board, selected, legalTargets, onSquareClick }) {
+function highlightKey(position) {
+  return `${position.timelineId}:${position.time}:${position.x}:${position.y}`;
+}
+
+function addHighlight(highlights, position, type) {
+  const key = highlightKey(position);
+  const existing = highlights.get(key) ?? new Set();
+  existing.add(type);
+  highlights.set(key, existing);
+}
+
+function movementHighlights(game) {
+  const highlights = new Map();
+
+  for (const timeline of game.timelines) {
+    for (const board of timeline.boards) {
+      const origin = board.origin;
+      if (!origin) {
+        continue;
+      }
+
+      addHighlight(highlights, origin.from, "departed");
+
+      if (origin.type === "branch") {
+        addHighlight(highlights, origin.to, "branch-target");
+      }
+
+      if (origin.type !== "source-advance") {
+        addHighlight(highlights, {
+          timelineId: timeline.id,
+          time: board.time,
+          x: origin.to.x,
+          y: origin.to.y
+        }, "arrived");
+      }
+    }
+  }
+
+  return highlights;
+}
+
+function renderSquare({ position, board, selected, legalTargets, highlights, onSquareClick }) {
   const square = document.createElement("button");
   const piece = board.board[position.y][position.x];
   const target = legalTargets.find((candidate) => samePosition(candidate, position));
+  const squareHighlights = highlights.get(highlightKey(position));
 
   square.type = "button";
   square.className = "square";
@@ -51,11 +93,23 @@ function renderSquare({ position, board, selected, legalTargets, onSquareClick }
     square.classList.add("is-target");
   }
 
+  if (squareHighlights?.has("departed")) {
+    square.classList.add("was-departure");
+  }
+
+  if (squareHighlights?.has("arrived")) {
+    square.classList.add("was-arrival");
+  }
+
+  if (squareHighlights?.has("branch-target")) {
+    square.classList.add("was-branch-target");
+  }
+
   square.addEventListener("click", () => onSquareClick(position));
   return square;
 }
 
-function renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, onSquareClick }) {
+function renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, highlights, onSquareClick }) {
   const boardEl = document.createElement("article");
   const latest = isLatestBoard(game, timeline.id, board.time);
   const status = boardStatus({ game, presentGame, timeline, board, currentPresentTime });
@@ -74,6 +128,7 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
         board,
         selected,
         legalTargets,
+        highlights,
         onSquareClick
       }));
     }
@@ -93,7 +148,7 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
   return boardEl;
 }
 
-function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, onSquareClick }) {
+function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, highlights, onSquareClick }) {
   const row = document.createElement("div");
   row.className = "timeline-row";
   row.dataset.owner = timeline.owner;
@@ -112,7 +167,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   row.append(marker);
 
   for (const board of sortedBoards(timeline)) {
-    const boardEl = renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, onSquareClick });
+    const boardEl = renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, highlights, onSquareClick });
     boardEl.style.gridColumn = String(board.time + 2);
     row.append(boardEl);
   }
@@ -125,6 +180,7 @@ export function renderGame({ game, presentGame, selected, legalTargets, multipla
   // incremental reconciliation.
   const maxTime = Math.max(0, ...game.timelines.flatMap((timeline) => timeline.boards.map((board) => board.time)));
   const currentPresentTime = presentTime(presentGame);
+  const highlights = movementHighlights(game);
   elements.timelineGrid.replaceChildren(
     ...sortedTimelines(game).map((timeline) => renderTimeline({
       game,
@@ -134,6 +190,7 @@ export function renderGame({ game, presentGame, selected, legalTargets, multipla
       currentPresentTime,
       selected,
       legalTargets,
+      highlights,
       onSquareClick
     }))
   );

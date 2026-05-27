@@ -49,6 +49,24 @@ struct EvalWeights {
     branch_penalty: i32,
     advancement: i32,
     centrality: i32,
+    defended_piece: i32,
+    attacked_piece: i32,
+    hanging_piece: i32,
+    royal_threat: i32,
+    temporal_threat: i32,
+    pincer_threat: i32,
+    timeline_pincer: i32,
+    historical_pincer: i32,
+    frontier_tempo: i32,
+    present_anchor: i32,
+}
+
+#[derive(Default)]
+struct AttackSummary {
+    count: i32,
+    temporal_count: i32,
+    timeline_count: i32,
+    time_count: i32,
 }
 
 struct SearchContext {
@@ -388,6 +406,8 @@ impl Game {
             score += weights.check_penalty;
         }
         score + self.present_progress(color) * weights.present_progress
+            + self.strategic_balance(color, weights)
+            + self.timeline_coordination(color, weights)
             + if weights.mobility == 0 {
                 0
             } else {
@@ -443,6 +463,125 @@ impl Game {
             - opponent
                 .legal_single_moves(&EvalWeights::default_tuned())
                 .len() as i32
+    }
+
+    fn strategic_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+        let mut score = 0;
+        for (position, piece) in self.latest_pieces() {
+            let attackers = self.attack_summary(position, piece.color.opposite());
+            let defenders = self.attack_summary(position, piece.color);
+            let value = weights.piece_value(piece.piece_type);
+            let mut piece_score = 0;
+
+            if defenders.count > 0 {
+                piece_score += weights.defended_piece;
+            }
+            if attackers.count > 0 {
+                piece_score -= weights.attacked_piece + value / 32;
+            }
+            if attackers.count > 0 && defenders.count == 0 {
+                piece_score -= weights.hanging_piece + value / 16;
+            }
+            if attackers.count > 0 && Self::is_royal_piece(piece.piece_type) {
+                piece_score -= weights.royal_threat;
+            }
+            if attackers.temporal_count > 0 {
+                piece_score -= weights.temporal_threat * attackers.temporal_count;
+            }
+            if attackers.count >= 2 {
+                piece_score -= weights.pincer_threat * (attackers.count - 1);
+            }
+            if attackers.timeline_count >= 2 {
+                piece_score -= weights.timeline_pincer * (attackers.timeline_count - 1);
+            }
+            if attackers.time_count >= 2 {
+                piece_score -= weights.historical_pincer * (attackers.time_count - 1);
+            }
+
+            score += if piece.color == color { piece_score } else { -piece_score };
+        }
+        score
+    }
+
+    fn timeline_coordination(&self, color: Color, weights: &EvalWeights) -> i32 {
+        let Some(present) = self.present_board() else {
+            return 0;
+        };
+        let mut score = 0;
+        for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
+            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
+                continue;
+            };
+            let side = if board.side_to_move == color { 1 } else { -1 };
+            score += side * weights.frontier_tempo;
+            if board.time == present.time {
+                score += side * weights.present_anchor;
+            }
+        }
+        score
+    }
+
+    fn latest_pieces(&self) -> Vec<(Position, Piece)> {
+        let mut pieces = Vec::new();
+        for timeline in &self.timelines {
+            for board in &timeline.boards {
+                if !self.is_latest_board(timeline.id, board.time) {
+                    continue;
+                }
+                for y in 0..8 {
+                    for x in 0..8 {
+                        if let Some(piece) = board.board[y][x] {
+                            pieces.push((
+                                Position {
+                                    timeline_id: timeline.id,
+                                    time: board.time,
+                                    x: x as i32,
+                                    y: y as i32,
+                                },
+                                piece,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        pieces
+    }
+
+    fn attack_summary(&self, target: Position, by_color: Color) -> AttackSummary {
+        let mut summary = AttackSummary::default();
+        let mut timelines = Vec::new();
+        let mut times = Vec::new();
+
+        for (from, piece) in self.latest_pieces() {
+            if piece.color != by_color
+                || from.timeline_id == target.timeline_id
+                    && from.time == target.time
+                    && from.x == target.x
+                    && from.y == target.y
+                || !self.attacks_square(piece, from, target)
+            {
+                continue;
+            }
+
+            summary.count += 1;
+            if from.timeline_id != target.timeline_id || from.time != target.time {
+                summary.temporal_count += 1;
+            }
+            if !timelines.contains(&from.timeline_id) {
+                timelines.push(from.timeline_id);
+            }
+            if !times.contains(&from.time) {
+                times.push(from.time);
+            }
+        }
+
+        summary.timeline_count = timelines.len() as i32;
+        summary.time_count = times.len() as i32;
+        summary
     }
 
     fn turn_plan_cmp(left: &TurnPlan, right: &TurnPlan) -> std::cmp::Ordering {

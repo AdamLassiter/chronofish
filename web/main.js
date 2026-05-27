@@ -15,12 +15,16 @@ let submittedTurns = [];
 let stagedMoves = [];
 let aiWorker = null;
 let aiRequestId = 0;
+let phase = "lobby";
+let assignments = {
+  white: localStorage.getItem("chronofish.whitePlayer") ?? "local",
+  black: localStorage.getItem("chronofish.blackPlayer") ?? "local"
+};
 let bot = {
-  // Bot choices are browser-local. In multiplayer, the bot uses its own token so
-  // it follows the same room seating rules as a human player.
-  color: localStorage.getItem("chronofish.botColor") ?? "none",
+  // Bot sides are chosen in the lobby. In multiplayer, a bot explicitly occupies
+  // its side with its own token so it follows the same room seating rules.
   thinking: false,
-  token: null
+  tokens: {}
 };
 let multiplayer = {
   // Room id lives in the URL so sharing the address reconstructs the room.
@@ -30,9 +34,12 @@ let multiplayer = {
   events: null,
   connected: false
 };
+let currentRoom = null;
 
 localStorage.setItem("chronofish.playerToken", multiplayer.token);
 elements.roomInput.value = multiplayer.roomId;
+elements.whitePlayerSelect.value = assignments.white;
+elements.blackPlayerSelect.value = assignments.black;
 
 function makeRoomId() {
   return Math.random().toString(36).slice(2, 8);
@@ -49,9 +56,15 @@ function normalizeRoomId(value) {
 }
 
 function canControlTurn() {
-  // Local control is allowed only when WASM is ready, the bot is not playing this
-  // side, and multiplayer seating permits this browser to act.
-  return engine && bot.color !== game.turn && (!multiplayer.connected || multiplayer.color === game.turn);
+  if (!engine || phase !== "game" || assignments[game.turn] === "bot") {
+    return false;
+  }
+
+  if (!multiplayer.connected) {
+    return assignments[game.turn] === "local";
+  }
+
+  return assignments[game.turn] === "human" && multiplayer.color === game.turn;
 }
 
 function setMultiplayerStatus(text) {
@@ -66,6 +79,46 @@ function updateShareLink() {
 
   const link = roomUrl(multiplayer.roomId);
   elements.shareLink.innerHTML = `<a href="${link.href}">Share room</a>`;
+}
+
+function normalizeAssignment(value, fallback = "local") {
+  return ["local", "human", "bot", "open"].includes(value) ? value : fallback;
+}
+
+function readAssignments() {
+  return {
+    white: normalizeAssignment(elements.whitePlayerSelect.value, "local"),
+    black: normalizeAssignment(elements.blackPlayerSelect.value, "local")
+  };
+}
+
+function writeAssignments(nextAssignments) {
+  assignments = {
+    white: normalizeAssignment(nextAssignments?.white, "local"),
+    black: normalizeAssignment(nextAssignments?.black, "local")
+  };
+  elements.whitePlayerSelect.value = assignments.white;
+  elements.blackPlayerSelect.value = assignments.black;
+  localStorage.setItem("chronofish.whitePlayer", assignments.white);
+  localStorage.setItem("chronofish.blackPlayer", assignments.black);
+  updateBotStatus();
+}
+
+function gamePayload(nextPhase = phase) {
+  return {
+    phase: nextPhase,
+    assignments,
+    turns: submittedTurns,
+    snapshot: game
+  };
+}
+
+function lobbyPayload() {
+  return {
+    phase: "lobby",
+    assignments,
+    snapshot: committedGame
+  };
 }
 
 function readWasmString(ptr) {
@@ -130,13 +183,6 @@ function cloneMove(move) {
   };
 }
 
-function networkGame() {
-  return {
-    turns: submittedTurns,
-    snapshot: game
-  };
-}
-
 function botToken(color) {
   const key = `chronofish.botToken.${multiplayer.roomId}.${color}`;
   let token = localStorage.getItem(key);
@@ -145,6 +191,10 @@ function botToken(color) {
     localStorage.setItem(key, token);
   }
   return token;
+}
+
+function botColors() {
+  return ["white", "black"].filter((color) => assignments[color] === "bot");
 }
 
 function ensureAiWorker() {
@@ -163,7 +213,12 @@ function turnSignature() {
 }
 
 function updateBotStatus(text = null) {
-  elements.botStatus.textContent = text ?? (bot.color === "none" ? "Bot idle" : `Bot ${bot.color}`);
+  if (text) {
+    elements.botStatus.textContent = text;
+    return;
+  }
+  const colors = botColors();
+  elements.botStatus.textContent = colors.length ? `Bot ${colors.join(" + ")}` : "Bot idle";
 }
 
 function pieceAt(position) {
@@ -227,9 +282,11 @@ function handleSquareClick(position) {
   }
 
   if (!canControlTurn()) {
-    elements.message.textContent = multiplayer.connected
-      ? `You are ${multiplayer.color}; waiting for ${game.turn}.`
-      : `Select a ${game.turn} piece on a latest board.`;
+    elements.message.textContent = phase !== "game"
+      ? "Start the game from the lobby first."
+      : multiplayer.connected
+        ? `You are ${multiplayer.color}; waiting for ${game.turn}.`
+        : `Waiting for ${game.turn}.`;
     return;
   }
 
@@ -266,6 +323,16 @@ function handleSquareClick(position) {
 }
 
 function render() {
+  const inGame = phase === "game";
+  elements.startGameButton.disabled = !engine || inGame || multiplayer.color === "spectator";
+  elements.joinWhiteButton.disabled = inGame;
+  elements.joinBlackButton.disabled = inGame;
+  elements.whitePlayerSelect.disabled = inGame || multiplayer.color === "spectator";
+  elements.blackPlayerSelect.disabled = inGame || multiplayer.color === "spectator";
+  elements.resetButton.disabled = !inGame;
+  elements.undoMoveButton.disabled = !inGame;
+  elements.submitTurnButton.disabled = !inGame;
+
   // State and IO live here; renderGame only rebuilds the DOM from supplied data.
   renderGame({
     game,
@@ -303,10 +370,18 @@ async function postRoom(action, body) {
 }
 
 function applyRemoteRoom(room, message = "") {
+  currentRoom = room;
   if (bot.thinking) {
     aiRequestId += 1;
     bot.thinking = false;
     updateBotStatus("Bot stale");
+  }
+
+  if (room?.game?.phase) {
+    phase = room.game.phase;
+  }
+  if (room?.game?.assignments) {
+    writeAssignments(room.game.assignments);
   }
 
   if (room?.game?.turns && engine) {
@@ -348,7 +423,7 @@ function connectEvents() {
     }
 
     if (payload.type === "players") {
-      render();
+      applyRemoteRoom(payload.room);
       return;
     }
 
@@ -371,11 +446,20 @@ async function joinRoom(color) {
   multiplayer.roomId = normalizeRoomId(elements.roomInput.value);
   multiplayer.color = color;
   elements.roomInput.value = multiplayer.roomId;
+  if (color === "white" || color === "black") {
+    const nextAssignments = readAssignments();
+    nextAssignments[color] = "human";
+    const other = color === "white" ? "black" : "white";
+    if (nextAssignments[other] === "local") {
+      nextAssignments[other] = "open";
+    }
+    writeAssignments(nextAssignments);
+  }
 
   const payload = await postRoom("join", {
     color,
     token: multiplayer.token,
-    game: networkGame()
+    game: lobbyPayload()
   });
 
   multiplayer.connected = true;
@@ -384,7 +468,6 @@ async function joinRoom(color) {
   window.history.replaceState({}, "", roomUrl(multiplayer.roomId));
   applyRemoteRoom(payload.room, payload.color === "spectator" ? "Spectating room." : `Joined as ${payload.color}.`);
   connectEvents();
-  maybeStartBotTurn();
 }
 
 async function syncState(action, message, credentials = null) {
@@ -397,7 +480,7 @@ async function syncState(action, message, credentials = null) {
     await postRoom(action, {
       token: actor.token,
       color: actor.color,
-      game: networkGame(),
+      game: gamePayload("game"),
       message
     });
   } catch (error) {
@@ -405,42 +488,98 @@ async function syncState(action, message, credentials = null) {
   }
 }
 
-async function joinBot(color) {
+async function syncLobby(message = "Lobby updated.") {
+  if (!multiplayer.connected || multiplayer.color === "spectator") {
+    return;
+  }
+
+  try {
+    await postRoom("state", {
+      token: multiplayer.token,
+      color: multiplayer.color,
+      game: lobbyPayload(),
+      message
+    });
+  } catch (error) {
+    elements.message.textContent = error.message;
+  }
+}
+
+function validateAssignments(nextAssignments) {
+  for (const color of ["white", "black"]) {
+    if (nextAssignments[color] === "open") {
+      throw new Error(`${capitalize(color)} needs a player or bot before starting.`);
+    }
+    if (!multiplayer.connected && nextAssignments[color] === "human") {
+      throw new Error("Join a room before starting with online humans.");
+    }
+    if (multiplayer.connected && nextAssignments[color] === "local") {
+      throw new Error("Use Online human or Bot for room games.");
+    }
+    if (
+      multiplayer.connected &&
+      nextAssignments[color] === "human" &&
+      !currentRoom?.players?.[color]
+    ) {
+      throw new Error(`${capitalize(color)} is set to online human but no player is seated.`);
+    }
+  }
+}
+
+async function startGame() {
   if (!engine) {
     elements.message.textContent = "WASM engine is not loaded yet.";
     return;
   }
 
-  multiplayer.roomId = normalizeRoomId(elements.roomInput.value);
-  elements.roomInput.value = multiplayer.roomId;
-  bot.color = color;
-  bot.token = botToken(color);
-  localStorage.setItem("chronofish.botColor", color);
+  writeAssignments(readAssignments());
+  validateAssignments(assignments);
+  resetEngine();
+  phase = "game";
 
+  if (!multiplayer.connected) {
+    elements.message.textContent = "Local game started.";
+    render();
+    maybeStartBotTurn();
+    return;
+  }
+
+  if (multiplayer.color === "spectator") {
+    throw new Error("Spectators cannot start the game.");
+  }
+
+  for (const color of botColors()) {
+    await seatBot(color);
+  }
+
+  await postRoom("state", {
+    token: multiplayer.token,
+    color: multiplayer.color,
+    game: gamePayload("game"),
+    message: "Game started."
+  });
+  elements.message.textContent = "Game started.";
+  render();
+  maybeStartBotTurn();
+}
+
+async function seatBot(color) {
+  bot.tokens[color] = botToken(color);
   const payload = await postRoom("join", {
     color,
-    token: bot.token,
-    game: networkGame()
+    token: bot.tokens[color],
+    game: lobbyPayload()
   });
 
-  multiplayer.connected = true;
-  if (multiplayer.color === "local") {
-    multiplayer.color = "spectator";
-  }
-  window.history.replaceState({}, "", roomUrl(multiplayer.roomId));
-  applyRemoteRoom(payload.room, `Bot joined as ${payload.color}.`);
-  connectEvents();
-  updateBotStatus();
-  maybeStartBotTurn();
+  applyRemoteRoom(payload.room);
 }
 
 function maybeStartBotTurn() {
   if (
     !engine ||
-    !multiplayer.connected ||
-    bot.color === "none" ||
+    phase !== "game" ||
+    assignments[game.turn] !== "bot" ||
     bot.thinking ||
-    game.turn !== bot.color ||
     stagedMoves.length > 0
   ) {
     updateBotStatus();
@@ -449,7 +588,7 @@ function maybeStartBotTurn() {
 
   const id = ++aiRequestId;
   bot.thinking = true;
-  updateBotStatus(`Bot ${bot.color} thinking`);
+  updateBotStatus(`Bot ${game.turn} thinking`);
   ensureAiWorker().postMessage({
     id,
     turns: submittedTurns.map((turn) => turn.map(cloneMove)),
@@ -471,7 +610,8 @@ function handleAiWorkerMessage(event) {
     return;
   }
 
-  if (bot.color !== game.turn || stagedMoves.length > 0) {
+  const botColor = game.turn;
+  if (assignments[botColor] !== "bot" || stagedMoves.length > 0) {
     updateBotStatus("Bot stale");
     return;
   }
@@ -507,11 +647,11 @@ function handleAiWorkerMessage(event) {
   committedGame = game;
   selected = null;
   legalTargets = [];
-  const message = `Bot ${bot.color} moved. ${engineLastMessage()}`;
+  const message = `Bot ${botColor} moved. ${engineLastMessage()}`;
   elements.message.textContent = message;
-  updateBotStatus(`Bot ${bot.color} moved`);
+  updateBotStatus(`Bot ${botColor} moved`);
   render();
-  syncState("state", message, { color: bot.color, token: bot.token ?? botToken(bot.color) });
+  syncState("state", message, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
 }
 
 async function loadWasmStatus() {
@@ -522,7 +662,7 @@ async function loadWasmStatus() {
     resetEngine();
     elements.wasmStatus.textContent = `Engine v${readWasmString(engine.chronofish_version())}`;
     elements.wasmStatus.dataset.state = "ready";
-    elements.message.textContent = "Select a white piece on a latest board.";
+    elements.message.textContent = "Configure the lobby, then start the game.";
     render();
   } catch (error) {
     console.error(error);
@@ -640,17 +780,19 @@ elements.joinSpectatorButton.addEventListener("click", () => {
   });
 });
 
-elements.botWhiteButton.addEventListener("click", () => {
-  joinBot("white").catch((error) => {
+elements.startGameButton.addEventListener("click", () => {
+  startGame().catch((error) => {
     elements.message.textContent = error.message;
   });
 });
 
-elements.botBlackButton.addEventListener("click", () => {
-  joinBot("black").catch((error) => {
-    elements.message.textContent = error.message;
+for (const select of [elements.whitePlayerSelect, elements.blackPlayerSelect]) {
+  select.addEventListener("change", () => {
+    writeAssignments(readAssignments());
+    render();
+    syncLobby();
   });
-});
+}
 
 loadWasmStatus();
 loadServerStatus();

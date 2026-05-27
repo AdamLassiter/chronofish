@@ -223,6 +223,16 @@ impl EvalWeights {
             branch_penalty: mutate_weight(self.branch_penalty, rng, 10, 0, 300),
             advancement: mutate_weight(self.advancement, rng, 4, 0, 80),
             centrality: mutate_weight(self.centrality, rng, 4, 0, 80),
+            defended_piece: mutate_weight(self.defended_piece, rng, 6, 0, 200),
+            attacked_piece: mutate_weight(self.attacked_piece, rng, 8, 0, 300),
+            hanging_piece: mutate_weight(self.hanging_piece, rng, 10, 0, 400),
+            royal_threat: mutate_weight(self.royal_threat, rng, 30, 0, 1_000),
+            temporal_threat: mutate_weight(self.temporal_threat, rng, 8, 0, 300),
+            pincer_threat: mutate_weight(self.pincer_threat, rng, 8, 0, 300),
+            timeline_pincer: mutate_weight(self.timeline_pincer, rng, 12, 0, 500),
+            historical_pincer: mutate_weight(self.historical_pincer, rng, 10, 0, 500),
+            frontier_tempo: mutate_weight(self.frontier_tempo, rng, 5, -100, 200),
+            present_anchor: mutate_weight(self.present_anchor, rng, 5, -100, 200),
         }
     }
 
@@ -259,12 +269,22 @@ impl EvalWeights {
             branch_penalty: pick!(branch_penalty),
             advancement: pick!(advancement),
             centrality: pick!(centrality),
+            defended_piece: pick!(defended_piece),
+            attacked_piece: pick!(attacked_piece),
+            hanging_piece: pick!(hanging_piece),
+            royal_threat: pick!(royal_threat),
+            temporal_threat: pick!(temporal_threat),
+            pincer_threat: pick!(pincer_threat),
+            timeline_pincer: pick!(timeline_pincer),
+            historical_pincer: pick!(historical_pincer),
+            frontier_tempo: pick!(frontier_tempo),
+            present_anchor: pick!(present_anchor),
         }
     }
 
     fn to_json(self) -> String {
         format!(
-            "{{\"king\":{},\"commonKing\":{},\"queen\":{},\"royalQueen\":{},\"princess\":{},\"rook\":{},\"bishop\":{},\"unicorn\":{},\"dragon\":{},\"knight\":{},\"pawn\":{},\"brawn\":{},\"checkPenalty\":{},\"activeTimeline\":{},\"inactiveTimeline\":{},\"presentProgress\":{},\"mobility\":{},\"branchPenalty\":{},\"advancement\":{},\"centrality\":{}}}",
+            "{{\"king\":{},\"commonKing\":{},\"queen\":{},\"royalQueen\":{},\"princess\":{},\"rook\":{},\"bishop\":{},\"unicorn\":{},\"dragon\":{},\"knight\":{},\"pawn\":{},\"brawn\":{},\"checkPenalty\":{},\"activeTimeline\":{},\"inactiveTimeline\":{},\"presentProgress\":{},\"mobility\":{},\"branchPenalty\":{},\"advancement\":{},\"centrality\":{},\"defendedPiece\":{},\"attackedPiece\":{},\"hangingPiece\":{},\"royalThreat\":{},\"temporalThreat\":{},\"pincerThreat\":{},\"timelinePincer\":{},\"historicalPincer\":{},\"frontierTempo\":{},\"presentAnchor\":{}}}",
             self.king,
             self.common_king,
             self.queen,
@@ -284,7 +304,17 @@ impl EvalWeights {
             self.mobility,
             self.branch_penalty,
             self.advancement,
-            self.centrality
+            self.centrality,
+            self.defended_piece,
+            self.attacked_piece,
+            self.hanging_piece,
+            self.royal_threat,
+            self.temporal_threat,
+            self.pincer_threat,
+            self.timeline_pincer,
+            self.historical_pincer,
+            self.frontier_tempo,
+            self.present_anchor
         )
     }
 
@@ -310,12 +340,22 @@ impl EvalWeights {
             branch_penalty: json_i32(value, "branchPenalty")?,
             advancement: json_i32(value, "advancement")?,
             centrality: json_i32(value, "centrality")?,
+            defended_piece: json_i32(value, "defendedPiece")?,
+            attacked_piece: json_i32(value, "attackedPiece")?,
+            hanging_piece: json_i32(value, "hangingPiece")?,
+            royal_threat: json_i32(value, "royalThreat")?,
+            temporal_threat: json_i32(value, "temporalThreat")?,
+            pincer_threat: json_i32(value, "pincerThreat")?,
+            timeline_pincer: json_i32(value, "timelinePincer")?,
+            historical_pincer: json_i32(value, "historicalPincer")?,
+            frontier_tempo: json_i32(value, "frontierTempo")?,
+            present_anchor: json_i32(value, "presentAnchor")?,
         })
     }
 
     fn to_rust_parameters(self) -> String {
         format!(
-            "Self {{\n    king: {},\n    common_king: {},\n    queen: {},\n    royal_queen: {},\n    princess: {},\n    rook: {},\n    bishop: {},\n    unicorn: {},\n    dragon: {},\n    knight: {},\n    pawn: {},\n    brawn: {},\n    check_penalty: {},\n    active_timeline: {},\n    inactive_timeline: {},\n    present_progress: {},\n    mobility: {},\n    branch_penalty: {},\n    advancement: {},\n    centrality: {},\n}}\n",
+            "Self {{\n    king: {},\n    common_king: {},\n    queen: {},\n    royal_queen: {},\n    princess: {},\n    rook: {},\n    bishop: {},\n    unicorn: {},\n    dragon: {},\n    knight: {},\n    pawn: {},\n    brawn: {},\n    check_penalty: {},\n    active_timeline: {},\n    inactive_timeline: {},\n    present_progress: {},\n    mobility: {},\n    branch_penalty: {},\n    advancement: {},\n    centrality: {},\n    defended_piece: {},\n    attacked_piece: {},\n    hanging_piece: {},\n    royal_threat: {},\n    temporal_threat: {},\n    pincer_threat: {},\n    timeline_pincer: {},\n    historical_pincer: {},\n    frontier_tempo: {},\n    present_anchor: {},\n}}\n",
             self.king,
             self.common_king,
             self.queen,
@@ -335,7 +375,17 @@ impl EvalWeights {
             self.mobility,
             self.branch_penalty,
             self.advancement,
-            self.centrality
+            self.centrality,
+            self.defended_piece,
+            self.attacked_piece,
+            self.hanging_piece,
+            self.royal_threat,
+            self.temporal_threat,
+            self.pincer_threat,
+            self.timeline_pincer,
+            self.historical_pincer,
+            self.frontier_tempo,
+            self.present_anchor
         )
     }
 }

@@ -30,11 +30,28 @@
               Room
               <input id="room-id" type="text" autocomplete="off" spellcheck="false">
             </label>
+            <label>
+              White
+              <select id="white-player">
+                <option value="local">Local</option>
+                <option value="human">Online human</option>
+                <option value="bot">Bot</option>
+                <option value="open">Open</option>
+              </select>
+            </label>
+            <label>
+              Black
+              <select id="black-player">
+                <option value="local">Local</option>
+                <option value="human">Online human</option>
+                <option value="bot">Bot</option>
+                <option value="open">Open</option>
+              </select>
+            </label>
+            <button id="start-game" type="button">Start Game</button>
             <button id="join-white" type="button">Join White</button>
             <button id="join-black" type="button">Join Black</button>
             <button id="join-spectator" type="button">Spectate</button>
-            <button id="bot-white" type="button">Bot White</button>
-            <button id="bot-black" type="button">Bot Black</button>
             <span id="multiplayer-status">Local game</span>
             <span id="bot-status">Bot idle</span>
             <span id="share-link"></span>
@@ -46,6 +63,9 @@
             <span><i class="swatch selected"></i>Selected piece</span>
             <span><i class="swatch target"></i>Legal target</span>
             <span><i class="swatch present-line-swatch"></i>Present line</span>
+            <span><i class="swatch departed"></i>Piece departed</span>
+            <span><i class="swatch arrived"></i>Piece arrived</span>
+            <span><i class="swatch branch-target"></i>Branch target</span>
           </section>
         </div>
 

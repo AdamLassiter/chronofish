@@ -43,6 +43,10 @@ fn public_room(room: &Room) -> PublicRoom {
 
 fn seat_player(room: &mut Room, color: &str, token: &str) -> Result<String, String> {
     // Reusing the same token lets a browser reconnect without losing its seat.
+    if game_started(room) && color != "spectator" && !is_seated(room, color, token) {
+        return Err("game already started; join as spectator".to_string());
+    }
+
     let seat = match color {
         "white" => &mut room.players.white,
         "black" => &mut room.players.black,
@@ -69,6 +73,14 @@ fn is_seated(room: &Room, color: &str, token: &str) -> bool {
 
 fn json_error(status: StatusCode, error: String, room: Option<PublicRoom>) -> Response {
     (status, Json(ErrorBody { error, room })).into_response()
+}
+
+fn game_started(room: &Room) -> bool {
+    room.game
+        .as_ref()
+        .and_then(|game| game.get("phase"))
+        .and_then(Value::as_str)
+        == Some("game")
 }
 
 fn now_millis() -> u128 {

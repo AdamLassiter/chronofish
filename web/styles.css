@@ -176,7 +176,8 @@ button {
   font-weight: 800;
 }
 
-.multiplayer input {
+.multiplayer input,
+.multiplayer select {
   width: 180px;
   min-height: 36px;
   border: 1px solid rgba(255, 255, 255, 0.18);
@@ -239,6 +240,18 @@ button {
 
 .present-line-swatch {
   background: linear-gradient(90deg, transparent 0 37%, #f2d15f 37% 63%, transparent 63% 100%);
+}
+
+.departed {
+  background: #ff6c5c;
+}
+
+.arrived {
+  background: #6cd6ff;
+}
+
+.branch-target {
+  background: #f2d15f;
 }
 
 .multiverse {
@@ -386,6 +399,7 @@ button {
 }
 
 .square {
+  position: relative;
   display: grid;
   place-items: center;
   width: 100%;
@@ -399,6 +413,43 @@ button {
   font-size: 1.62rem;
   line-height: 1;
   cursor: pointer;
+}
+
+.square.was-departure {
+  box-shadow: inset 0 0 0 4px rgba(255, 108, 92, 0.86);
+}
+
+.square.was-arrival {
+  box-shadow: inset 0 0 0 4px rgba(108, 214, 255, 0.88);
+}
+
+.square.was-branch-target {
+  box-shadow: inset 0 0 0 4px rgba(242, 209, 95, 0.92);
+}
+
+.square.was-departure.was-arrival {
+  box-shadow:
+    inset 0 0 0 4px rgba(108, 214, 255, 0.88),
+    inset 0 0 0 8px rgba(255, 108, 92, 0.82);
+}
+
+.square.was-departure.was-branch-target {
+  box-shadow:
+    inset 0 0 0 4px rgba(242, 209, 95, 0.92),
+    inset 0 0 0 8px rgba(255, 108, 92, 0.82);
+}
+
+.square.was-arrival.was-branch-target {
+  box-shadow:
+    inset 0 0 0 4px rgba(242, 209, 95, 0.92),
+    inset 0 0 0 8px rgba(108, 214, 255, 0.82);
+}
+
+.square.was-departure.was-arrival.was-branch-target {
+  box-shadow:
+    inset 0 0 0 3px rgba(242, 209, 95, 0.94),
+    inset 0 0 0 7px rgba(108, 214, 255, 0.84),
+    inset 0 0 0 11px rgba(255, 108, 92, 0.78);
 }
 
 .square[data-light="true"] {
