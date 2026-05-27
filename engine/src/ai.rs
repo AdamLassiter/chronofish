@@ -1,3 +1,6 @@
+// Runtime AI search. Training-only mutation/scoring/promotion code lives in
+// training.rs so wasm gets a deterministic search surface without file or git
+// automation.
 const CHECKMATE_SCORE: i32 = 1_000_000;
 const MAX_TURN_PLANS: usize = 32;
 const MAX_MOVES_PER_NODE: usize = 24;
@@ -49,6 +52,7 @@ struct EvalWeights {
 }
 
 struct SearchContext {
+    // The node budget is shared across iterative-deepening branches.
     weights: EvalWeights,
     root_color: Color,
     max_nodes: usize,
@@ -78,6 +82,8 @@ impl Game {
             status: "noLegalTurn",
         };
 
+        // Iterative deepening preserves a usable shallower answer if the node
+        // limit is hit before the requested depth completes.
         for current_depth in 1..=depth {
             let Some((plan, score)) = self.search_root(current_depth, &mut context) else {
                 break;
@@ -111,6 +117,8 @@ impl Game {
             let score = plan
                 .game
                 .alpha_beta(depth - 1, alpha, beta, context.root_color, context);
+            // Deterministic tie-breaking matters for repeatable self-play and
+            // stable worker output in the frontend.
             let replace = best.as_ref().is_none_or(|(current, current_score)| {
                 score > *current_score
                     || score == *current_score && Self::turn_plan_cmp(&plan, current).is_lt()
@@ -132,6 +140,7 @@ impl Game {
         maximizing_color: Color,
         context: &mut SearchContext,
     ) -> i32 {
+        // Children are whole submitted turn plans, not individual piece moves.
         context.nodes += 1;
         if context.nodes >= context.max_nodes || depth <= 0 {
             return self.evaluate(maximizing_color, &context.weights);
@@ -173,6 +182,8 @@ impl Game {
 
     fn legal_turn_plans(&self, weights: &EvalWeights) -> Vec<TurnPlan> {
         let color = self.turn;
+        // A side may need to move on several active timelines before the present
+        // line flips. Cap that expansion to keep browser AI responsive.
         let max_depth = (self
             .timelines
             .iter()
@@ -204,6 +215,8 @@ impl Game {
             return;
         }
 
+        // Once the present line belongs to the opponent, this staged prefix is a
+        // complete legal turn.
         if !prefix.is_empty() && self.present_board().is_some_and(|board| board.side_to_move != color)
         {
             let mut submitted = self.clone_for_search();
@@ -275,6 +288,8 @@ impl Game {
             }
         }
 
+        // Order likely tactical/progress moves first to improve alpha-beta
+        // pruning. The sort does not change legality.
         moves.sort_by(|left, right| {
             self.move_order_score(right, weights)
                 .cmp(&self.move_order_score(left, weights))
@@ -301,6 +316,8 @@ impl Game {
     }
 
     fn evaluate(&self, color: Color, weights: &EvalWeights) -> i32 {
+        // Only latest boards contain live material. Historical boards are context
+        // for time-travel legality, not extra material to score.
         let mut score = 0;
         for timeline in &self.timelines {
             let active = self.is_active_timeline(timeline.id);
@@ -347,6 +364,8 @@ impl Game {
     }
 
     fn submit_turn_for_search(&mut self) -> bool {
+        // Search mirrors user submission but returns a bool rather than writing a
+        // user-facing status message.
         let Some(present_side) = self.present_board().map(|board| board.side_to_move) else {
             return false;
         };
@@ -378,6 +397,8 @@ impl Game {
             .filter_map(|timeline| self.latest_time(timeline.id))
             .sum();
         let factor = if present.side_to_move == color { 1 } else { -1 };
+        // Reward advancing active timelines while this color controls the
+        // present line; penalize the same advance when it hands tempo away.
         factor * (latest_sum - present.time)
     }
 
@@ -432,28 +453,9 @@ impl AiSearchResult {
 
 impl EvalWeights {
     fn default_tuned() -> Self {
-        Self {
-            king: 20_000,
-            common_king: 200,
-            queen: 1_108,
-            royal_queen: 20_500,
-            princess: 894,
-            rook: 508,
-            bishop: 353,
-            unicorn: 486,
-            dragon: 432,
-            knight: 430,
-            pawn: 71,
-            brawn: 143,
-            check_penalty: 467,
-            active_timeline: 53,
-            inactive_timeline: -42,
-            present_progress: 22,
-            mobility: 0,
-            branch_penalty: 6,
-            advancement: 1,
-            centrality: 8,
-        }
+        // Committed training data lives in a dedicated include target so the
+        // trainer never edits this type definition.
+        include!("ai_parameters.rs")
     }
 
     fn piece_value(self, piece_type: PieceType) -> i32 {

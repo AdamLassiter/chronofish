@@ -3,6 +3,8 @@ async fn static_file(
     method: Method,
     uri: axum::http::Uri,
 ) -> Response {
+    // Minimal static server for development: GET/HEAD only, no directory
+    // listings, and every resolved path must stay under web/ or be the built wasm.
     if method != Method::GET && method != Method::HEAD {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -49,6 +51,8 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
     };
 
     if requested == Path::new("chronofish_engine.wasm") {
+        // The frontend imports a stable filename; Cargo writes the actual file in
+        // target/wasm32-unknown-unknown/{debug,release}.
         return wasm_path(root);
     }
 
@@ -71,6 +75,7 @@ fn wasm_path(root: &Path) -> Option<PathBuf> {
 }
 
 fn is_safe_existing_path(root: &Path, path: &Path) -> bool {
+    // Canonicalizing both sides prevents "../" and symlink escapes from web/.
     let Ok(root) = root.canonicalize() else {
         return false;
     };
@@ -82,6 +87,7 @@ fn is_safe_existing_path(root: &Path, path: &Path) -> bool {
 }
 
 fn percent_decode_path(path: &str) -> Option<String> {
+    // Decode browser path escapes and reject malformed percent sequences.
     let mut decoded = String::with_capacity(path.len());
     let mut bytes = path.bytes();
 

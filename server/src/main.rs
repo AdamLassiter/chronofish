@@ -1,3 +1,5 @@
+// The server is deliberately thin: it serves the static frontend/WASM artifact
+// and stores ephemeral multiplayer room snapshots for browser synchronization.
 use std::{
     collections::HashMap,
     convert::Infallible,

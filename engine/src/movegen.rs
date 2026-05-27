@@ -1,4 +1,6 @@
 impl Game {
+    // Check is evaluated over the latest board of every timeline because royal
+    // pieces may exist on multiple active branch fronts.
     fn is_in_check(&self, color: Color) -> bool {
         let royal_pieces = self.royal_piece_positions(color);
         royal_pieces
@@ -17,6 +19,8 @@ impl Game {
     }
 
     fn has_legal_turn_completion(&self, color: Color) -> bool {
+        // Escaping check may require a whole-turn sequence, not just one move, so
+        // mate search follows staged moves until the present line changes color.
         let max_depth = self
             .timelines
             .iter()
@@ -156,6 +160,8 @@ impl Game {
             return false;
         }
 
+        // Cross-time attacks use the same constraint as moves: the target board
+        // must be one where the attacking color was to play.
         if (from.timeline_id != target.timeline_id || from.time != target.time)
             && self
                 .board(target.timeline_id, target.time)
@@ -194,6 +200,8 @@ impl Game {
             }
         }
 
+        // Pawns and brawns are asymmetric, so they produce MoveKind directly
+        // instead of going through the generic attack-shape matcher.
         let legal = match piece.piece_type {
             PieceType::Pawn => return self.pawn_move_kind(piece, from, to, delta),
             PieceType::Brawn => return self.brawn_move_kind(piece, from, to, delta),
@@ -227,10 +235,13 @@ impl Game {
         };
         let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
 
+        // Orthodox forward movement and captures are same-board only.
         if same_board && delta.x == 0 && delta.y == forward && destination.is_none() {
             return Some(MoveKind::Standard);
         }
 
+        // En-passant reads a target stored on the current snapshot. Any later
+        // snapshot clears it, giving the required one-turn window.
         if same_board
             && delta.x == 0
             && delta.y == forward * 2
@@ -283,6 +294,8 @@ impl Game {
             });
         }
 
+        // Pawns can also capture through one time step and one timeline step in
+        // their forward timeline direction.
         (delta.t.abs() == 1
             && delta.l == timeline_forward
             && delta.x == 0
@@ -300,6 +313,8 @@ impl Game {
     ) -> Option<MoveKind> {
         let destination = self.piece_at(to);
 
+        // Brawns inherit pawn non-captures, but capture diagonally across two or
+        // more changed axes in the four-dimensional movement space.
         if destination.is_some_and(|target| target.color != piece.color)
             && Self::is_brawn_capture(piece, delta)
         {
@@ -322,6 +337,8 @@ impl Game {
         distances: [i32; 4],
         non_zero: &[i32],
     ) -> bool {
+        // Sliding variant pieces are described by how many axes change at the
+        // same distance: rook=1, bishop=2, unicorn=3, dragon=4.
         match piece.piece_type {
             PieceType::Pawn => Self::is_pawn_capture(piece, delta),
             PieceType::Brawn => Self::is_brawn_capture(piece, delta),
@@ -421,6 +438,8 @@ impl Game {
         to: Position,
         delta: Delta,
     ) -> Option<MoveKind> {
+        // Castling remains an orthodox same-board move; cross-time castling is
+        // not legal. Rights already encode whether the king/rook moved earlier.
         if from.timeline_id != to.timeline_id
             || from.time != to.time
             || delta.y != 0
@@ -479,6 +498,8 @@ impl Game {
     }
 
     fn is_path_clear(&self, piece: Piece, from: Position, to: Position) -> bool {
+        // Path walking follows timeline rows rather than ids. Ids encode
+        // ownership/notation; rows encode geometry.
         let delta = self.movement_delta(from, to);
         let raw_delta = self.axis_delta(from, to);
         let distance = delta
@@ -510,6 +531,8 @@ impl Game {
             let Some(board) = self.board(timeline.id, from.time + step_t * i) else {
                 return false;
             };
+            // Passing through time only considers boards where this color was to
+            // play; opponent-turn boards are not valid waypoints or blockers.
             if step_t != 0 && board.side_to_move != piece.color {
                 continue;
             }
@@ -542,6 +565,8 @@ impl Game {
 
     fn movement_delta(&self, from: Position, to: Position) -> Delta {
         let mut delta = self.axis_delta(from, to);
+        // Cross-board time movement advances every other board because legal
+        // destinations are restricted to boards where the mover was to play.
         if (from.timeline_id != to.timeline_id || from.time != to.time) && delta.t % 2 == 0 {
             delta.t /= 2;
         }

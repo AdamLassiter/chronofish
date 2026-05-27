@@ -1,3 +1,5 @@
+// Centralized DOM lookups keep main.js focused on engine/network state and make
+// the required index.html ids explicit.
 export const elements = {
   timelineGrid: document.querySelector("#timeline-grid"),
   message: document.querySelector("#message"),

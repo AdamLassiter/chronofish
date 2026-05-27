@@ -9,6 +9,7 @@
   <body>
     <main class="app">
       <section class="hud" id="hud">
+        <!-- The compact row remains visible when the larger HUD body collapses. -->
         <div class="hud-compact">
           <strong>Chronofish</strong>
           <span id="wasm-status">Loading WASM</span>
@@ -48,6 +49,8 @@
           </section>
         </div>
 
+        <!-- Core turn controls sit outside hud-panel so CSS can keep them visible
+             when the panel is collapsed. -->
         <section class="controls" aria-label="Game controls">
           <button id="reset-game" type="button">Reset</button>
           <button id="undo-move" type="button">Undo</button>
@@ -56,6 +59,7 @@
       </section>
 
       <section class="multiverse" aria-label="5D chess multiverse">
+        <!-- JavaScript renders timeline rows and board snapshots into this grid. -->
         <div id="timeline-grid" class="timeline-grid"></div>
       </section>
     </main>

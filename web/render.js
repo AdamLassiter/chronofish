@@ -9,6 +9,8 @@ import {
 } from "./board.js";
 
 function boardStatus({ game, presentGame, timeline, board, currentPresentTime }) {
+  // Status uses the committed snapshot so staged moves do not relabel boards as
+  // past/future before the player submits the turn.
   if (!isActiveTimeline(game, timeline)) {
     return "Inactive";
   }
@@ -36,6 +38,7 @@ function renderSquare({ position, board, selected, legalTargets, onSquareClick }
   square.ariaLabel = `${FILES[position.x]}${position.y + 1}`;
 
   if (piece) {
+    // Pieces are text glyphs; CSS handles color-specific shadow/glow contrast.
     square.textContent = PIECES[piece.color][piece.type];
     square.dataset.pieceColor = piece.color;
   }
@@ -77,6 +80,8 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
   }
 
   const footer = document.createElement("footer");
+  // Footer carries all board metadata after the old board header was removed to
+  // save vertical space.
   footer.className = "board-footer";
   footer.innerHTML = `
     <span>${status}</span>
@@ -101,6 +106,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   row.append(lane);
 
   const marker = document.createElement("div");
+  // The marker follows committed present time, not speculative staged moves.
   marker.className = "present-line";
   marker.style.gridColumn = String(currentPresentTime + 2);
   row.append(marker);
@@ -115,6 +121,8 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
 }
 
 export function renderGame({ game, presentGame, selected, legalTargets, multiplayer, elements, onSquareClick, setMultiplayerStatus }) {
+  // The timeline grid is small enough that replacing DOM children is clearer than
+  // incremental reconciliation.
   const maxTime = Math.max(0, ...game.timelines.flatMap((timeline) => timeline.boards.map((board) => board.time)));
   const currentPresentTime = presentTime(presentGame);
   elements.timelineGrid.replaceChildren(

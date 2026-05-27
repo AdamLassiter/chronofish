@@ -27,6 +27,7 @@ button {
 }
 
 .hud {
+  /* Sticky HUD keeps room controls available while scrolling wide timelines. */
   position: sticky;
   top: 0;
   z-index: 10;
@@ -84,6 +85,7 @@ button {
 }
 
 .hud[data-collapsed="true"] .controls {
+  /* Reset/Undo/Submit remain reachable when the rest of the HUD is collapsed. */
   position: fixed;
   top: 8px;
   left: 50%;
@@ -253,6 +255,8 @@ button {
 
 .timeline-row {
   --board-width: 282px;
+  /* One fixed-width column per time keeps boards vertically aligned across
+     parallel timelines. */
   display: grid;
   grid-template-columns: 86px repeat(var(--time-columns), var(--board-width));
   align-items: center;
@@ -277,6 +281,7 @@ button {
 }
 
 .timeline-label {
+  /* Sticky labels preserve timeline identity while horizontally scrolling. */
   position: sticky;
   left: 0;
   z-index: 2;
@@ -317,6 +322,8 @@ button {
 }
 
 .present-line {
+  /* The committed present marker is drawn independently from boards so staged
+     moves cannot visually move it early. */
   z-index: 4;
   justify-self: center;
   align-self: stretch;
@@ -329,6 +336,7 @@ button {
 }
 
 .board-footer {
+  /* Three columns: status, side to move, and T/L notation. */
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
@@ -368,6 +376,7 @@ button {
 }
 
 .chessboard {
+  /* Fixed square grid prevents footer text or piece glyphs from resizing boards. */
   display: grid;
   grid-template-columns: repeat(8, 1fr);
   grid-template-rows: repeat(8, 1fr);
@@ -401,6 +410,7 @@ button {
 }
 
 .square[data-piece-color="black"] {
+  /* Light glow keeps black glyphs visible on the darker muted green squares. */
   color: #161719;
   text-shadow:
     0 1px 0 rgba(255, 255, 255, 0.55),
@@ -408,6 +418,7 @@ button {
 }
 
 .square[data-piece-color="white"] {
+  /* Dark shadow keeps white glyphs readable on light squares. */
   color: #f9f6ec;
   text-shadow:
     0 1px 2px rgba(0, 0, 0, 0.85),

@@ -23,6 +23,8 @@ async fn room_events(
         (public_room(room), room.events.subscribe())
     };
 
+    // Emit one initial sync event before live updates so clients can render the
+    // current room state without racing a separate GET request.
     let initial: Vec<Result<Event, Infallible>> = vec![Ok(Event::default()
         .json_data(ServerEvent::Sync { room: initial })
         .expect("server event should serialize"))];
@@ -61,6 +63,8 @@ async fn join_room(
     };
 
     if room.game.is_none() {
+        // The first join can seed the room with the local engine snapshot. Later
+        // joins preserve whatever state the room already holds.
         room.game = body.game;
     }
 
@@ -112,6 +116,8 @@ fn mutate_game_room(state: AppState, room_id: String, body: RoomBody, action: &s
     let mut rooms = state.rooms.lock().expect("room mutex poisoned");
     let room = get_or_create_room(&mut rooms, &room_id);
 
+    // Seat ownership is the only write permission check. The server deliberately
+    // does not revalidate chess legality.
     if !is_seated(room, &color, &token) {
         let verb = if action == "reset" { "reset" } else { "update" };
         return json_error(

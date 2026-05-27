@@ -7,6 +7,8 @@ async fn main() {
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let root = workspace_root();
 
+    // One shared AppState is cloned into every handler. Room operations are small
+    // and synchronous, so a mutex around the room map is enough for this server.
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         root: Arc::new(root),
@@ -42,6 +44,8 @@ async fn shutdown_signal() {
 }
 
 fn workspace_root() -> PathBuf {
+    // Static serving needs the workspace root so it can find both web/ and
+    // Cargo's target/wasm32-unknown-unknown output.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("server crate should live under the workspace root")

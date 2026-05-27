@@ -4,19 +4,26 @@ import { renderGame } from "./render.js";
 
 let engine = null;
 let game = { turn: "white", timelines: [], nextTimelineId: 1 };
+// Last submitted snapshot. While a turn is staged, rendering compares against
+// this so the present line and board status labels do not jump before Submit.
 let committedGame = game;
 let selected = null;
 let legalTargets = [];
+// submittedTurns is replayable room history; stagedMoves is local undo state for
+// the current unsubmitted turn only.
 let submittedTurns = [];
 let stagedMoves = [];
 let aiWorker = null;
 let aiRequestId = 0;
 let bot = {
+  // Bot choices are browser-local. In multiplayer, the bot uses its own token so
+  // it follows the same room seating rules as a human player.
   color: localStorage.getItem("chronofish.botColor") ?? "none",
   thinking: false,
   token: null
 };
 let multiplayer = {
+  // Room id lives in the URL so sharing the address reconstructs the room.
   roomId: new URLSearchParams(window.location.search).get("room") ?? makeRoomId(),
   token: localStorage.getItem("chronofish.playerToken") ?? crypto.randomUUID(),
   color: localStorage.getItem("chronofish.playerColor") ?? "local",
@@ -42,6 +49,8 @@ function normalizeRoomId(value) {
 }
 
 function canControlTurn() {
+  // Local control is allowed only when WASM is ready, the bot is not playing this
+  // side, and multiplayer seating permits this browser to act.
   return engine && bot.color !== game.turn && (!multiplayer.connected || multiplayer.color === game.turn);
 }
 
@@ -60,6 +69,8 @@ function updateShareLink() {
 }
 
 function readWasmString(ptr) {
+  // Rust string exports share one output buffer. Copy the bytes immediately after
+  // receiving a pointer because the next engine string call overwrites it.
   const bytes = new Uint8Array(engine.memory.buffer, ptr, engine.chronofish_output_len());
   return new TextDecoder("utf-8").decode(bytes);
 }
@@ -73,6 +84,7 @@ function engineLastMessage() {
 }
 
 function resetEngine() {
+  // Engine reset clears both visible and committed state plus all local history.
   engine.chronofish_reset();
   game = engineSnapshot();
   committedGame = game;
@@ -83,6 +95,8 @@ function resetEngine() {
 }
 
 function replayTurns(turns) {
+  // Multiplayer sync stores submitted turns. Replaying them through Rust rebuilds
+  // authoritative engine state instead of trusting an arbitrary remote snapshot.
   engine.chronofish_reset();
 
   for (const turn of turns) {
@@ -134,6 +148,7 @@ function botToken(color) {
 }
 
 function ensureAiWorker() {
+  // Lazily create the worker so normal local play avoids WASM worker startup.
   if (!aiWorker) {
     aiWorker = new Worker("./ai-worker.js", { type: "module" });
     aiWorker.addEventListener("message", handleAiWorkerMessage);
@@ -142,6 +157,8 @@ function ensureAiWorker() {
 }
 
 function turnSignature() {
+  // Used to ignore stale AI replies if the position changes while the worker is
+  // thinking.
   return `${game.turn}:${submittedTurns.length}:${JSON.stringify(submittedTurns.at(-1) ?? [])}`;
 }
 
@@ -162,6 +179,8 @@ function legalTargetsFor(position) {
     return [];
   }
 
+  // Target highlighting is delegated to Rust so previews and final application
+  // use the same legality code.
   return JSON.parse(readWasmString(engine.chronofish_legal_targets_json(
     position.timelineId,
     position.time,
@@ -188,6 +207,8 @@ function applyEngineMove(from, to) {
     return null;
   }
 
+  // Successful moves stay staged until Submit. Undo and Reset operate on this
+  // list, not on the whole room/game history.
   stagedMoves.push({
     from: { ...from },
     to: { ...to }
@@ -215,6 +236,8 @@ function handleSquareClick(position) {
   const piece = pieceAt(position);
   const existingTarget = targetFor(position);
 
+  // Click a highlighted target to move; click a latest own piece to select and
+  // request legal targets from the engine.
   if (selected && existingTarget) {
     const moveMessage = applyEngineMove(selected, position);
     render();
@@ -243,6 +266,7 @@ function handleSquareClick(position) {
 }
 
 function render() {
+  // State and IO live here; renderGame only rebuilds the DOM from supplied data.
   renderGame({
     game,
     presentGame: committedGame,
@@ -256,6 +280,7 @@ function render() {
 }
 
 function setHudCollapsed(collapsed) {
+  // Preserve the space-saving preference across reloads.
   elements.hud.dataset.collapsed = String(collapsed);
   elements.toggleHudButton.textContent = collapsed ? "Show" : "Hide";
   elements.toggleHudButton.setAttribute("aria-expanded", String(!collapsed));

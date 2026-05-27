@@ -16,6 +16,7 @@ export function isLatestBoard(game, timelineId, time) {
 }
 
 export function sortedTimelines(game) {
+  // row is the visual/geometric timeline axis; id is only the stable tie-breaker.
   return [...game.timelines].sort((a, b) => a.row - b.row || a.id - b.id);
 }
 
@@ -24,6 +25,8 @@ export function sortedBoards(timeline) {
 }
 
 export function isActiveTimeline(game, timeline) {
+  // Mirror the Rust active-timeline rule so labels can be rendered without a
+  // round-trip through WASM.
   if (timeline.owner === "neutral") {
     return true;
   }
@@ -38,6 +41,7 @@ export function isActiveTimeline(game, timeline) {
 }
 
 export function presentTime(game) {
+  // Present time is the earliest latest board among active timelines.
   const activeLatestTimes = game.timelines
     .filter((timeline) => isActiveTimeline(game, timeline))
     .map((timeline) => getLatestBoard(game, timeline.id)?.time)

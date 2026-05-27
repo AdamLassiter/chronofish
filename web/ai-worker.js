@@ -1,11 +1,15 @@
 let engine = null;
 
 function readWasmString(ptr) {
+  // Same shared-output convention as the main thread: copy before another export
+  // overwrites the buffer.
   const bytes = new Uint8Array(engine.memory.buffer, ptr, engine.chronofish_output_len());
   return new TextDecoder("utf-8").decode(bytes);
 }
 
 async function loadEngine() {
+  // The worker owns a separate WASM instance so AI search cannot block the UI
+  // thread or mutate the visible game state.
   if (engine) {
     return;
   }
@@ -15,6 +19,8 @@ async function loadEngine() {
 }
 
 function replayTurns(turns) {
+  // Rebuild state from submitted turns so the worker evaluates the same game the
+  // main thread would reconstruct locally.
   engine.chronofish_reset();
 
   for (const turn of turns) {
@@ -35,6 +41,7 @@ function replayTurns(turns) {
 }
 
 self.addEventListener("message", async (event) => {
+  // id is echoed back so the main thread can discard stale search results.
   const { id, turns, depth, nodes } = event.data;
 
   try {

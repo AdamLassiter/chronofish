@@ -1,4 +1,5 @@
 impl Game {
+    // Short human-readable status messages for the frontend HUD.
     fn move_message(
         &self,
         piece: Piece,
@@ -22,6 +23,8 @@ impl Game {
     }
 
     fn to_json(&self) -> String {
+        // Keep JSON ordering stable for deterministic frontend rendering,
+        // multiplayer snapshots, and tests.
         let mut timelines = self.timelines.clone();
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
 
@@ -130,6 +133,7 @@ impl Color {
 }
 
 impl PieceType {
+    // These strings are part of the frontend JSON contract.
     fn as_str(self) -> &'static str {
         match self {
             PieceType::King => "king",
@@ -166,6 +170,7 @@ impl TimelineOwner {
 }
 
 impl CastlingRights {
+    // A new board line starts with both orthodox castling options available.
     fn new() -> Self {
         Self {
             white_kingside: true,
@@ -177,6 +182,7 @@ impl CastlingRights {
 }
 
 impl MoveKind {
+    // Stored in Origin for rendering/debugging.
     fn name(self) -> &'static str {
         match self {
             MoveKind::Standard => "standard",
@@ -193,6 +199,8 @@ fn en_passant_after_move(
     to: Position,
     move_kind: MoveKind,
 ) -> Option<EnPassant> {
+    // Only a same-board two-square pawn/brawn advance creates the immediately
+    // capturable en-passant target.
     if !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
         || !matches!(move_kind, MoveKind::Standard)
     {
@@ -215,6 +223,8 @@ fn update_castling_rights(
     to: Position,
     board_before: [[Option<Piece>; 8]; 8],
 ) {
+    // Moving a king, moving a rook from its home square, or capturing a rook on a
+    // home square permanently clears the associated right on later snapshots.
     match (piece.color, piece.piece_type) {
         (Color::White, PieceType::King) => {
             castling.white_kingside = false;

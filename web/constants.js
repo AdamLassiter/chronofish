@@ -1,5 +1,7 @@
 export const FILES = ["a", "b", "c", "d", "e", "f", "g", "h"];
 
+// Unicode glyphs keep rendering lightweight. CSS adds shadows/glow so pieces
+// remain legible against both square colors.
 export const PIECES = {
   white: {
     king: "♔",

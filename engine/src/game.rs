@@ -1,4 +1,6 @@
 impl Game {
+    // Create the default orthodox board on neutral T0. The expanded piece model
+    // is implemented but not used by the initial setup.
     fn new() -> Self {
         let mut board = [[None; 8]; 8];
         let back_rank = [
@@ -98,6 +100,9 @@ impl Game {
         self.legal_move_kind(from, to).is_some()
     }
 
+    // Shared legality gate for UI highlighting, user moves, and AI search. It
+    // checks turn ownership, latest-board source rules, destination turn rules
+    // for time travel, and friendly occupancy before piece geometry runs.
     fn legal_move_kind(&self, from: Position, to: Position) -> Option<(Piece, MoveKind)> {
         if !Self::in_bounds(from.x, from.y) || !Self::in_bounds(to.x, to.y) {
             return None;
@@ -161,6 +166,8 @@ impl Game {
             return 0;
         };
 
+        // Moves are staged until submit_turn accepts the whole turn. This allows
+        // a side to make the multiple moves needed to advance the present line.
         self.staged_turn.push(self.checkpoint());
         self.apply_move_unchecked(from, to, piece, move_kind);
         self.last_message = self.move_message(
@@ -179,6 +186,7 @@ impl Game {
         self.clone()
     }
 
+    // Capture enough state to undo one staged move.
     fn checkpoint(&self) -> GameCheckpoint {
         GameCheckpoint {
             turn: self.turn,
@@ -218,6 +226,9 @@ impl Game {
             return 0;
         }
 
+        // Turn passing follows the present line, not a simple alternating
+        // single-move clock. The player keeps moving until the earliest active
+        // latest board is now waiting for the opponent.
         let Some(present_side) = self.present_board().map(|board| board.side_to_move) else {
             self.last_message = "No active present board.".to_string();
             return 0;
@@ -271,6 +282,8 @@ impl Game {
         let is_branch = matches!(move_kind, MoveKind::Branch);
 
         if !is_branch {
+            // Same-board moves append one successor snapshot and carry forward
+            // transient state such as castling rights and en-passant eligibility.
             let mut next_board = source_board.board;
             next_board[from.y as usize][from.x as usize] = None;
             if let MoveKind::EnPassant {
@@ -310,6 +323,9 @@ impl Game {
                     },
                 });
         } else {
+            // Time/timeline moves advance the source line without the piece, then
+            // place it on the destination. Targeting a historical board creates a
+            // new branch owned by the moving color.
             let target_is_historical = !self.is_latest_board(to.timeline_id, to.time);
             let destination_timeline_id = if target_is_historical {
                 self.place_timeline(piece.color, source_row)
@@ -364,6 +380,8 @@ impl Game {
     }
 
     fn place_timeline(&mut self, owner: Color, source_row: i32) -> i32 {
+        // White-created ids are positive and black-created ids are negative,
+        // matching RULES.md notation while row supplies the visual L-axis.
         let direction = if owner == Color::White { 1 } else { -1 };
         let mut row = source_row + direction;
 
@@ -399,6 +417,8 @@ impl Game {
     }
 
     fn present_board(&self) -> Option<&BoardSnapshot> {
+        // The present line is the earliest latest-board among active timelines.
+        // Inactive timelines do not hold the turn hostage.
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
@@ -413,6 +433,8 @@ impl Game {
         match timeline.owner {
             TimelineOwner::Neutral => true,
             TimelineOwner::White | TimelineOwner::Black => {
+                // A side may have at most one more active owned timeline than the
+                // opponent. Farther branches wait inactive until balance returns.
                 let same_owner = self
                     .timelines
                     .iter()

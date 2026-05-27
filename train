@@ -4,27 +4,13 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ENGINE="$ROOT/engine/Cargo.toml"
 
-GENERATIONS="${TRAIN_GENERATIONS:-20}"
-POPULATION="${TRAIN_POPULATION:-16}"
-DEPTH="${TRAIN_DEPTH:-1}"
-NODES="${TRAIN_NODES:-1000}"
-PLIES="${TRAIN_PLIES:-8}"
-COMPARE_SEEDS="${TRAIN_COMPARE_SEEDS:-101,202,303,404,505}"
-MIN_WINS="${TRAIN_MIN_WINS:-4}"
-MIN_TOTAL_DELTA="${TRAIN_MIN_TOTAL_DELTA:-250}"
+TIME_SECONDS="${TRAIN_TIME_SECONDS:-300}"
 VERIFY="${TRAIN_VERIFY:-cargo test -q}"
 
 while :; do
   cargo run --release --manifest-path "$ENGINE" --bin train -- \
     --train-cycle \
-    --generations "$GENERATIONS" \
-    --population "$POPULATION" \
-    --depth "$DEPTH" \
-    --nodes "$NODES" \
-    --plies "$PLIES" \
-    --seed "$(date +%s)" \
-    --compare-seeds "$COMPARE_SEEDS" \
-    --min-wins "$MIN_WINS" \
-    --min-total-delta "$MIN_TOTAL_DELTA" \
-    --verify "$VERIFY"
+    --time-seconds "$TIME_SECONDS" \
+    --verify "$VERIFY" \
+    "$@"
 done

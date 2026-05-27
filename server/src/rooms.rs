@@ -1,4 +1,6 @@
 fn sanitize_room_id(room_id: &str) -> String {
+    // Room ids are URL path segments, so keep a conservative portable alphabet
+    // and cap length to avoid noisy accidental ids.
     let sanitized: String = room_id
         .chars()
         .filter(|character| {
@@ -40,6 +42,7 @@ fn public_room(room: &Room) -> PublicRoom {
 }
 
 fn seat_player(room: &mut Room, color: &str, token: &str) -> Result<String, String> {
+    // Reusing the same token lets a browser reconnect without losing its seat.
     let seat = match color {
         "white" => &mut room.players.white,
         "black" => &mut room.players.black,
@@ -56,6 +59,7 @@ fn seat_player(room: &mut Room, color: &str, token: &str) -> Result<String, Stri
 }
 
 fn is_seated(room: &Room, color: &str, token: &str) -> bool {
+    // Spectators can observe room state but cannot mutate it.
     match color {
         "white" => room.players.white.as_deref() == Some(token),
         "black" => room.players.black.as_deref() == Some(token),

@@ -1,11 +1,15 @@
 #[derive(Clone)]
 struct AppState {
+    // rooms is the in-memory multiplayer store; root points at the workspace for
+    // static file and WASM artifact lookup.
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     root: Arc<PathBuf>,
 }
 
 #[derive(Clone)]
 struct Room {
+    // The game payload is intentionally opaque JSON. Browser engines enforce
+    // legality; the server is only a synchronization relay.
     id: String,
     game: Option<Value>,
     players: Players,
@@ -15,6 +19,7 @@ struct Room {
 
 #[derive(Clone, Default)]
 struct Players {
+    // Tokens, not sockets, own seats so a reconnecting tab can reclaim its color.
     white: Option<String>,
     black: Option<String>,
 }
@@ -57,6 +62,8 @@ enum ServerEvent {
 
 #[derive(Deserialize)]
 struct RoomBody {
+    // Reused by join/state/reset routes; optional fields let each route provide
+    // only the data it needs.
     color: Option<String>,
     token: Option<String>,
     game: Option<Value>,

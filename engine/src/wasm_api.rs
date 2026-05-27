@@ -1,3 +1,6 @@
+// The browser talks to the engine through a deliberately small C ABI. A single
+// thread-local Game mirrors the current UI state, and string-returning exports
+// write UTF-8 into OUTPUT for JavaScript to copy immediately.
 thread_local! {
     static GAME: RefCell<Option<Game>> = const { RefCell::new(None) };
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -5,6 +8,8 @@ thread_local! {
 
 #[no_mangle]
 pub extern "C" fn chronofish_version() -> *const u8 {
+    // Compile-time crate version, so the frontend reports the version of the
+    // actual WASM artifact it loaded.
     set_output(env!("CARGO_PKG_VERSION").into())
 }
 
@@ -93,6 +98,8 @@ pub extern "C" fn chronofish_output_len() -> usize {
 }
 
 fn set_output(value: String) -> *const u8 {
+    // Pointers returned by exports remain valid only until the next exported
+    // string call rewrites OUTPUT.
     OUTPUT.with(|output| {
         let mut output = output.borrow_mut();
         *output = value.into_bytes();
@@ -101,6 +108,8 @@ fn set_output(value: String) -> *const u8 {
 }
 
 fn with_game<T>(callback: impl FnOnce(&Game) -> T) -> T {
+    // Lazily initialize so snapshot/version style APIs can be called before an
+    // explicit reset.
     GAME.with(|game| {
         let mut game = game.borrow_mut();
 
@@ -113,6 +122,7 @@ fn with_game<T>(callback: impl FnOnce(&Game) -> T) -> T {
 }
 
 fn with_game_mut<T>(callback: impl FnOnce(&mut Game) -> T) -> T {
+    // Mutating exports share the same lazy initialization path as read-only APIs.
     GAME.with(|game| {
         let mut game = game.borrow_mut();
 
