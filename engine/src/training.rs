@@ -67,7 +67,7 @@ impl TrainerConfig {
             population: auto_population(),
             depth: 1,
             nodes: auto_nodes(),
-            plies: 12,
+            plies: 4,
             seed,
             time_budget_secs: 300,
             out: None,
@@ -363,8 +363,8 @@ impl Lcg {
 }
 
 fn run_training_cycle(config: &TrainerConfig) {
-    // Promotion rewrites ai.rs, so refuse to continue when that file already has
-    // local edits that should not be mixed with generated tuning changes.
+    // Promotion rewrites the parameter include file, so refuse to continue when
+    // it already has local edits that should not be mixed with generated tuning.
     if ai_source_is_dirty(&config.ai_src) {
         eprintln!(
             "{} has uncommitted changes; commit or stash before running training",
@@ -381,20 +381,30 @@ fn run_training_cycle(config: &TrainerConfig) {
         "score note: fitness points are aggregate evaluation margins from short matches; comparison wins/losses are decided by candidate fitness minus baseline fitness per seed"
     );
 
-    let candidate = train_weights(config);
+    let started = std::time::Instant::now();
+    let deadline = started + std::time::Duration::from_secs(config.time_budget_secs);
+    let train_deadline =
+        started + std::time::Duration::from_secs((config.time_budget_secs * 3 / 4).max(1));
+    let candidate = train_weights_until(config, train_deadline);
     let candidate_json = candidate.to_json();
     let mut wins = 0;
     let mut losses = 0;
     let mut draws = 0;
     let mut total_delta = 0;
+    let mut deltas = Vec::new();
 
     println!("candidate weights: {candidate_json}");
     for seed in &config.compare_seeds {
+        if std::time::Instant::now() >= deadline {
+            println!("comparison stopped: time budget exhausted");
+            break;
+        }
         let baseline_config = config.with_seed(*seed);
-        let baseline_score = fitness(EvalWeights::default_tuned(), &baseline_config);
-        let candidate_score = fitness(candidate, &baseline_config);
+        let baseline_score = fitness_until(EvalWeights::default_tuned(), &baseline_config, deadline);
+        let candidate_score = fitness_until(candidate, &baseline_config, deadline);
         let delta = candidate_score - baseline_score;
         total_delta += delta;
+        deltas.push(delta);
         let result = if delta > 0 {
             wins += 1;
             "win"
@@ -410,8 +420,9 @@ fn run_training_cycle(config: &TrainerConfig) {
         );
     }
 
-    print_threshold_progress(wins, losses, draws, total_delta, config);
-    if wins >= config.min_wins && total_delta >= config.min_total_delta {
+    let significance = significance(&deltas);
+    print_threshold_progress(wins, losses, draws, total_delta, significance, config);
+    if should_promote(wins, losses, total_delta, significance, config) {
         promote_weights(candidate, &config.ai_src);
         run_command("cargo", &["fmt"]);
         run_shell(&config.verify);
@@ -424,6 +435,13 @@ fn run_training_cycle(config: &TrainerConfig) {
 }
 
 fn train_weights(config: &TrainerConfig) -> EvalWeights {
+    train_weights_until(
+        config,
+        std::time::Instant::now() + std::time::Duration::from_secs(config.time_budget_secs),
+    )
+}
+
+fn train_weights_until(config: &TrainerConfig, deadline: std::time::Instant) -> EvalWeights {
     println!(
         "fitness score = material/tempo/check/present-line heuristic accumulated over {} plies against default and mutated opponents",
         config.plies
@@ -436,7 +454,8 @@ fn train_weights(config: &TrainerConfig) -> EvalWeights {
 
     let mut previous_best: Option<i32> = None;
     let training_started = std::time::Instant::now();
-    let deadline = training_started + std::time::Duration::from_secs(config.time_budget_secs);
+    let mut best_seen = EvalWeights::default_tuned();
+    let mut best_seen_score = i32::MIN;
     for generation in 0..config.generations {
         if std::time::Instant::now() >= deadline {
             break;
@@ -451,11 +470,30 @@ fn train_weights(config: &TrainerConfig) -> EvalWeights {
         let search_nodes = config.nodes * search_depth as usize;
         let search_plies = config.plies + depth_boost as usize * 2;
         let scoring_config = config.with_search(search_depth, search_nodes, search_plies);
-        let mut scored: Vec<(i32, EvalWeights)> = population
-            .iter()
-            .copied()
-            .map(|weights| (fitness(weights, &scoring_config), weights))
-            .collect();
+        let mut scored: Vec<(i32, EvalWeights)> = Vec::new();
+        for (index, weights) in population.iter().copied().enumerate() {
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            let remaining = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_secs();
+            eprintln!(
+                "generation {generation}: scoring candidate {}/{} depth={search_depth} nodes={search_nodes} plies={search_plies} remaining={}s",
+                index + 1,
+                population.len(),
+                remaining
+            );
+            let score = fitness_until(weights, &scoring_config, deadline);
+            if score > best_seen_score {
+                best_seen = weights;
+                best_seen_score = score;
+            }
+            scored.push((score, weights));
+        }
+        if scored.is_empty() {
+            break;
+        }
         scored.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         let best = scored[0].0;
         let worst = scored.last().map_or(best, |entry| entry.0);
@@ -483,43 +521,65 @@ fn train_weights(config: &TrainerConfig) -> EvalWeights {
         population = next;
     }
 
-    population
-        .into_iter()
-        .max_by_key(|weights| fitness(*weights, config))
-        .unwrap_or_else(EvalWeights::default_tuned)
+    best_seen
 }
 
 fn fitness(weights: EvalWeights, config: &TrainerConfig) -> i32 {
+    fitness_until(
+        weights,
+        config,
+        std::time::Instant::now() + std::time::Duration::from_secs(config.time_budget_secs),
+    )
+}
+
+fn fitness_until(
+    weights: EvalWeights,
+    config: &TrainerConfig,
+    deadline: std::time::Instant,
+) -> i32 {
     // Score candidates against the committed default and a few nearby mutated
     // opponents so the search improves the current engine instead of overfitting
     // to one self-play lineage.
     let mut rng = Lcg::new(config.seed);
     let mut total = 0;
     let default = EvalWeights::default_tuned();
-    total += play_match(weights, default, Color::White, config);
-    total += play_match(weights, default, Color::Black, config);
+    total += play_match_until(weights, default, Color::White, config, deadline);
+    total += play_match_until(weights, default, Color::Black, config, deadline);
 
     for _ in 0..3 {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         let opponent = default.mutate(&mut rng);
-        total += play_match(weights, opponent, Color::White, config);
-        total += play_match(weights, opponent, Color::Black, config);
+        total += play_match_until(weights, opponent, Color::White, config, deadline);
+        total += play_match_until(weights, opponent, Color::Black, config, deadline);
     }
 
     total
 }
 
-fn play_match(weights: EvalWeights, opponent: EvalWeights, color: Color, config: &TrainerConfig) -> i32 {
+fn play_match_until(
+    weights: EvalWeights,
+    opponent: EvalWeights,
+    color: Color,
+    config: &TrainerConfig,
+    deadline: std::time::Instant,
+) -> i32 {
     // Matches are short by design; the heuristic should learn opening material,
     // tempo, and branch quality before deeper minimax is affordable.
     let mut game = Game::new();
     let mut score = 0;
     for ply in 0..config.plies {
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
         let side_weights = if game.turn == color { weights } else { opponent };
         let mut context = SearchContext {
             weights: side_weights,
             root_color: game.turn,
             max_nodes: config.nodes,
             nodes: 0,
+            deadline: Some(deadline),
         };
         let Some((plan, _)) = game.search_root(config.depth, &mut context) else {
             score += if game.turn == color { -10_000 } else { 10_000 };
@@ -590,6 +650,7 @@ fn print_threshold_progress(
     losses: usize,
     draws: usize,
     total_delta: i32,
+    significance: Significance,
     config: &TrainerConfig,
 ) {
     let wins_needed = config.min_wins.saturating_sub(wins);
@@ -598,21 +659,94 @@ fn print_threshold_progress(
         "comparison: wins={wins} losses={losses} draws={draws} required_wins={} total_delta={total_delta}/{}",
         config.min_wins, config.min_total_delta
     );
+    println!(
+        "stats: samples={} mean_delta={:.1} stddev={:.1} stderr={:.1} lower95={:.1}",
+        significance.samples,
+        significance.mean,
+        significance.stddev,
+        significance.stderr,
+        significance.lower_95
+    );
     println!("threshold remaining: wins={wins_needed} total_delta={delta_needed}");
+}
+
+#[derive(Clone, Copy)]
+struct Significance {
+    samples: usize,
+    mean: f64,
+    stddev: f64,
+    stderr: f64,
+    lower_95: f64,
+}
+
+fn significance(values: &[i32]) -> Significance {
+    if values.is_empty() {
+        return Significance {
+            samples: 0,
+            mean: 0.0,
+            stddev: 0.0,
+            stderr: f64::INFINITY,
+            lower_95: f64::NEG_INFINITY,
+        };
+    }
+
+    let samples = values.len();
+    let mean = values.iter().map(|value| *value as f64).sum::<f64>() / samples as f64;
+    let variance = if samples > 1 {
+        values
+            .iter()
+            .map(|value| {
+                let delta = *value as f64 - mean;
+                delta * delta
+            })
+            .sum::<f64>()
+            / (samples - 1) as f64
+    } else {
+        0.0
+    };
+    let stddev = variance.sqrt();
+    let stderr = if samples > 1 {
+        stddev / (samples as f64).sqrt()
+    } else {
+        f64::INFINITY
+    };
+    let lower_95 = mean - 1.96 * stderr;
+
+    Significance {
+        samples,
+        mean,
+        stddev,
+        stderr,
+        lower_95,
+    }
+}
+
+fn should_promote(
+    wins: usize,
+    losses: usize,
+    total_delta: i32,
+    significance: Significance,
+    config: &TrainerConfig,
+) -> bool {
+    wins >= config.min_wins
+        && wins > losses
+        && total_delta >= config.min_total_delta
+        && significance.samples >= 3
+        && significance.lower_95 > 0.0
 }
 
 fn auto_population() -> usize {
     std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get() * 4)
-        .unwrap_or(16)
-        .clamp(8, 64)
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(8)
+        .clamp(4, 12)
 }
 
 fn auto_nodes() -> usize {
     std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get() * 500)
-        .unwrap_or(4_000)
-        .clamp(1_000, 12_000)
+        .map(|parallelism| parallelism.get() * 50)
+        .unwrap_or(400)
+        .clamp(200, 800)
 }
 
 fn random_seed() -> u64 {

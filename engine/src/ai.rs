@@ -57,6 +57,7 @@ struct SearchContext {
     root_color: Color,
     max_nodes: usize,
     nodes: usize,
+    deadline: Option<std::time::Instant>,
 }
 
 impl Game {
@@ -73,6 +74,7 @@ impl Game {
             root_color: self.turn,
             max_nodes: nodes,
             nodes: 0,
+            deadline: None,
         };
         let mut best = AiSearchResult {
             moves: Vec::new(),
@@ -105,13 +107,17 @@ impl Game {
     }
 
     fn search_root(&self, depth: i32, context: &mut SearchContext) -> Option<(TurnPlan, i32)> {
-        let plans = self.legal_turn_plans(&context.weights);
+        if context.expired() {
+            return None;
+        }
+
+        let plans = self.legal_turn_plans_until(&context.weights, context.deadline);
         let mut best: Option<(TurnPlan, i32)> = None;
         let mut alpha = -CHECKMATE_SCORE * 2;
         let beta = CHECKMATE_SCORE * 2;
 
         for plan in plans {
-            if context.nodes >= context.max_nodes {
+            if context.exhausted() {
                 break;
             }
             let score = plan
@@ -142,11 +148,11 @@ impl Game {
     ) -> i32 {
         // Children are whole submitted turn plans, not individual piece moves.
         context.nodes += 1;
-        if context.nodes >= context.max_nodes || depth <= 0 {
+        if context.exhausted() || depth <= 0 {
             return self.evaluate(maximizing_color, &context.weights);
         }
 
-        let plans = self.legal_turn_plans(&context.weights);
+        let plans = self.legal_turn_plans_until(&context.weights, context.deadline);
         if plans.is_empty() {
             return self.evaluate(maximizing_color, &context.weights);
         }
@@ -159,7 +165,7 @@ impl Game {
                         .alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
                 best = best.max(score);
                 alpha = alpha.max(best);
-                if beta <= alpha || context.nodes >= context.max_nodes {
+                if beta <= alpha || context.exhausted() {
                     break;
                 }
             }
@@ -172,7 +178,7 @@ impl Game {
                         .alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
                 best = best.min(score);
                 beta = beta.min(best);
-                if beta <= alpha || context.nodes >= context.max_nodes {
+                if beta <= alpha || context.exhausted() {
                     break;
                 }
             }
@@ -180,7 +186,11 @@ impl Game {
         }
     }
 
-    fn legal_turn_plans(&self, weights: &EvalWeights) -> Vec<TurnPlan> {
+    fn legal_turn_plans_until(
+        &self,
+        weights: &EvalWeights,
+        deadline: Option<std::time::Instant>,
+    ) -> Vec<TurnPlan> {
         let color = self.turn;
         // A side may need to move on several active timelines before the present
         // line flips. Cap that expansion to keep browser AI responsive.
@@ -192,7 +202,7 @@ impl Game {
             + 1)
             .min(4);
         let mut plans = Vec::new();
-        self.collect_turn_plans(color, max_depth, Vec::new(), &mut plans, weights);
+        self.collect_turn_plans(color, max_depth, Vec::new(), &mut plans, weights, deadline);
         plans.sort_by(|left, right| {
             right
                 .score_hint
@@ -210,8 +220,9 @@ impl Game {
         prefix: Vec<MoveStep>,
         plans: &mut Vec<TurnPlan>,
         weights: &EvalWeights,
+        deadline: Option<std::time::Instant>,
     ) {
-        if plans.len() >= MAX_TURN_PLANS || depth_left == 0 {
+        if plans.len() >= MAX_TURN_PLANS || depth_left == 0 || deadline_expired(deadline) {
             return;
         }
 
@@ -231,7 +242,7 @@ impl Game {
             return;
         }
 
-        let mut moves = self.legal_single_moves(weights);
+        let mut moves = self.legal_single_moves_until(weights, deadline);
         moves.truncate(MAX_MOVES_PER_NODE);
         for movement in moves {
             let mut next = self.clone_for_search();
@@ -240,7 +251,14 @@ impl Game {
             }
             let mut next_prefix = prefix.clone();
             next_prefix.push(movement);
-            next.collect_turn_plans(color, depth_left - 1, next_prefix, plans, weights);
+            next.collect_turn_plans(
+                color,
+                depth_left - 1,
+                next_prefix,
+                plans,
+                weights,
+                deadline,
+            );
             if plans.len() >= MAX_TURN_PLANS {
                 break;
             }
@@ -248,9 +266,20 @@ impl Game {
     }
 
     fn legal_single_moves(&self, weights: &EvalWeights) -> Vec<MoveStep> {
+        self.legal_single_moves_until(weights, None)
+    }
+
+    fn legal_single_moves_until(
+        &self,
+        weights: &EvalWeights,
+        deadline: Option<std::time::Instant>,
+    ) -> Vec<MoveStep> {
         let mut moves = Vec::new();
         for timeline in &self.timelines {
             for board in &timeline.boards {
+                if deadline_expired(deadline) {
+                    return moves;
+                }
                 if !self.is_latest_board(timeline.id, board.time) || board.side_to_move != self.turn
                 {
                     continue;
@@ -268,6 +297,9 @@ impl Game {
                         }
                         for target_timeline in &self.timelines {
                             for target_board in &target_timeline.boards {
+                                if deadline_expired(deadline) {
+                                    return moves;
+                                }
                                 for target_y in 0..8 {
                                     for target_x in 0..8 {
                                         let to = Position {
@@ -432,6 +464,20 @@ impl Game {
             .cmp(&position_key(right.from))
             .then_with(|| position_key(left.to).cmp(&position_key(right.to)))
     }
+}
+
+impl SearchContext {
+    fn expired(&self) -> bool {
+        deadline_expired(self.deadline)
+    }
+
+    fn exhausted(&self) -> bool {
+        self.nodes >= self.max_nodes || self.expired()
+    }
+}
+
+fn deadline_expired(deadline: Option<std::time::Instant>) -> bool {
+    deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline)
 }
 
 impl AiSearchResult {
