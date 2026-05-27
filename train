@@ -3,114 +3,28 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ENGINE="$ROOT/engine/Cargo.toml"
-AI_SRC="$ROOT/engine/src/ai.rs"
-AI_REL="engine/src/ai.rs"
-WORKDIR="${TMPDIR:-/tmp}/chronofish-train"
-mkdir -p "$WORKDIR"
 
 GENERATIONS="${TRAIN_GENERATIONS:-20}"
 POPULATION="${TRAIN_POPULATION:-16}"
 DEPTH="${TRAIN_DEPTH:-1}"
 NODES="${TRAIN_NODES:-1000}"
 PLIES="${TRAIN_PLIES:-8}"
-COMPARE_SEEDS="${TRAIN_COMPARE_SEEDS:-101 202 303 404 505}"
+COMPARE_SEEDS="${TRAIN_COMPARE_SEEDS:-101,202,303,404,505}"
 MIN_WINS="${TRAIN_MIN_WINS:-4}"
 MIN_TOTAL_DELTA="${TRAIN_MIN_TOTAL_DELTA:-250}"
 VERIFY="${TRAIN_VERIFY:-cargo test -q}"
 
-iteration=1
 while :; do
-  if ! git -C "$ROOT" diff --quiet -- "$AI_REL" || ! git -C "$ROOT" diff --cached --quiet -- "$AI_REL"; then
-    echo "$AI_REL has uncommitted changes; commit or stash before running ./train" >&2
-    exit 1
-  fi
-
-  candidate="$WORKDIR/candidate-$iteration.json"
-  seed="$(date +%s)"
-
-  echo "training iteration $iteration with seed $seed"
   cargo run --release --manifest-path "$ENGINE" --bin train -- \
+    --train-cycle \
     --generations "$GENERATIONS" \
     --population "$POPULATION" \
     --depth "$DEPTH" \
     --nodes "$NODES" \
     --plies "$PLIES" \
-    --seed "$seed" \
-    --out "$candidate"
-
-  wins=0
-  total_delta=0
-  for compare_seed in $COMPARE_SEEDS; do
-    baseline_score=$(cargo run --release --quiet --manifest-path "$ENGINE" --bin train -- \
-      --score-default \
-      --depth "$DEPTH" \
-      --nodes "$NODES" \
-      --plies "$PLIES" \
-      --seed "$compare_seed")
-    candidate_score=$(cargo run --release --quiet --manifest-path "$ENGINE" --bin train -- \
-      --score "$candidate" \
-      --depth "$DEPTH" \
-      --nodes "$NODES" \
-      --plies "$PLIES" \
-      --seed "$compare_seed")
-    delta=$((candidate_score - baseline_score))
-    total_delta=$((total_delta + delta))
-    if [ "$delta" -gt 0 ]; then
-      wins=$((wins + 1))
-    fi
-    echo "seed $compare_seed: candidate=$candidate_score baseline=$baseline_score delta=$delta"
-  done
-
-  echo "comparison: wins=$wins total_delta=$total_delta"
-  if [ "$wins" -ge "$MIN_WINS" ] && [ "$total_delta" -ge "$MIN_TOTAL_DELTA" ]; then
-    python3 - "$candidate" "$AI_SRC" <<'PY'
-import json
-import re
-import sys
-
-candidate_path, ai_path = sys.argv[1:]
-weights = json.load(open(candidate_path, encoding="utf-8"))
-mapping = [
-    ("king", "king"),
-    ("common_king", "commonKing"),
-    ("queen", "queen"),
-    ("royal_queen", "royalQueen"),
-    ("princess", "princess"),
-    ("rook", "rook"),
-    ("bishop", "bishop"),
-    ("unicorn", "unicorn"),
-    ("dragon", "dragon"),
-    ("knight", "knight"),
-    ("pawn", "pawn"),
-    ("brawn", "brawn"),
-    ("check_penalty", "checkPenalty"),
-    ("active_timeline", "activeTimeline"),
-    ("inactive_timeline", "inactiveTimeline"),
-    ("present_progress", "presentProgress"),
-    ("mobility", "mobility"),
-    ("branch_penalty", "branchPenalty"),
-    ("advancement", "advancement"),
-    ("centrality", "centrality"),
-]
-source = open(ai_path, encoding="utf-8").read()
-for rust_name, json_name in mapping:
-    source = re.sub(
-        rf"(\n\s*{rust_name}:\s*)-?\d+(,)",
-        rf"\g<1>{int(weights[json_name])}\2",
-        source,
-        count=1,
-    )
-open(ai_path, "w", encoding="utf-8").write(source)
-PY
-
-    cargo fmt
-    sh -c "$VERIFY"
-    git -C "$ROOT" add "$AI_REL"
-    git -C "$ROOT" commit -m "Tune AI evaluation parameters"
-    echo "promoted candidate and committed updated parameters"
-  else
-    echo "candidate rejected"
-  fi
-
-  iteration=$((iteration + 1))
+    --seed "$(date +%s)" \
+    --compare-seeds "$COMPARE_SEEDS" \
+    --min-wins "$MIN_WINS" \
+    --min-total-delta "$MIN_TOTAL_DELTA" \
+    --verify "$VERIFY"
 done

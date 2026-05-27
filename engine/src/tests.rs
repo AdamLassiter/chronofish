@@ -807,6 +807,12 @@ mod tests {
             out: None,
             score: None,
             score_default: false,
+            train_cycle: false,
+            compare_seeds: vec![101, 202],
+            min_wins: 1,
+            min_total_delta: 1,
+            verify: "cargo test -q".to_string(),
+            ai_src: "engine/src/ai.rs".to_string(),
         };
 
         assert_eq!(train_weights(&config).to_json(), train_weights(&config).to_json());
