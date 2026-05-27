@@ -12,6 +12,9 @@ export const elements = {
   joinWhiteButton: document.querySelector("#join-white"),
   joinBlackButton: document.querySelector("#join-black"),
   joinSpectatorButton: document.querySelector("#join-spectator"),
+  botWhiteButton: document.querySelector("#bot-white"),
+  botBlackButton: document.querySelector("#bot-black"),
   multiplayerStatus: document.querySelector("#multiplayer-status"),
+  botStatus: document.querySelector("#bot-status"),
   shareLink: document.querySelector("#share-link")
 };

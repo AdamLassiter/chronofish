@@ -133,11 +133,17 @@ impl PieceType {
     fn as_str(self) -> &'static str {
         match self {
             PieceType::King => "king",
+            PieceType::CommonKing => "commonKing",
             PieceType::Queen => "queen",
+            PieceType::RoyalQueen => "royalQueen",
+            PieceType::Princess => "princess",
             PieceType::Rook => "rook",
             PieceType::Bishop => "bishop",
+            PieceType::Unicorn => "unicorn",
+            PieceType::Dragon => "dragon",
             PieceType::Knight => "knight",
             PieceType::Pawn => "pawn",
+            PieceType::Brawn => "brawn",
         }
     }
 }
@@ -187,7 +193,9 @@ fn en_passant_after_move(
     to: Position,
     move_kind: MoveKind,
 ) -> Option<EnPassant> {
-    if piece.piece_type != PieceType::Pawn || !matches!(move_kind, MoveKind::Standard) {
+    if !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+        || !matches!(move_kind, MoveKind::Standard)
+    {
         return None;
     }
 
@@ -253,7 +261,7 @@ fn update_castling_rights(
 }
 
 fn promote_if_needed(piece: Piece, y: i32) -> Piece {
-    if piece.piece_type != PieceType::Pawn {
+    if !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn) {
         return piece;
     }
 

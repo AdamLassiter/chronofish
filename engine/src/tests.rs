@@ -575,4 +575,240 @@ mod tests {
         );
         assert_eq!(game.submit_turn(), 0);
     }
+
+    #[test]
+    fn unicorn_moves_on_three_dimensions() {
+        let mut game = Game::new();
+        let mut source = empty_board_with_kings();
+        source[1][1] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Unicorn,
+        });
+        let mut target = empty_board_with_kings();
+        target[2][2] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Knight,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, source)];
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![snapshot(0, Color::White, target)],
+        });
+        game.next_timeline_id = 2;
+
+        assert!(game.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 1,
+                y: 1,
+            },
+            Position {
+                timeline_id: 1,
+                time: 0,
+                x: 2,
+                y: 2,
+            },
+        ));
+    }
+
+    #[test]
+    fn dragon_moves_on_four_dimensions() {
+        let mut game = Game::new();
+        let mut source = empty_board_with_kings();
+        source[1][1] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Dragon,
+        });
+        let target = empty_board_with_kings();
+        game.timelines[0].boards = vec![snapshot(0, Color::White, source)];
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![
+                snapshot(0, Color::White, target),
+                snapshot(1, Color::Black, target),
+                snapshot(2, Color::White, target),
+            ],
+        });
+        game.next_timeline_id = 2;
+
+        assert!(game.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 1,
+                y: 1,
+            },
+            Position {
+                timeline_id: 1,
+                time: 2,
+                x: 2,
+                y: 2,
+            },
+        ));
+    }
+
+    #[test]
+    fn princess_does_not_move_triagonally() {
+        let mut game = Game::new();
+        let mut source = empty_board_with_kings();
+        source[1][1] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Princess,
+        });
+        let target = empty_board_with_kings();
+        game.timelines[0].boards = vec![snapshot(0, Color::White, source)];
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![snapshot(0, Color::White, target)],
+        });
+        game.next_timeline_id = 2;
+
+        assert!(!game.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 1,
+                y: 1,
+            },
+            Position {
+                timeline_id: 1,
+                time: 0,
+                x: 2,
+                y: 2,
+            },
+        ));
+    }
+
+    #[test]
+    fn common_king_is_not_royal() {
+        let mut game = Game::new();
+        let mut board = [[None; 8]; 8];
+        board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::CommonKing,
+        });
+        board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Rook,
+        });
+        board[7][0] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+        assert!(!game.is_in_check(Color::White));
+    }
+
+    #[test]
+    fn royal_queen_is_royal() {
+        let mut game = Game::new();
+        let mut board = [[None; 8]; 8];
+        board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::RoyalQueen,
+        });
+        board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Rook,
+        });
+        board[7][0] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+        assert!(game.is_in_check(Color::White));
+    }
+
+    #[test]
+    fn brawn_can_capture_on_mixed_forward_diagonal() {
+        let mut game = Game::new();
+        let mut source = empty_board_with_kings();
+        source[3][3] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Brawn,
+        });
+        let mut target = empty_board_with_kings();
+        target[4][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Knight,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, source)];
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![snapshot(0, Color::White, target)],
+        });
+        game.next_timeline_id = 2;
+
+        assert!(game.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 3,
+                y: 3,
+            },
+            Position {
+                timeline_id: 1,
+                time: 0,
+                x: 4,
+                y: 4,
+            },
+        ));
+    }
+
+    #[test]
+    fn ai_returns_submit_valid_turn() {
+        let game = Game::new();
+        let result = game.best_ai_turn(1, 1_000);
+
+        assert_eq!(result.status, "ok");
+        assert!(!result.moves.is_empty());
+
+        let mut replay = Game::new();
+        for movement in result.moves {
+            assert_eq!(replay.apply_move(movement.from, movement.to), 1);
+        }
+        assert_eq!(replay.submit_turn(), 1);
+    }
+
+    #[test]
+    fn ai_json_has_expected_shape() {
+        let game = Game::new();
+        let json = game.ai_turn_json(1, 1_000);
+
+        assert!(json.contains("\"moves\""));
+        assert!(json.contains("\"score\""));
+        assert!(json.contains("\"status\":\"ok\""));
+    }
+
+    #[test]
+    fn training_mutation_is_seeded() {
+        let config = TrainerConfig {
+            generations: 1,
+            population: 4,
+            depth: 1,
+            nodes: 200,
+            plies: 2,
+            seed: 7,
+            out: None,
+            score: None,
+            score_default: false,
+        };
+
+        assert_eq!(train_weights(&config).to_json(), train_weights(&config).to_json());
+    }
 }

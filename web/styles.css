@@ -186,6 +186,7 @@ button {
 }
 
 #multiplayer-status,
+#bot-status,
 #share-link {
   color: #bfcac4;
 }

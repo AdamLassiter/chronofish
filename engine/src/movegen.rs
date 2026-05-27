@@ -1,9 +1,9 @@
 impl Game {
     fn is_in_check(&self, color: Color) -> bool {
-        let kings = self.king_positions(color);
-        kings
+        let royal_pieces = self.royal_piece_positions(color);
+        royal_pieces
             .iter()
-            .any(|king| self.is_square_attacked(*king, color.opposite()))
+            .any(|position| self.is_square_attacked(*position, color.opposite()))
     }
 
     fn is_checkmate(&self, color: Color) -> bool {
@@ -94,7 +94,7 @@ impl Game {
         false
     }
 
-    fn king_positions(&self, color: Color) -> Vec<Position> {
+    fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
         let mut positions = Vec::new();
         for timeline in &self.timelines {
             for board in &timeline.boards {
@@ -103,11 +103,9 @@ impl Game {
                 }
                 for y in 0..8 {
                     for x in 0..8 {
-                        if board.board[y][x]
-                            == Some(Piece {
-                                color,
-                                piece_type: PieceType::King,
-                            })
+                        if board.board[y][x].is_some_and(|piece| {
+                            piece.color == color && Self::is_royal_piece(piece.piece_type)
+                        })
                         {
                             positions.push(Position {
                                 timeline_id: timeline.id,
@@ -174,37 +172,7 @@ impl Game {
             .filter(|distance| *distance > 0)
             .collect();
 
-        match piece.piece_type {
-            PieceType::Pawn => {
-                let forward = if piece.color == Color::White { 1 } else { -1 };
-                let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
-                (from.timeline_id == target.timeline_id
-                    && from.time == target.time
-                    && delta.x.abs() == 1
-                    && delta.y == forward)
-                    || (delta.t.abs() == 1
-                        && delta.l == timeline_forward
-                        && delta.x == 0
-                        && delta.y == 0)
-            }
-            PieceType::Knight => {
-                let mut sorted = distances;
-                sorted.sort_by(|a, b| b.cmp(a));
-                sorted[0] == 2 && sorted[1] == 1 && sorted[2] == 0 && sorted[3] == 0
-            }
-            PieceType::King => non_zero.iter().all(|distance| *distance == 1),
-            PieceType::Rook => non_zero.len() == 1 && self.is_path_clear(piece, from, target),
-            PieceType::Bishop => {
-                non_zero.len() == 2
-                    && non_zero[0] == non_zero[1]
-                    && self.is_path_clear(piece, from, target)
-            }
-            PieceType::Queen => {
-                !non_zero.is_empty()
-                    && non_zero.iter().all(|distance| *distance == non_zero[0])
-                    && self.is_path_clear(piece, from, target)
-            }
-        }
+        self.piece_attacks(piece, from, target, delta, distances, &non_zero)
     }
 
     fn move_kind_for(&self, piece: Piece, from: Position, to: Position) -> Option<MoveKind> {
@@ -227,23 +195,9 @@ impl Game {
         }
 
         let legal = match piece.piece_type {
-            PieceType::Rook => non_zero.len() == 1 && self.is_path_clear(piece, from, to),
-            PieceType::Bishop => {
-                non_zero.len() == 2
-                    && non_zero[0] == non_zero[1]
-                    && self.is_path_clear(piece, from, to)
-            }
-            PieceType::Queen => {
-                non_zero.iter().all(|distance| *distance == non_zero[0])
-                    && self.is_path_clear(piece, from, to)
-            }
-            PieceType::King => non_zero.iter().all(|distance| *distance == 1),
-            PieceType::Knight => {
-                let mut sorted = distances;
-                sorted.sort_by(|a, b| b.cmp(a));
-                sorted[0] == 2 && sorted[1] == 1 && sorted[2] == 0 && sorted[3] == 0
-            }
             PieceType::Pawn => return self.pawn_move_kind(piece, from, to, delta),
+            PieceType::Brawn => return self.brawn_move_kind(piece, from, to, delta),
+            _ => self.piece_attacks(piece, from, to, delta, distances, &non_zero),
         };
 
         if !legal {
@@ -335,6 +289,129 @@ impl Game {
             && delta.y == 0
             && destination.is_some_and(|target| target.color != piece.color))
         .then_some(MoveKind::Branch)
+    }
+
+    fn brawn_move_kind(
+        &self,
+        piece: Piece,
+        from: Position,
+        to: Position,
+        delta: Delta,
+    ) -> Option<MoveKind> {
+        let destination = self.piece_at(to);
+
+        if destination.is_some_and(|target| target.color != piece.color)
+            && Self::is_brawn_capture(piece, delta)
+        {
+            return Some(if from.timeline_id == to.timeline_id && from.time == to.time {
+                MoveKind::Standard
+            } else {
+                MoveKind::Branch
+            });
+        }
+
+        self.pawn_move_kind(piece, from, to, delta)
+    }
+
+    fn piece_attacks(
+        &self,
+        piece: Piece,
+        from: Position,
+        target: Position,
+        delta: Delta,
+        distances: [i32; 4],
+        non_zero: &[i32],
+    ) -> bool {
+        match piece.piece_type {
+            PieceType::Pawn => Self::is_pawn_capture(piece, delta),
+            PieceType::Brawn => Self::is_brawn_capture(piece, delta),
+            PieceType::Knight => Self::is_knight_move(distances),
+            PieceType::King | PieceType::CommonKing => Self::is_king_move(non_zero),
+            PieceType::Rook => {
+                Self::is_rook_move(non_zero) && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Bishop => {
+                Self::is_bishop_move(non_zero) && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Unicorn => {
+                Self::is_unicorn_move(non_zero) && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Dragon => {
+                Self::is_dragon_move(non_zero) && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Princess => {
+                (Self::is_rook_move(non_zero) || Self::is_bishop_move(non_zero))
+                    && self.is_path_clear(piece, from, target)
+            }
+            PieceType::Queen | PieceType::RoyalQueen => {
+                Self::is_queen_move(non_zero) && self.is_path_clear(piece, from, target)
+            }
+        }
+    }
+
+    fn is_royal_piece(piece_type: PieceType) -> bool {
+        matches!(piece_type, PieceType::King | PieceType::RoyalQueen)
+    }
+
+    fn is_pawn_capture(piece: Piece, delta: Delta) -> bool {
+        let forward = if piece.color == Color::White { 1 } else { -1 };
+        let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
+        (delta.x.abs() == 1 && delta.y == forward && delta.t == 0 && delta.l == 0)
+            || (delta.t.abs() == 1
+                && delta.l == timeline_forward
+                && delta.x == 0
+                && delta.y == 0)
+    }
+
+    fn is_brawn_capture(piece: Piece, delta: Delta) -> bool {
+        let forward = if piece.color == Color::White { 1 } else { -1 };
+        let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
+        let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
+        let non_zero = distances
+            .iter()
+            .filter(|distance| **distance > 0)
+            .count();
+
+        non_zero >= 2
+            && distances.iter().all(|distance| *distance <= 1)
+            && (delta.y == forward || delta.l == timeline_forward)
+            && delta.y != -forward
+            && delta.l != -timeline_forward
+    }
+
+    fn is_knight_move(mut distances: [i32; 4]) -> bool {
+        distances.sort_by(|a, b| b.cmp(a));
+        distances[0] == 2 && distances[1] == 1 && distances[2] == 0 && distances[3] == 0
+    }
+
+    fn is_king_move(non_zero: &[i32]) -> bool {
+        non_zero.iter().all(|distance| *distance == 1)
+    }
+
+    fn is_rook_move(non_zero: &[i32]) -> bool {
+        non_zero.len() == 1
+    }
+
+    fn is_bishop_move(non_zero: &[i32]) -> bool {
+        non_zero.len() == 2 && Self::same_distance(non_zero)
+    }
+
+    fn is_unicorn_move(non_zero: &[i32]) -> bool {
+        non_zero.len() == 3 && Self::same_distance(non_zero)
+    }
+
+    fn is_dragon_move(non_zero: &[i32]) -> bool {
+        non_zero.len() == 4 && Self::same_distance(non_zero)
+    }
+
+    fn is_queen_move(non_zero: &[i32]) -> bool {
+        !non_zero.is_empty() && Self::same_distance(non_zero)
+    }
+
+    fn same_distance(non_zero: &[i32]) -> bool {
+        non_zero
+            .first()
+            .is_some_and(|distance| non_zero.iter().all(|other| other == distance))
     }
 
     fn castle_kind(

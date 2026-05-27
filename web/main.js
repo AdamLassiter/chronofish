@@ -9,6 +9,13 @@ let selected = null;
 let legalTargets = [];
 let submittedTurns = [];
 let stagedMoves = [];
+let aiWorker = null;
+let aiRequestId = 0;
+let bot = {
+  color: localStorage.getItem("chronofish.botColor") ?? "none",
+  thinking: false,
+  token: null
+};
 let multiplayer = {
   roomId: new URLSearchParams(window.location.search).get("room") ?? makeRoomId(),
   token: localStorage.getItem("chronofish.playerToken") ?? crypto.randomUUID(),
@@ -35,7 +42,7 @@ function normalizeRoomId(value) {
 }
 
 function canControlTurn() {
-  return engine && (!multiplayer.connected || multiplayer.color === game.turn);
+  return engine && bot.color !== game.turn && (!multiplayer.connected || multiplayer.color === game.turn);
 }
 
 function setMultiplayerStatus(text) {
@@ -114,6 +121,32 @@ function networkGame() {
     turns: submittedTurns,
     snapshot: game
   };
+}
+
+function botToken(color) {
+  const key = `chronofish.botToken.${multiplayer.roomId}.${color}`;
+  let token = localStorage.getItem(key);
+  if (!token) {
+    token = crypto.randomUUID();
+    localStorage.setItem(key, token);
+  }
+  return token;
+}
+
+function ensureAiWorker() {
+  if (!aiWorker) {
+    aiWorker = new Worker("./ai-worker.js", { type: "module" });
+    aiWorker.addEventListener("message", handleAiWorkerMessage);
+  }
+  return aiWorker;
+}
+
+function turnSignature() {
+  return `${game.turn}:${submittedTurns.length}:${JSON.stringify(submittedTurns.at(-1) ?? [])}`;
+}
+
+function updateBotStatus(text = null) {
+  elements.botStatus.textContent = text ?? (bot.color === "none" ? "Bot idle" : `Bot ${bot.color}`);
 }
 
 function pieceAt(position) {
@@ -245,6 +278,12 @@ async function postRoom(action, body) {
 }
 
 function applyRemoteRoom(room, message = "") {
+  if (bot.thinking) {
+    aiRequestId += 1;
+    bot.thinking = false;
+    updateBotStatus("Bot stale");
+  }
+
   if (room?.game?.turns && engine) {
     replayTurns(room.game.turns);
   } else if (room?.game?.snapshot) {
@@ -267,6 +306,8 @@ function applyRemoteRoom(room, message = "") {
   if (message) {
     elements.message.textContent = message;
   }
+
+  maybeStartBotTurn();
 }
 
 function connectEvents() {
@@ -318,23 +359,134 @@ async function joinRoom(color) {
   window.history.replaceState({}, "", roomUrl(multiplayer.roomId));
   applyRemoteRoom(payload.room, payload.color === "spectator" ? "Spectating room." : `Joined as ${payload.color}.`);
   connectEvents();
+  maybeStartBotTurn();
 }
 
-async function syncState(action, message) {
-  if (!multiplayer.connected || multiplayer.color === "spectator") {
+async function syncState(action, message, credentials = null) {
+  const actor = credentials ?? { color: multiplayer.color, token: multiplayer.token };
+  if (!multiplayer.connected || actor.color === "spectator") {
     return;
   }
 
   try {
     await postRoom(action, {
-      token: multiplayer.token,
-      color: multiplayer.color,
+      token: actor.token,
+      color: actor.color,
       game: networkGame(),
       message
     });
   } catch (error) {
     elements.message.textContent = error.message;
   }
+}
+
+async function joinBot(color) {
+  if (!engine) {
+    elements.message.textContent = "WASM engine is not loaded yet.";
+    return;
+  }
+
+  multiplayer.roomId = normalizeRoomId(elements.roomInput.value);
+  elements.roomInput.value = multiplayer.roomId;
+  bot.color = color;
+  bot.token = botToken(color);
+  localStorage.setItem("chronofish.botColor", color);
+
+  const payload = await postRoom("join", {
+    color,
+    token: bot.token,
+    game: networkGame()
+  });
+
+  multiplayer.connected = true;
+  if (multiplayer.color === "local") {
+    multiplayer.color = "spectator";
+  }
+  window.history.replaceState({}, "", roomUrl(multiplayer.roomId));
+  applyRemoteRoom(payload.room, `Bot joined as ${payload.color}.`);
+  connectEvents();
+  updateBotStatus();
+  maybeStartBotTurn();
+}
+
+function maybeStartBotTurn() {
+  if (
+    !engine ||
+    !multiplayer.connected ||
+    bot.color === "none" ||
+    bot.thinking ||
+    game.turn !== bot.color ||
+    stagedMoves.length > 0
+  ) {
+    updateBotStatus();
+    return;
+  }
+
+  const id = ++aiRequestId;
+  bot.thinking = true;
+  updateBotStatus(`Bot ${bot.color} thinking`);
+  ensureAiWorker().postMessage({
+    id,
+    turns: submittedTurns.map((turn) => turn.map(cloneMove)),
+    depth: 2,
+    nodes: 25_000
+  });
+}
+
+function handleAiWorkerMessage(event) {
+  const { id, ok, result, error } = event.data;
+  if (id !== aiRequestId) {
+    return;
+  }
+
+  bot.thinking = false;
+  if (!ok) {
+    updateBotStatus("Bot error");
+    elements.message.textContent = error;
+    return;
+  }
+
+  if (bot.color !== game.turn || stagedMoves.length > 0) {
+    updateBotStatus("Bot stale");
+    return;
+  }
+
+  if (result.status !== "ok" || result.moves.length === 0) {
+    updateBotStatus("Bot no legal turn");
+    elements.message.textContent = "Bot found no legal turn.";
+    return;
+  }
+
+  const before = turnSignature();
+  for (const move of result.moves) {
+    if (!applyEngineMove(move.from, move.to)) {
+      updateBotStatus("Bot move failed");
+      return;
+    }
+  }
+
+  if (before !== turnSignature()) {
+    updateBotStatus("Bot stale");
+    return;
+  }
+
+  if (!engine.chronofish_submit_turn()) {
+    elements.message.textContent = engineLastMessage();
+    updateBotStatus("Bot submit failed");
+    return;
+  }
+
+  game = engineSnapshot();
+  submittedTurns.push(stagedMoves.map(cloneMove));
+  stagedMoves = [];
+  committedGame = game;
+  selected = null;
+  legalTargets = [];
+  const message = `Bot ${bot.color} moved. ${engineLastMessage()}`;
+  elements.message.textContent = message;
+  updateBotStatus(`Bot ${bot.color} moved`);
+  render();
+  syncState("state", message, { color: bot.color, token: bot.token ?? botToken(bot.color) });
 }
 
 async function loadWasmStatus() {
@@ -438,6 +590,7 @@ elements.submitTurnButton.addEventListener("click", () => {
   elements.message.textContent = engineLastMessage();
   render();
   syncState("state", engineLastMessage());
+  maybeStartBotTurn();
 });
 
 elements.toggleHudButton.addEventListener("click", () => {
@@ -462,7 +615,20 @@ elements.joinSpectatorButton.addEventListener("click", () => {
   });
 });
 
+elements.botWhiteButton.addEventListener("click", () => {
+  joinBot("white").catch((error) => {
+    elements.message.textContent = error.message;
+  });
+});
+
+elements.botBlackButton.addEventListener("click", () => {
+  joinBot("black").catch((error) => {
+    elements.message.textContent = error.message;
+  });
+});
+
 loadWasmStatus();
 loadServerStatus();
 setHudCollapsed(localStorage.getItem("chronofish.hudCollapsed") === "true");
+updateBotStatus();
 render();

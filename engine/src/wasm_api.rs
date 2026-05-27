@@ -76,6 +76,12 @@ pub extern "C" fn chronofish_undo_staged_move() -> i32 {
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_ai_turn_json(max_depth: i32, max_nodes: i32) -> *const u8 {
+    let json = with_game(|game| game.ai_turn_json(max_depth, max_nodes));
+    set_output(json)
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_last_message() -> *const u8 {
     let message = with_game(|game| game.last_message.clone());
     set_output(message)

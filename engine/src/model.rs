@@ -5,13 +5,20 @@ enum Color {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum PieceType {
     King,
+    CommonKing,
     Queen,
+    RoyalQueen,
+    Princess,
     Rook,
     Bishop,
+    Unicorn,
+    Dragon,
     Knight,
     Pawn,
+    Brawn,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
