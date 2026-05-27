@@ -60,9 +60,13 @@ button {
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
 }
 
+#message {
+  margin-left: auto;
+  text-align: right;
+}
+
 #toggle-hud {
   min-height: 32px;
-  margin-left: auto;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
   padding: 0 12px;
@@ -149,6 +153,7 @@ button {
 }
 
 .controls {
+  justify-content: center;
   padding: 10px;
 }
 
@@ -162,6 +167,43 @@ button {
   color: #101315;
   font-weight: 800;
   cursor: pointer;
+}
+
+.controls button:disabled,
+.multiplayer button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+#reset-game,
+#undo-move {
+  background: #7db7ff;
+  color: #071421;
+}
+
+#submit-turn {
+  background: #72e58f;
+  color: #07180d;
+}
+
+#concede-game {
+  background: #ff7a70;
+  color: #240807;
+}
+
+#start-game {
+  background: #72e58f;
+  color: #07180d;
+}
+
+#join-black {
+  background: #08090b;
+  color: #f3f5f1;
+}
+
+#join-spectator {
+  background: #7db7ff;
+  color: #071421;
 }
 
 .multiplayer {
@@ -189,7 +231,6 @@ button {
 }
 
 #multiplayer-status,
-#bot-status,
 #share-link {
   color: #bfcac4;
 }
@@ -220,14 +261,6 @@ button {
   height: 18px;
   border-radius: 4px;
   border: 1px solid rgba(255, 255, 255, 0.3);
-}
-
-.white-turn {
-  background: #39f0a1;
-}
-
-.black-turn {
-  background: #d68cff;
 }
 
 .selected {

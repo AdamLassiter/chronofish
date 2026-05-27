@@ -1,3 +1,5 @@
+import { instantiateChronofishWasm } from "./wasm-loader.js";
+
 let engine = null;
 
 function readWasmString(ptr) {
@@ -14,7 +16,7 @@ async function loadEngine() {
     return;
   }
 
-  const { instance } = await WebAssembly.instantiateStreaming(fetch("./chronofish_engine.wasm"), {});
+  const instance = await instantiateChronofishWasm("./chronofish_engine.wasm");
   engine = instance.exports;
 }
 
@@ -42,12 +44,16 @@ function replayTurns(turns) {
 
 self.addEventListener("message", async (event) => {
   // id is echoed back so the main thread can discard stale search results.
-  const { id, turns, depth, nodes } = event.data;
+  const { id, turns, depth, nodes, timeMs } = event.data;
 
   try {
     await loadEngine();
     replayTurns(turns);
-    const result = JSON.parse(readWasmString(engine.chronofish_ai_turn_json(depth, nodes)));
+    const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
+    const pointer = engine.chronofish_ai_turn_timed_json
+      ? fn(depth, nodes, timeMs ?? 10_000)
+      : fn(depth, nodes);
+    const result = JSON.parse(readWasmString(pointer));
     self.postMessage({ id, ok: true, result });
   } catch (error) {
     self.postMessage({ id, ok: false, error: error.message });

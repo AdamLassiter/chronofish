@@ -14,14 +14,16 @@ async fn main() {
         root: Arc::new(root),
     };
 
+    // Axum 0.8 uses `{name}` and `{*name}` route captures; the old `:name`
+    // syntax now fails at router construction.
     let app = Router::new()
         .route("/api/version", get(server_version))
-        .route("/api/rooms/:room_id", get(get_room))
-        .route("/api/rooms/:room_id/events", get(room_events))
-        .route("/api/rooms/:room_id/join", post(join_room))
-        .route("/api/rooms/:room_id/state", post(update_room_state))
-        .route("/api/rooms/:room_id/reset", post(reset_room))
-        .route("/api/*path", any(unknown_api_route))
+        .route("/api/rooms/{room_id}", get(get_room))
+        .route("/api/rooms/{room_id}/events", get(room_events))
+        .route("/api/rooms/{room_id}/join", post(join_room))
+        .route("/api/rooms/{room_id}/state", post(update_room_state))
+        .route("/api/rooms/{room_id}/reset", post(reset_room))
+        .route("/api/{*path}", any(unknown_api_route))
         .fallback(static_file)
         .with_state(state);
 

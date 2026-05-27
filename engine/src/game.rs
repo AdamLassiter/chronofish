@@ -240,13 +240,16 @@ impl Game {
             return 0;
         }
 
-        if self.is_in_check(self.turn) {
-            self.last_message = "Cannot submit while a royal piece is in check.".to_string();
-            return 0;
-        }
-
         self.turn = present_side;
         self.staged_turn.clear();
+
+        if self.royal_capture_available(self.turn) {
+            self.last_message = format!(
+                "{} wins by checkmate.",
+                self.turn.capitalized()
+            );
+            return 1;
+        }
 
         let suffix = if self.is_checkmate(self.turn) {
             " Checkmate."
@@ -255,7 +258,11 @@ impl Game {
         } else {
             ""
         };
-        self.last_message = format!("{} to move.{}", self.turn.capitalized(), suffix);
+        self.last_message = format!(
+            "{} to move.{}",
+            self.turn.capitalized(),
+            suffix
+        );
         1
     }
 

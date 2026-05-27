@@ -18,6 +18,46 @@ impl Game {
         !search.has_legal_turn_completion(color)
     }
 
+    fn royal_capture_available(&self, color: Color) -> bool {
+        let mut search = self.clone_for_search();
+        search.turn = color;
+
+        for (target, piece) in search.royal_pieces(color.opposite()) {
+            if !Self::is_royal_piece(piece.piece_type) {
+                continue;
+            }
+
+            for timeline in &search.timelines {
+                for board in &timeline.boards {
+                    if !search.is_latest_board(timeline.id, board.time)
+                        || board.side_to_move != color
+                    {
+                        continue;
+                    }
+
+                    for y in 0..8 {
+                        for x in 0..8 {
+                            let from = Position {
+                                timeline_id: timeline.id,
+                                time: board.time,
+                                x,
+                                y,
+                            };
+                            if !search.piece_at(from).is_some_and(|piece| piece.color == color) {
+                                continue;
+                            }
+                            if search.legal_move_kind(from, target).is_some() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
     fn has_legal_turn_completion(&self, color: Color) -> bool {
         // Escaping check may require a whole-turn sequence, not just one move, so
         // mate search follows staged moves until the present line changes color.
@@ -99,25 +139,34 @@ impl Game {
     }
 
     fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
+        self.royal_pieces(color)
+            .into_iter()
+            .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
+            .map(|(position, _)| position)
+            .collect()
+    }
+
+    fn royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
         let mut positions = Vec::new();
         for timeline in &self.timelines {
             for board in &timeline.boards {
-                if !self.is_latest_board(timeline.id, board.time) {
-                    continue;
-                }
                 for y in 0..8 {
                     for x in 0..8 {
-                        if board.board[y][x].is_some_and(|piece| {
-                            piece.color == color && Self::is_royal_piece(piece.piece_type)
-                        })
-                        {
-                            positions.push(Position {
+                        let Some(piece) = board.board[y][x] else {
+                            continue;
+                        };
+                        if piece.color != color || !Self::is_royal_piece(piece.piece_type) {
+                            continue;
+                        }
+                        positions.push((
+                            Position {
                                 timeline_id: timeline.id,
                                 time: board.time,
                                 x: x as i32,
                                 y: y as i32,
-                            });
-                        }
+                            },
+                            piece,
+                        ));
                     }
                 }
             }

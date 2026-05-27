@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ENGINE="$ROOT/engine/Cargo.toml"
 
-TIME_SECONDS="${TRAIN_TIME_SECONDS:-300}"
+TIME_SECONDS="${TRAIN_TIME_SECONDS:-1200}"
 VERIFY="${TRAIN_VERIFY:-cargo test -q}"
 
 while :; do

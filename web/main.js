@@ -1,6 +1,7 @@
 import { elements } from "./dom.js";
-import { capitalize, getBoard, getLatestBoard, isLatestBoard, samePosition } from "./board.js";
+import { capitalize, getBoard, getLatestBoard, isLatestBoard, presentTime, samePosition } from "./board.js";
 import { renderGame } from "./render.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
 
 let engine = null;
 let game = { turn: "white", timelines: [], nextTimelineId: 1 };
@@ -16,6 +17,8 @@ let stagedMoves = [];
 let aiWorker = null;
 let aiRequestId = 0;
 let phase = "lobby";
+let lastScrolledPresentTime = null;
+let lastMatchAlertMessage = "";
 let assignments = {
   white: localStorage.getItem("chronofish.whitePlayer") ?? "local",
   black: localStorage.getItem("chronofish.blackPlayer") ?? "local"
@@ -67,6 +70,34 @@ function canControlTurn() {
   return assignments[game.turn] === "human" && multiplayer.color === game.turn;
 }
 
+function canActNow() {
+  return phase === "game" && canControlTurn();
+}
+
+function hasStagedMoves() {
+  return stagedMoves.length > 0;
+}
+
+function hasUnplayedBoards() {
+  const present = game.timelines
+    .filter((timeline) => {
+      if (timeline.owner === "neutral") {
+        return true;
+      }
+      const sameOwnerRank = game.timelines
+        .filter((candidate) => candidate.owner === timeline.owner && candidate.id <= timeline.id)
+        .length;
+      const opponentOwner = timeline.owner === "white" ? "black" : "white";
+      const opponentCount = game.timelines.filter((candidate) => candidate.owner === opponentOwner).length;
+      return sameOwnerRank <= opponentCount + 1;
+    })
+    .map((timeline) => getLatestBoard(game, timeline.id))
+    .filter(Boolean)
+    .reduce((earliest, board) => (!earliest || board.time < earliest.time ? board : earliest), null);
+
+  return present?.sideToMove === game.turn;
+}
+
 function setMultiplayerStatus(text) {
   elements.multiplayerStatus.textContent = text;
 }
@@ -101,7 +132,6 @@ function writeAssignments(nextAssignments) {
   elements.blackPlayerSelect.value = assignments.black;
   localStorage.setItem("chronofish.whitePlayer", assignments.white);
   localStorage.setItem("chronofish.blackPlayer", assignments.black);
-  updateBotStatus();
 }
 
 function gamePayload(nextPhase = phase) {
@@ -136,6 +166,10 @@ function engineLastMessage() {
   return readWasmString(engine.chronofish_last_message());
 }
 
+function isMatchOverMessage(message) {
+  return /\bwins\b/i.test(message);
+}
+
 function resetEngine() {
   // Engine reset clears both visible and committed state plus all local history.
   engine.chronofish_reset();
@@ -145,6 +179,7 @@ function resetEngine() {
   legalTargets = [];
   submittedTurns = [];
   stagedMoves = [];
+  lastMatchAlertMessage = "";
 }
 
 function replayTurns(turns) {
@@ -210,15 +245,6 @@ function turnSignature() {
   // Used to ignore stale AI replies if the position changes while the worker is
   // thinking.
   return `${game.turn}:${submittedTurns.length}:${JSON.stringify(submittedTurns.at(-1) ?? [])}`;
-}
-
-function updateBotStatus(text = null) {
-  if (text) {
-    elements.botStatus.textContent = text;
-    return;
-  }
-  const colors = botColors();
-  elements.botStatus.textContent = colors.length ? `Bot ${colors.join(" + ")}` : "Bot idle";
 }
 
 function pieceAt(position) {
@@ -323,15 +349,18 @@ function handleSquareClick(position) {
 }
 
 function render() {
+  const previousPresentTime = lastScrolledPresentTime;
+  const nextPresentTime = committedGame.timelines.length ? presentTime(committedGame) : null;
   const inGame = phase === "game";
   elements.startGameButton.disabled = !engine || inGame || multiplayer.color === "spectator";
   elements.joinWhiteButton.disabled = inGame;
   elements.joinBlackButton.disabled = inGame;
   elements.whitePlayerSelect.disabled = inGame || multiplayer.color === "spectator";
   elements.blackPlayerSelect.disabled = inGame || multiplayer.color === "spectator";
-  elements.resetButton.disabled = !inGame;
-  elements.undoMoveButton.disabled = !inGame;
-  elements.submitTurnButton.disabled = !inGame;
+  elements.resetButton.disabled = !canActNow() || !hasStagedMoves();
+  elements.undoMoveButton.disabled = !canActNow() || !hasStagedMoves();
+  elements.submitTurnButton.disabled = !canActNow() || !hasStagedMoves() || hasUnplayedBoards();
+  elements.concedeButton.disabled = !canActNow();
 
   // State and IO live here; renderGame only rebuilds the DOM from supplied data.
   renderGame({
@@ -343,6 +372,34 @@ function render() {
     elements,
     onSquareClick: handleSquareClick,
     setMultiplayerStatus
+  });
+
+  if (phase === "game" && nextPresentTime !== null && nextPresentTime !== previousPresentTime) {
+    scrollMultiverseToPresent();
+  }
+  lastScrolledPresentTime = nextPresentTime;
+}
+
+function scrollMultiverseToPresent() {
+  const marker = elements.timelineGrid.querySelector(".present-line");
+  if (!marker) {
+    return;
+  }
+
+  const markerBox = marker.getBoundingClientRect();
+  const containerBox = elements.multiverse.getBoundingClientRect();
+  elements.multiverse.scrollTo({
+    left: elements.multiverse.scrollLeft
+      + markerBox.left
+      - containerBox.left
+      - containerBox.width / 2
+      + markerBox.width / 2,
+    top: elements.multiverse.scrollTop
+      + markerBox.top
+      - containerBox.top
+      - containerBox.height / 2
+      + markerBox.height / 2,
+    behavior: "smooth"
   });
 }
 
@@ -374,7 +431,6 @@ function applyRemoteRoom(room, message = "") {
   if (bot.thinking) {
     aiRequestId += 1;
     bot.thinking = false;
-    updateBotStatus("Bot stale");
   }
 
   if (room?.game?.phase) {
@@ -405,6 +461,7 @@ function applyRemoteRoom(room, message = "") {
 
   if (message) {
     elements.message.textContent = message;
+    showMatchDialog(message);
   }
 
   maybeStartBotTurn();
@@ -480,12 +537,40 @@ async function syncState(action, message, credentials = null) {
     await postRoom(action, {
       token: actor.token,
       color: actor.color,
-      game: gamePayload("game"),
+      game: gamePayload(),
       message
     });
   } catch (error) {
     elements.message.textContent = error.message;
   }
+}
+
+function showMatchDialog(message) {
+  if (!isMatchOverMessage(message) || lastMatchAlertMessage === message) {
+    return;
+  }
+  lastMatchAlertMessage = message;
+  window.alert(message);
+}
+
+async function enterPostMatchReview(message, credentials = null) {
+  phase = "review";
+  selected = null;
+  legalTargets = [];
+  elements.message.textContent = message;
+  render();
+  showMatchDialog(message);
+  await syncState("state", message, credentials);
+}
+
+function victoryMessage(loser) {
+  const winner = loser === "white" ? "Black" : "White";
+  return `${winner} wins. ${capitalize(loser)} conceded.`;
+}
+
+async function concede(color = game.turn, credentials = null) {
+  const message = victoryMessage(color);
+  await enterPostMatchReview(message, credentials ?? { color, token: multiplayer.token });
 }
 
 async function syncLobby(message = "Lobby updated.") {
@@ -511,17 +596,17 @@ function validateAssignments(nextAssignments) {
       throw new Error(`${capitalize(color)} needs a player or bot before starting.`);
     }
     if (!multiplayer.connected && nextAssignments[color] === "human") {
-      throw new Error("Join a room before starting with online humans.");
+      throw new Error("Join a room before starting with Online humans.");
     }
     if (multiplayer.connected && nextAssignments[color] === "local") {
-      throw new Error("Use Online human or Bot for room games.");
+      throw new Error("Use Online or Bot for room games.");
     }
     if (
       multiplayer.connected &&
       nextAssignments[color] === "human" &&
       !currentRoom?.players?.[color]
     ) {
-      throw new Error(`${capitalize(color)} is set to online human but no player is seated.`);
+      throw new Error(`${capitalize(color)} is set to Online but no player is seated.`);
     }
   }
 }
@@ -582,18 +667,18 @@ function maybeStartBotTurn() {
     bot.thinking ||
     stagedMoves.length > 0
   ) {
-    updateBotStatus();
     return;
   }
 
   const id = ++aiRequestId;
   bot.thinking = true;
-  updateBotStatus(`Bot ${game.turn} thinking`);
+  elements.message.textContent = `Bot ${game.turn} thinking.`;
   ensureAiWorker().postMessage({
     id,
     turns: submittedTurns.map((turn) => turn.map(cloneMove)),
-    depth: 2,
-    nodes: 25_000
+    depth: 4,
+    nodes: 80_000,
+    timeMs: 2_500
   });
 }
 
@@ -605,59 +690,62 @@ function handleAiWorkerMessage(event) {
 
   bot.thinking = false;
   if (!ok) {
-    updateBotStatus("Bot error");
     elements.message.textContent = error;
+    concede(game.turn, { color: game.turn, token: bot.tokens[game.turn] ?? botToken(game.turn) });
     return;
   }
 
   const botColor = game.turn;
   if (assignments[botColor] !== "bot" || stagedMoves.length > 0) {
-    updateBotStatus("Bot stale");
     return;
   }
 
   if (result.status !== "ok" || result.moves.length === 0) {
-    updateBotStatus("Bot no legal turn");
-    elements.message.textContent = "Bot found no legal turn.";
+    elements.message.textContent = "Bot found no legal turn and conceded.";
+    concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
     return;
   }
 
   const before = turnSignature();
   for (const move of result.moves) {
     if (!applyEngineMove(move.from, move.to)) {
-      updateBotStatus("Bot move failed");
+      concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
       return;
     }
   }
 
   if (before !== turnSignature()) {
-    updateBotStatus("Bot stale");
     return;
   }
 
   if (!engine.chronofish_submit_turn()) {
     elements.message.textContent = engineLastMessage();
-    updateBotStatus("Bot submit failed");
+    concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
     return;
   }
 
+  const message = engineLastMessage();
   game = engineSnapshot();
   submittedTurns.push(stagedMoves.map(cloneMove));
   stagedMoves = [];
   committedGame = game;
   selected = null;
   legalTargets = [];
-  const message = `Bot ${botColor} moved. ${engineLastMessage()}`;
-  elements.message.textContent = message;
-  updateBotStatus(`Bot ${botColor} moved`);
+  const botMessage = `Bot ${botColor} moved. ${message}`;
+  elements.message.textContent = botMessage;
   render();
-  syncState("state", message, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+  if (isMatchOverMessage(message)) {
+    enterPostMatchReview(message, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+    return;
+  }
+  syncState("state", botMessage, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+  maybeStartBotTurn();
 }
 
 async function loadWasmStatus() {
   try {
     const wasmPath = "./chronofish_engine.wasm";
-    const { instance } = await WebAssembly.instantiateStreaming(fetch(wasmPath), {});
+    const instance = await instantiateChronofishWasm(wasmPath);
     engine = instance.exports;
     resetEngine();
     elements.wasmStatus.textContent = `Engine v${readWasmString(engine.chronofish_version())}`;
@@ -696,6 +784,10 @@ elements.resetButton.addEventListener("click", () => {
     elements.message.textContent = "WASM engine is not loaded yet.";
     return;
   }
+  if (!canActNow()) {
+    elements.message.textContent = `Waiting for ${game.turn}.`;
+    return;
+  }
 
   let undone = 0;
   while (stagedMoves.length > 0 && engine.chronofish_undo_staged_move()) {
@@ -714,6 +806,10 @@ elements.resetButton.addEventListener("click", () => {
 elements.undoMoveButton.addEventListener("click", () => {
   if (!engine) {
     elements.message.textContent = "WASM engine is not loaded yet.";
+    return;
+  }
+  if (!canActNow()) {
+    elements.message.textContent = `Waiting for ${game.turn}.`;
     return;
   }
 
@@ -738,12 +834,17 @@ elements.submitTurnButton.addEventListener("click", () => {
     elements.message.textContent = "WASM engine is not loaded yet.";
     return;
   }
+  if (!canActNow()) {
+    elements.message.textContent = `Waiting for ${game.turn}.`;
+    return;
+  }
 
   if (!engine.chronofish_submit_turn()) {
     elements.message.textContent = engineLastMessage();
     return;
   }
 
+  const message = engineLastMessage();
   game = engineSnapshot();
   if (stagedMoves.length > 0) {
     submittedTurns.push(stagedMoves.map(cloneMove));
@@ -752,10 +853,32 @@ elements.submitTurnButton.addEventListener("click", () => {
   committedGame = game;
   selected = null;
   legalTargets = [];
-  elements.message.textContent = engineLastMessage();
+  elements.message.textContent = message;
   render();
-  syncState("state", engineLastMessage());
+  if (isMatchOverMessage(message)) {
+    enterPostMatchReview(message);
+    return;
+  }
+  syncState("state", message);
   maybeStartBotTurn();
+});
+
+elements.concedeButton.addEventListener("click", () => {
+  if (!engine) {
+    elements.message.textContent = "WASM engine is not loaded yet.";
+    return;
+  }
+  if (!canActNow()) {
+    elements.message.textContent = `Waiting for ${game.turn}.`;
+    return;
+  }
+
+  if (!window.confirm(`${capitalize(game.turn)} will concede. Continue?`)) {
+    elements.message.textContent = "Concession cancelled.";
+    return;
+  }
+
+  concede(game.turn);
 });
 
 elements.toggleHudButton.addEventListener("click", () => {
@@ -797,5 +920,4 @@ for (const select of [elements.whitePlayerSelect, elements.blackPlayerSelect]) {
 loadWasmStatus();
 loadServerStatus();
 setHudCollapsed(localStorage.getItem("chronofish.hudCollapsed") === "true");
-updateBotStatus();
 render();

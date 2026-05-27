@@ -67,8 +67,8 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
 
 fn wasm_path(root: &Path) -> Option<PathBuf> {
     [
-        root.join("target/wasm32-unknown-unknown/debug/chronofish_engine.wasm"),
         root.join("target/wasm32-unknown-unknown/release/chronofish_engine.wasm"),
+        root.join("target/wasm32-unknown-unknown/debug/chronofish_engine.wasm"),
     ]
     .into_iter()
     .find(|path| path.is_file())

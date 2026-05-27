@@ -1,6 +1,7 @@
 // Centralized DOM lookups keep main.js focused on engine/network state and make
 // the required index.html ids explicit.
 export const elements = {
+  multiverse: document.querySelector("#multiverse"),
   timelineGrid: document.querySelector("#timeline-grid"),
   message: document.querySelector("#message"),
   wasmStatus: document.querySelector("#wasm-status"),
@@ -10,6 +11,7 @@ export const elements = {
   resetButton: document.querySelector("#reset-game"),
   undoMoveButton: document.querySelector("#undo-move"),
   submitTurnButton: document.querySelector("#submit-turn"),
+  concedeButton: document.querySelector("#concede-game"),
   roomInput: document.querySelector("#room-id"),
   whitePlayerSelect: document.querySelector("#white-player"),
   blackPlayerSelect: document.querySelector("#black-player"),
@@ -18,6 +20,5 @@ export const elements = {
   joinBlackButton: document.querySelector("#join-black"),
   joinSpectatorButton: document.querySelector("#join-spectator"),
   multiplayerStatus: document.querySelector("#multiplayer-status"),
-  botStatus: document.querySelector("#bot-status"),
   shareLink: document.querySelector("#share-link")
 };

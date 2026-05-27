@@ -1,176 +1,194 @@
 # Chronofish
 
-Chronofish is an experimental Stockfish-like engine for **5D Chess with
-Multiverse Time Travel**.
+Chronofish is a playable Rust/WASM prototype for **5D Chess with Multiverse
+Time Travel**. The rules engine lives in Rust, compiles to WebAssembly for the
+browser, and is served by a small Rust backend that also provides in-memory
+multiplayer rooms.
 
-The goal is to build a fast, inspectable engine that can search legal 5D Chess
-positions, evaluate tactical and strategic features across timelines, and expose
-that engine through a browser-based interface.
+The project currently includes:
 
-## Project Status
+- a Rust engine crate with game state, legal moves, turn submission, checkmate
+  detection, alpha-beta bot search, and a native training harness;
+- a dependency-free JavaScript frontend for local play, online rooms,
+  spectators, bot-vs-human, and bot-vs-bot games;
+- a Rust `axum` server that serves `web/`, the built engine WASM, and room APIs;
+- a working rules reference in [`RULES.md`](RULES.md).
 
-This repository is at the planning/scaffolding stage.
-
-Current contents:
-
-- `engine/` - Rust engine crate that compiles to WebAssembly.
-- `web/` - dependency-free JavaScript frontend.
-- `server/` - Rust static file and multiplayer room server.
-- `RULES.md` - working rules reference for the game model.
-- `README.md` - project overview and intended architecture.
-
-Current implementation:
-
-- Rust/WASM game core for the current prototype rules, including game setup,
-  legal-target generation, move application, branching, promotion, and JSON
-  snapshots for display.
-- JavaScript frontend that loads the WASM module and renders a basic 5D Chess
-  prototype. Display, selection UI, and multiplayer room controls stay in the
-  frontend; chess state and rules live in Rust.
-- Rust backend for multiplayer rooms with white/black seats, spectators, and
-  live game-state updates.
-
-Planned implementation:
-
-- board representation, legal move generation, search, and evaluation;
-- position visualization, move entry, analysis, and bot play.
-
-## Why Rust and WASM?
-
-5D Chess has a much larger state space than orthodox chess. A useful engine
-needs to make many speculative moves across boards, timelines, and turns while
-keeping memory layout predictable.
-
-Rust is intended for the heavy lifting because it gives the engine:
-
-- explicit ownership over large game trees and board snapshots;
-- good performance for search, hashing, and move generation;
-- a path to native tooling for tests and benchmarks;
-- straightforward compilation to WebAssembly for the frontend.
-
-The JavaScript layer should stay focused on interaction, rendering, and
-integration. Engine-critical logic should live in Rust wherever practical.
-
-## Intended Architecture
+## Repository Layout
 
 ```text
 chronofish/
-  engine/          Rust engine crate compiled to WASM
-  server/          Rust static file and multiplayer room server
-  web/             JavaScript frontend
-  RULES.md         Rules reference
-  README.md        Project overview
+  engine/                  Rust engine crate and native trainer
+    src/ai/                AI search, evaluation, weights, and parameters
+    src/training/          Native genetic training harness
+  server/                  Rust static file and multiplayer room server
+  web/                     Browser frontend and WASM loader
+  RULES.md                 Rules reference
+  run                      Build WASM and start the backend
+  train                    Repeatedly run training/promotion cycles
 ```
-
-### Rust Engine
-
-The engine should eventually own:
-
-- canonical game-state representation;
-- legal move generation across space, time, and timelines;
-- turn submission logic for multi-move 5D turns;
-- check, checkmate, and stalemate detection;
-- position hashing and repetition/state caching;
-- search algorithms;
-- evaluation functions;
-- WASM bindings for the frontend.
-
-The current browser integration already follows this boundary: JavaScript asks
-the WASM module for legal targets, applies moves through Rust, and renders the
-JSON snapshot returned by the engine.
-
-### JavaScript Frontend
-
-The frontend should eventually provide:
-
-- visual navigation across boards, turns, and timelines;
-- legal move previews;
-- current-turn composition before submit;
-- engine analysis display;
-- bot-vs-human and bot-vs-bot workflows;
-- import/export formats once a stable notation is chosen.
-
-## Engine Direction
-
-Chronofish is inspired by traditional chess engines, but 5D Chess changes the
-shape of the problem.
-
-Important design questions include:
-
-- how to represent timelines and inactive timelines efficiently;
-- how to generate moves without repeatedly cloning the entire multiverse;
-- how to model the present line and forced turn completion;
-- how to detect attacks against kings across time and timelines;
-- how to evaluate material, tempo, timeline activity, king safety, and threats;
-- how to keep search useful when legal turn sequences may contain multiple
-  individual moves.
-
-Early development should prioritize correctness over search strength. A weak
-engine with complete legal move generation is more valuable than a faster engine
-with unsound rules.
-
-## Planned Milestones
-
-1. Define a minimal internal notation for boards, timelines, pieces, and moves.
-2. Implement orthodox chess movement on a single board.
-3. Generalize piece movement across the turn and timeline axes.
-4. Implement playable boards, active timelines, and present-line turn rules.
-5. Add legal turn generation and king-safety validation.
-6. Add perft-style test positions for move-generation correctness.
-7. Add a simple static evaluator.
-8. Add alpha-beta search or another baseline search strategy.
-9. Compile the engine to WebAssembly.
-10. Build the first browser UI around the WASM engine.
 
 ## Development
 
-Install the Rust WASM target once:
+Install the WASM target once:
 
 ```sh
 rustup target add wasm32-unknown-unknown
 ```
 
-Run Rust tests:
+Run the test suite:
 
 ```sh
 cargo test
 ```
 
-Start the local frontend and backend:
+Start the app:
 
 ```sh
 ./run
 ```
 
-The script builds the WASM engine and then starts the Rust server. Then open
-<http://localhost:5173>.
-
-You can also run the steps manually:
-
-```sh
-cargo build --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
-cargo run --bin chronofish-server
-```
-
-For multiplayer across machines, run the same server on an address reachable by
-both players:
+Then open <http://localhost:5173>. The script builds the engine for
+`wasm32-unknown-unknown` and starts the Rust server. Override the bind address
+for LAN play:
 
 ```sh
 HOST=0.0.0.0 PORT=5173 ./run
 ```
 
-Open the site, enter a room ID, and choose `Join White`, `Join Black`, or
-`Spectate`. The share link in the multiplayer bar keeps the room ID in the URL.
+Useful checks before committing:
 
-The multiplayer backend is currently in-memory. Restarting the server clears all
-rooms, and production hosting should put it behind HTTPS plus a real persistence
-layer before treating games as durable.
+```sh
+cargo fmt
+cargo test -q
+cargo clippy -- -D warnings
+cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
+node --check web/main.js
+node --check web/ai-worker.js
+node --check web/wasm-loader.js
+```
+
+## Playing
+
+The frontend starts in a lobby. A game can be configured as:
+
+- local multiplayer, where one browser controls both sides;
+- online multiplayer, with separate white/black seats and spectators;
+- human vs bot;
+- bot vs bot.
+
+During a turn, moves are staged until submitted. `Undo` removes the most recent
+staged move, while `Reset` clears the current turn's staged moves. Checkmate and
+concessions leave the game in a post-match review state until dismissed.
+
+The server stores rooms in memory. Restarting it clears all rooms.
+
+## Engine
+
+The engine is one crate split into small include files so private helpers can be
+shared without exposing a broad crate API:
+
+- `model.rs` defines core state types;
+- `game.rs` applies moves, staging, submission, timelines, castling, en-passant,
+  and present-line rules;
+- `movegen.rs` implements attacks and legal movement across board, time, and
+  timeline axes;
+- `ai/search.rs` implements iterative deepening, alpha-beta, quiescence search,
+  move ordering, and turn-plan generation;
+- `ai/evaluation.rs` scores material, timelines, safety, tactics, and 5D
+  strategic features;
+- `ai/parameters.rs` contains the committed tuned evaluation weights;
+- `wasm_api.rs` exposes the C ABI consumed by the frontend.
+
+The default setup still uses orthodox pieces, but the engine models the variant
+pieces from the rules reference so they can be introduced later without changing
+the representation.
+
+## Training
+
+Run a continuous training cycle with:
+
+```sh
+./train
+```
+
+The trainer is native-only and lives under `engine/src/training/`. It mutates
+the evaluation weights, scores candidates in short self-play matches, verifies a
+candidate against the committed baseline, and only promotes it when the
+comparison clears the configured win/delta/significance thresholds.
+
+Candidate scoring and seed comparisons use Rayon parallel iterators, so training
+uses available CPU cores without launching extra trainer processes. If a
+candidate is promoted, the trainer rewrites `engine/src/ai/parameters.rs`, runs
+verification, and commits the updated parameters.
+
+For a short smoke run:
+
+```sh
+cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
+  --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 --time-seconds 5
+```
+
+## AI Parameters
+
+`engine/src/ai/parameters.rs` returns an `EvalWeights` value. Larger positive
+weights generally make the bot care more about that feature. Some fields are
+piece values, while others scale positional, tactical, or multiverse-specific
+terms.
+
+| Field | Meaning |
+| --- | --- |
+| `king` | Material value for a royal king. Kept extremely high so king capture dominates normal material. |
+| `common_king` | Material value for a non-royal common king variant. |
+| `queen` | Material value for a queen. |
+| `royal_queen` | Material value for a royal queen variant. |
+| `princess` | Material value for the rook+bishop style princess variant. |
+| `rook` | Material value for a rook. |
+| `bishop` | Material value for a bishop. |
+| `unicorn` | Material value for a three-axis diagonal slider. |
+| `dragon` | Material value for a four-axis diagonal slider. |
+| `knight` | Material value for a knight. |
+| `pawn` | Material value for a pawn. |
+| `brawn` | Material value for the brawn pawn variant. |
+| `check_penalty` | Penalty for own check and bonus for checking the opponent. |
+| `active_timeline` | Value assigned to owning an active timeline. |
+| `inactive_timeline` | Value assigned through timeline ownership when a timeline is inactive. |
+| `present_progress` | Rewards control of the present line and progress across active timeline fronts. |
+| `mobility` | Scales legal single-move count advantage. |
+| `branch_penalty` | Cost applied to branch/time-travel moves during move ordering. |
+| `advancement` | Rewards pieces, especially pawns, for advancing toward promotion/pressure. |
+| `centrality` | Rewards pieces placed near central files/ranks. |
+| `defended_piece` | Bonus when a live piece has friendly defenders. |
+| `attacked_piece` | Penalty when a live piece is attacked. |
+| `hanging_piece` | Extra penalty when an attacked piece has no defenders. |
+| `royal_threat` | Extra value for attacks or controlled squares near royal pieces. |
+| `temporal_threat` | Extra value for threats that cross time or timelines. |
+| `pincer_threat` | Rewards multiple attackers converging on one target. |
+| `timeline_pincer` | Rewards threats arriving from multiple timelines. |
+| `historical_pincer` | Rewards threats arriving from multiple historical times. |
+| `frontier_tempo` | Rewards active timeline fronts where the side to move is favorable. |
+| `present_anchor` | Rewards active boards aligned with the current present board. |
+| `development` | Rewards non-pawn, non-royal pieces leaving their home rank. |
+| `branch_attack` | Bonus for tactically useful branch moves, especially attacking branches. |
+| `check_bonus` | Move-ordering and evaluation bonus for checking lines. |
+| `royal_capture_threat` | Rewards positions where a royal piece can be captured, including temporal capture paths. |
+| `royal_escape_pressure` | Rewards own royal escape squares and penalizes boxed-in royals. |
+| `forcing_move_pressure` | Rewards attacks that force replies, captures, or urgent defense. |
+| `own_royal_exposure` | Penalty for attacks against the bot's own royal pieces. |
+| `fork_pressure` | Rewards attacks that fork multiple valuable or royal targets. |
+| `board_control` | Rewards controlled squares on latest boards, with extra value for central control. |
+| `piece_activity` | Rewards active pieces with many attack lines and open lanes. |
+| `pawn_structure` | Rewards passed/supported pawns and penalizes isolated or blocked pawns. |
+| `timeline_economy` | Rewards useful active owned timelines and penalizes excess inactive branches. |
+| `present_tempo` | Rewards favorable side-to-move tempo relative to spread across active timelines. |
+| `royal_shelter` | Rewards pawn cover around royal pieces and penalizes missing shelter. |
+| `space_advantage` | Rewards advanced space, weighted more heavily for pawns/brawns. |
 
 ## Rules Reference
 
-The working rules summary lives in [`RULES.md`](RULES.md). That file should be
-treated as the starting point for implementation, test fixtures, and engine
-semantics.
+The implementation follows [`RULES.md`](RULES.md). When changing rules, update
+that file first, then add focused Rust tests for the affected move generation,
+turn submission, checkmate, or timeline behavior.
 
 ## License
 
