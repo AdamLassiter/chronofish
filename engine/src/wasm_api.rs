@@ -7,6 +7,25 @@ thread_local! {
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_alloc(len: usize) -> *mut u8 {
+    let mut buffer = Vec::with_capacity(len);
+    let pointer = buffer.as_mut_ptr();
+    std::mem::forget(buffer);
+    pointer
+}
+
+/// # Safety
+///
+/// `ptr` and `len` must be a pointer/length pair previously returned by
+/// `chronofish_alloc` and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_dealloc(ptr: *mut u8, len: usize) {
+    if !ptr.is_null() {
+        drop(Vec::from_raw_parts(ptr, 0, len));
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_version() -> *const u8 {
     // Compile-time crate version, so the frontend reports the version of the
     // actual WASM artifact it loaded.
@@ -24,6 +43,40 @@ pub extern "C" fn chronofish_reset() {
 pub extern "C" fn chronofish_snapshot_json() -> *const u8 {
     let json = with_game(|game| game.to_json());
     set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_staged_turn_notation() -> *const u8 {
+    let notation = with_game(Game::staged_turn_notation);
+    set_output(notation)
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 memory in this WASM
+/// instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_load_notation(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Ok(notation) = std::str::from_utf8(bytes) else {
+        return with_game_mut(|game| {
+            game.last_message = "Notation is not valid UTF-8.".to_string();
+            0
+        });
+    };
+    with_game_mut(|game| match game.load_notation(notation) {
+        Ok(()) => {
+            game.last_message = "Loaded notation.".to_string();
+            1
+        }
+        Err(error) => {
+            game.last_message = error;
+            0
+        }
+    })
 }
 
 #[no_mangle]

@@ -1,3 +1,11 @@
+struct TurnPlanBuildContext<'a> {
+    color: Color,
+    weights: &'a EvalWeights,
+    deadline: Option<SearchInstant>,
+    move_limit: usize,
+    capture_sanity: bool,
+}
+
 impl Game {
     fn ai_turn_json(&self, max_depth: i32, max_nodes: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, None).to_json()
@@ -14,17 +22,31 @@ impl Game {
         max_nodes: i32,
         deadline: Option<SearchInstant>,
     ) -> AiSearchResult {
+        self.best_ai_turn_with_options(
+            max_depth,
+            max_nodes,
+            deadline,
+            SearchOptions::optimized(),
+            None,
+        )
+        .0
+    }
+
+    fn best_ai_turn_with_options(
+        &self,
+        max_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        options: SearchOptions,
+        label: Option<&'static str>,
+    ) -> (AiSearchResult, Option<SearchPerfSample>) {
+        let started = SearchInstant::now();
         let depth = max_depth.max(1);
         let nodes = max_nodes.max(1) as usize;
         let weights = EvalWeights::default_tuned();
-        let mut context = SearchContext {
-            weights,
-            root_color: self.turn,
-            max_nodes: nodes,
-            nodes: 0,
-            deadline,
-            table: std::collections::HashMap::new(),
-        };
+        let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
+        context.options = options;
+        context.killers.resize((depth as usize).saturating_add(3), [None, None]);
         let mut best = AiSearchResult {
             moves: Vec::new(),
             score: 0,
@@ -35,10 +57,20 @@ impl Game {
 
         // Iterative deepening preserves a usable shallower answer if the node
         // limit is hit before the requested depth completes.
+        let mut previous_score = 0;
         for current_depth in 1..=depth {
-            let Some((plan, score)) = self.search_root(current_depth, &mut context) else {
+            let window = if context.options.aspiration_windows && current_depth > 1 {
+                Some((
+                    previous_score - ASPIRATION_WINDOW,
+                    previous_score + ASPIRATION_WINDOW,
+                ))
+            } else {
+                None
+            };
+            let Some((plan, score)) = self.search_root(current_depth, &mut context, window) else {
                 break;
             };
+            previous_score = score;
             best = AiSearchResult {
                 moves: plan.moves,
                 score,
@@ -52,18 +84,52 @@ impl Game {
         }
 
         best.nodes = context.nodes;
-        best
+        let sample = label.map(|label| SearchPerfSample {
+            label,
+            elapsed_micros: SearchInstant::now().duration_since(started).as_micros(),
+            nodes: context.nodes,
+            stats: context.stats,
+        });
+        if let Some(sample) = &sample {
+            let _ = sample.summary_score();
+        }
+        (best, sample)
     }
 
-    fn search_root(&self, depth: i32, context: &mut SearchContext) -> Option<(TurnPlan, i32)> {
+    fn search_root(
+        &self,
+        depth: i32,
+        context: &mut SearchContext,
+        window: Option<(i32, i32)>,
+    ) -> Option<(TurnPlan, i32)> {
         if context.expired() {
             return None;
         }
 
-        let plans = self.legal_turn_plans_until(&context.weights, context.deadline);
+        let plans = self.legal_turn_plans_with_context(context);
+        let (mut alpha, beta) = window.unwrap_or((-CHECKMATE_SCORE * 2, CHECKMATE_SCORE * 2));
+        let mut best = self.search_root_with_bounds(depth, context, plans.clone(), alpha, beta);
+
+        if let (Some((_, score)), Some((low, high))) = (&best, window) {
+            if *score <= low || *score >= high {
+                context.stats.aspiration_researches += 1;
+                alpha = -CHECKMATE_SCORE * 2;
+                best = self.search_root_with_bounds(depth, context, plans, alpha, CHECKMATE_SCORE * 2);
+            }
+        }
+
+        best
+    }
+
+    fn search_root_with_bounds(
+        &self,
+        depth: i32,
+        context: &mut SearchContext,
+        plans: Vec<TurnPlan>,
+        mut alpha: i32,
+        beta: i32,
+    ) -> Option<(TurnPlan, i32)> {
         let mut best: Option<(TurnPlan, i32)> = None;
-        let mut alpha = -CHECKMATE_SCORE * 2;
-        let beta = CHECKMATE_SCORE * 2;
 
         for plan in plans {
             if context.exhausted() {
@@ -98,7 +164,7 @@ impl Game {
         // Children are whole submitted turn plans, not individual piece moves.
         context.nodes += 1;
         if context.exhausted() {
-            return self.evaluate(maximizing_color, &context.weights);
+            return self.evaluate_for_search(maximizing_color, &context.weights, context.fast_eval);
         }
 
         if depth <= 0 {
@@ -114,50 +180,107 @@ impl Game {
         let key = self.search_key(depth, maximizing_color);
         if let Some(entry) = context.table.get(&key) {
             if entry.depth >= depth {
+                context.stats.tt_hits += 1;
                 return entry.score;
             }
         }
 
-        let plans = self.legal_turn_plans_until(&context.weights, context.deadline);
+        let plans = self.legal_turn_plans_with_context(context);
         if plans.is_empty() {
-            return self.evaluate(maximizing_color, &context.weights);
+            return self.evaluate_for_search(maximizing_color, &context.weights, context.fast_eval);
         }
 
         let result = if self.turn == maximizing_color {
             let mut best = -CHECKMATE_SCORE * 2;
-            for plan in plans {
-                let score = plan
-                    .game
-                    .alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
+            let mut best_move = None;
+            for (index, plan) in plans.iter().enumerate() {
+                let child_depth = Self::child_search_depth(depth, index, plan, context);
+                let mut score = if index > 0 {
+                    plan.game.alpha_beta(
+                        child_depth,
+                        alpha,
+                        alpha + 1,
+                        maximizing_color,
+                        context,
+                    )
+                } else {
+                    plan.game
+                        .alpha_beta(child_depth, alpha, beta, maximizing_color, context)
+                };
+                if (child_depth < depth - 1 || index > 0) && score > alpha && score < beta {
+                    score = plan.game.alpha_beta(
+                        depth - 1,
+                        alpha,
+                        beta,
+                        maximizing_color,
+                        context,
+                    );
+                }
+                if score > best {
+                    best_move = plan.moves.first().copied();
+                }
                 best = best.max(score);
                 alpha = alpha.max(best);
                 if beta <= alpha || context.exhausted() {
+                    context.record_cutoff(depth, plan.moves.first().copied());
                     break;
                 }
             }
+            context.table.insert(
+                key,
+                SearchEntry {
+                    depth,
+                    score: best,
+                    best_move,
+                },
+            );
             best
         } else {
             let mut best = CHECKMATE_SCORE * 2;
-            for plan in plans {
-                let score = plan
-                    .game
-                    .alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
+            let mut best_move = None;
+            for (index, plan) in plans.iter().enumerate() {
+                let child_depth = Self::child_search_depth(depth, index, plan, context);
+                let mut score = if index > 0 {
+                    plan.game.alpha_beta(
+                        child_depth,
+                        beta - 1,
+                        beta,
+                        maximizing_color,
+                        context,
+                    )
+                } else {
+                    plan.game
+                        .alpha_beta(child_depth, alpha, beta, maximizing_color, context)
+                };
+                if (child_depth < depth - 1 || index > 0) && score > alpha && score < beta {
+                    score = plan.game.alpha_beta(
+                        depth - 1,
+                        alpha,
+                        beta,
+                        maximizing_color,
+                        context,
+                    );
+                }
+                if score < best {
+                    best_move = plan.moves.first().copied();
+                }
                 best = best.min(score);
                 beta = beta.min(best);
                 if beta <= alpha || context.exhausted() {
+                    context.record_cutoff(depth, plan.moves.first().copied());
                     break;
                 }
             }
+            context.table.insert(
+                key,
+                SearchEntry {
+                    depth,
+                    score: best,
+                    best_move,
+                },
+            );
             best
         };
-
-        context.table.insert(
-            key,
-            SearchEntry {
-                depth,
-                score: result,
-            },
-        );
         result
     }
 
@@ -169,16 +292,20 @@ impl Game {
         context: &mut SearchContext,
         depth: i32,
     ) -> i32 {
-        let stand_pat = self.evaluate(maximizing_color, &context.weights);
+        let stand_pat = self.evaluate_for_search(maximizing_color, &context.weights, context.fast_eval);
         if depth <= 0 || context.exhausted() {
             return stand_pat;
         }
-        let moves: Vec<MoveStep> = self
-            .legal_single_moves_until(&context.weights, context.deadline)
-            .into_iter()
-            .filter(|movement| self.is_forcing_move(movement, &context.weights))
-            .take(6)
-            .collect();
+        let moves: Vec<MoveStep> = if context.options.direct_quiescence {
+            self.forcing_moves_until(&context.weights, context.deadline)
+        } else {
+            let weights = context.weights;
+            self.legal_single_moves_until(&context.weights, context.deadline)
+                .into_iter()
+                .filter(|movement| self.is_forcing_move(movement, &weights, context))
+                .take(6)
+                .collect()
+        };
 
         if self.turn == maximizing_color {
             if stand_pat >= beta {
@@ -228,83 +355,6 @@ impl Game {
                 }
             }
             best
-        }
-    }
-
-    fn legal_turn_plans_until(
-        &self,
-        weights: &EvalWeights,
-        deadline: Option<SearchInstant>,
-    ) -> Vec<TurnPlan> {
-        let color = self.turn;
-        // A side may need to move on several active timelines before the present
-        // line flips. Cap that expansion to keep browser AI responsive.
-        let max_depth = (self
-            .timelines
-            .iter()
-            .filter(|timeline| self.is_active_timeline(timeline.id))
-            .count()
-            + 1)
-        .min(4);
-        let mut plans = Vec::new();
-        self.collect_turn_plans(color, max_depth, Vec::new(), &mut plans, weights, deadline);
-        plans.sort_by(|left, right| {
-            right
-                .score_hint
-                .cmp(&left.score_hint)
-                .then_with(|| Self::turn_plan_cmp(left, right))
-        });
-        plans.truncate(MAX_TURN_PLANS);
-        plans
-    }
-
-    fn collect_turn_plans(
-        &self,
-        color: Color,
-        depth_left: usize,
-        prefix: Vec<MoveStep>,
-        plans: &mut Vec<TurnPlan>,
-        weights: &EvalWeights,
-        deadline: Option<SearchInstant>,
-    ) {
-        if plans.len() >= MAX_TURN_PLANS || depth_left == 0 || deadline_expired(deadline) {
-            return;
-        }
-
-        // Once the present line belongs to the opponent, this staged prefix is a
-        // complete legal turn.
-        if !prefix.is_empty()
-            && self
-                .present_board()
-                .is_some_and(|board| board.side_to_move != color)
-        {
-            let mut submitted = self.clone_for_search();
-            if submitted.submit_turn_for_search() {
-                let score_hint = submitted.evaluate(color, weights)
-                    + self.turn_plan_tactical_score(&prefix, color, weights)
-                    - prefix.len() as i32;
-                plans.push(TurnPlan {
-                    moves: prefix,
-                    game: submitted,
-                    score_hint,
-                });
-            }
-            return;
-        }
-
-        let mut moves = self.legal_single_moves_until(weights, deadline);
-        moves.truncate(MAX_MOVES_PER_NODE);
-        for movement in moves {
-            let mut next = self.clone_for_search();
-            if !next.apply_move_for_search(movement.from, movement.to) {
-                continue;
-            }
-            let mut next_prefix = prefix.clone();
-            next_prefix.push(movement);
-            next.collect_turn_plans(color, depth_left - 1, next_prefix, plans, weights, deadline);
-            if plans.len() >= MAX_TURN_PLANS {
-                break;
-            }
         }
     }
 
@@ -366,14 +416,60 @@ impl Game {
             }
         }
 
-        // Order likely tactical/progress moves first to improve alpha-beta
-        // pruning. The sort does not change legality.
+        // Order likely tactical/progress moves first using cheap facts only.
+        // Deep tactical probes are reserved for the small set of moves that
+        // survive turn-plan construction.
         moves.sort_by(|left, right| {
-            self.move_order_score(right, weights)
-                .cmp(&self.move_order_score(left, weights))
+            self.cheap_move_order_score(right, weights)
+                .cmp(&self.cheap_move_order_score(left, weights))
                 .then_with(|| Self::move_cmp(left, right))
         });
         moves
+    }
+
+    fn forcing_moves_until(
+        &self,
+        weights: &EvalWeights,
+        deadline: Option<SearchInstant>,
+    ) -> Vec<MoveStep> {
+        let mut moves = Vec::new();
+        for movement in self.legal_single_moves_until(weights, deadline) {
+            if deadline_expired(deadline) {
+                break;
+            }
+            if self.piece_at(movement.to).is_some()
+                || movement.from.timeline_id != movement.to.timeline_id
+                || movement.from.time != movement.to.time
+            {
+                moves.push(movement);
+            }
+            if moves.len() >= 6 {
+                break;
+            }
+        }
+        moves
+    }
+
+    fn cheap_move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
+        let mut score = 0;
+        let is_branch = movement.from.timeline_id != movement.to.timeline_id
+            || movement.from.time != movement.to.time;
+        if let Some(piece) = self.piece_at(movement.to) {
+            score += weights.piece_value(piece.piece_type) * 4;
+            if Self::is_royal_piece(piece.piece_type) {
+                score += CHECKMATE_SCORE / 4;
+            }
+        }
+        if is_branch {
+            score -= weights.branch_penalty;
+        }
+        if self
+            .present_board()
+            .is_some_and(|board| movement.from.time <= board.time)
+        {
+            score += weights.present_progress;
+        }
+        score
     }
 
     fn move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
@@ -437,11 +533,12 @@ impl Game {
         let Some(present_side) = self.present_board().map(|board| board.side_to_move) else {
             return false;
         };
-        if present_side == self.turn {
+        if self.has_pending_present_board(self.turn) {
             return false;
         }
         self.turn = present_side;
         self.staged_turn.clear();
+        self.staged_notation.clear();
         true
     }
 
@@ -474,44 +571,56 @@ impl Game {
         score
     }
 
-    fn is_forcing_move(&self, movement: &MoveStep, weights: &EvalWeights) -> bool {
+    fn is_forcing_move(
+        &self,
+        movement: &MoveStep,
+        weights: &EvalWeights,
+        context: &mut SearchContext,
+    ) -> bool {
         self.piece_at(movement.to).is_some()
             || movement.from.timeline_id != movement.to.timeline_id
             || movement.from.time != movement.to.time
-            || self.move_order_score(movement, weights) >= weights.check_bonus
+            || {
+                context.stats.expensive_order_probes += 1;
+                self.move_order_score(movement, weights) >= weights.check_bonus
+            }
     }
 
-    fn search_key(&self, depth: i32, maximizing_color: Color) -> String {
-        let mut parts = vec![format!(
-            "d{depth}:t{}:m{}",
-            self.turn.as_str(),
-            maximizing_color.as_str()
-        )];
+    fn search_key(&self, depth: i32, maximizing_color: Color) -> u64 {
+        let mut hash = mix64(0x8a5c_7d13_9e37_79b9);
+        hash_combine(&mut hash, depth as u64);
+        hash_combine(&mut hash, color_hash(self.turn));
+        hash_combine(&mut hash, color_hash(maximizing_color));
         for timeline in &self.timelines {
-            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
-                continue;
-            };
-            parts.push(format!(
-                "L{}@{}:{}",
-                timeline.id,
-                board.time,
-                board.side_to_move.as_str()
-            ));
-            for y in 0..8 {
-                for x in 0..8 {
-                    if let Some(piece) = board.board[y][x] {
-                        parts.push(format!(
-                            "{}{}{}{}",
-                            x,
-                            y,
-                            piece.color.as_str().as_bytes()[0] as char,
-                            piece.piece_type.as_str()
-                        ));
+            hash_combine(&mut hash, timeline.id as u64);
+            hash_combine(&mut hash, timeline.row as u64);
+            hash_combine(&mut hash, owner_hash(timeline.owner));
+            hash_combine(&mut hash, self.is_active_timeline(timeline.id) as u64);
+            for board in &timeline.boards {
+                hash_combine(&mut hash, board.time as u64);
+                hash_combine(&mut hash, color_hash(board.side_to_move));
+                hash_combine(&mut hash, castling_hash(board.castling));
+                if let Some(en_passant) = board.en_passant {
+                    hash_combine(&mut hash, en_passant.x as u64);
+                    hash_combine(&mut hash, en_passant.y as u64);
+                    hash_combine(&mut hash, en_passant.captured_x as u64);
+                    hash_combine(&mut hash, en_passant.captured_y as u64);
+                }
+                for y in 0..8 {
+                    for x in 0..8 {
+                        if let Some(piece) = board.board[y][x] {
+                            hash_combine(&mut hash, piece_hash(piece));
+                            hash_combine(&mut hash, ((x as u64) << 3) | y as u64);
+                        }
                     }
                 }
             }
         }
-        parts.join("|")
+        hash
+    }
+
+    fn turn_plan_cache_key(&self) -> u64 {
+        self.search_key(0, self.turn)
     }
 
     fn turn_plan_cmp(left: &TurnPlan, right: &TurnPlan) -> std::cmp::Ordering {
@@ -530,23 +639,26 @@ impl Game {
             .cmp(&position_key(right.from))
             .then_with(|| position_key(left.to).cmp(&position_key(right.to)))
     }
-}
 
-impl SearchContext {
-    fn expired(&self) -> bool {
-        deadline_expired(self.deadline)
+    fn child_search_depth(
+        depth: i32,
+        index: usize,
+        plan: &TurnPlan,
+        context: &mut SearchContext,
+    ) -> i32 {
+        if context.options.late_move_reduction
+            && depth > 2
+            && index >= LATE_MOVE_REDUCTION_AFTER
+            && plan.moves.iter().all(|movement| {
+                movement.from.timeline_id == movement.to.timeline_id
+                    && movement.from.time == movement.to.time
+                    && plan.game.piece_at(movement.to).is_none()
+            })
+        {
+            context.stats.reduced_searches += 1;
+            depth - 2
+        } else {
+            depth - 1
+        }
     }
-
-    fn exhausted(&self) -> bool {
-        self.nodes >= self.max_nodes || self.expired()
-    }
-}
-
-fn deadline_expired(deadline: Option<SearchInstant>) -> bool {
-    deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
-}
-
-fn search_deadline(millis: i32) -> Option<SearchInstant> {
-    (millis > 0)
-        .then(|| SearchInstant::now() + std::time::Duration::from_millis(millis as u64))
 }

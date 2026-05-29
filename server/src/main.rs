@@ -4,6 +4,8 @@ use std::{
     collections::HashMap,
     convert::Infallible,
     env,
+    fs::{self, OpenOptions},
+    io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -30,6 +32,7 @@ use uuid::Uuid;
 
 include!("state.rs");
 include!("rooms.rs");
+include!("logging.rs");
 include!("routes.rs");
 include!("static_files.rs");
 include!("bootstrap.rs");

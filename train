@@ -4,13 +4,20 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ENGINE="$ROOT/engine/Cargo.toml"
 
-TIME_SECONDS="${TRAIN_TIME_SECONDS:-1200}"
 VERIFY="${TRAIN_VERIFY:-cargo test -q}"
+MAX_SECONDS="${TRAIN_MAX_SECONDS:-}"
 
 while :; do
-  cargo run --release --manifest-path "$ENGINE" --bin train -- \
-    --train-cycle \
-    --time-seconds "$TIME_SECONDS" \
-    --verify "$VERIFY" \
-    "$@"
+  if [ -n "$MAX_SECONDS" ]; then
+    cargo run --release --manifest-path "$ENGINE" --bin train -- \
+      --train-cycle \
+      --max-seconds "$MAX_SECONDS" \
+      --verify "$VERIFY" \
+      "$@"
+  else
+    cargo run --release --manifest-path "$ENGINE" --bin train -- \
+      --train-cycle \
+      --verify "$VERIFY" \
+      "$@"
+  fi
 done

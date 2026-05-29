@@ -6,12 +6,14 @@ async fn main() {
         .unwrap_or(5173);
     let host = env::var("HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let root = workspace_root();
+    let log_root = root.join("logs");
 
     // One shared AppState is cloned into every handler. Room operations are small
     // and synchronous, so a mutex around the room map is enough for this server.
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         root: Arc::new(root),
+        log_root: Arc::new(log_root),
     };
 
     // Axum 0.8 uses `{name}` and `{*name}` route captures; the old `:name`
@@ -23,6 +25,7 @@ async fn main() {
         .route("/api/rooms/{room_id}/join", post(join_room))
         .route("/api/rooms/{room_id}/state", post(update_room_state))
         .route("/api/rooms/{room_id}/reset", post(reset_room))
+        .route("/api/logs/{room_id}", post(log_match_event))
         .route("/api/{*path}", any(unknown_api_route))
         .fallback(static_file)
         .with_state(state);
@@ -34,7 +37,7 @@ async fn main() {
         .await
         .unwrap_or_else(|error| panic!("Failed to bind {addr}: {error}"));
 
-    println!("Chronofish dev server listening on http://{addr}");
+    eprintln!("Chronofish dev server listening on http://{addr}");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

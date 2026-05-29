@@ -81,7 +81,7 @@ enum TimelineOwner {
 
 // A position identifies one square on one board on one timeline. The frontend
 // serializes the same logical shape as timelineId/time/x/y.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Position {
     timeline_id: i32,
     time: i32,
@@ -99,6 +99,7 @@ struct Game {
     next_timeline_id: i32,
     next_black_timeline_id: i32,
     staged_turn: Vec<GameCheckpoint>,
+    staged_notation: Vec<String>,
     last_message: String,
 }
 
@@ -110,6 +111,7 @@ struct GameCheckpoint {
     timelines: Vec<Timeline>,
     next_timeline_id: i32,
     next_black_timeline_id: i32,
+    staged_notation: Vec<String>,
     last_message: String,
 }
 

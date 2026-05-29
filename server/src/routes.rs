@@ -98,6 +98,16 @@ async fn reset_room(
     mutate_game_room(state, room_id, body, "reset")
 }
 
+async fn log_match_event(
+    State(state): State<AppState>,
+    AxumPath(room_id): AxumPath<String>,
+    Json(body): Json<LogBody>,
+) -> impl IntoResponse {
+    let room_id = sanitize_room_id(&room_id);
+    log_room_line(&state, &room_id, body.notation.as_deref().unwrap_or_default());
+    Json(json!({ "ok": true }))
+}
+
 async fn unknown_api_route() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -127,6 +137,7 @@ fn mutate_game_room(state: AppState, room_id: String, body: RoomBody, action: &s
         );
     }
 
+    let message = body.message.unwrap_or_default();
     room.game = body.game;
     room.updated_at = now_millis();
     let public = public_room(room);
@@ -140,7 +151,7 @@ fn mutate_game_room(state: AppState, room_id: String, body: RoomBody, action: &s
     } else {
         ServerEvent::State {
             color: color.clone(),
-            message: body.message.unwrap_or_default(),
+            message,
             room: public.clone(),
         }
     };

@@ -40,6 +40,129 @@ impl Game {
         )
     }
 
+    fn staged_turn_notation(&self) -> String {
+        self.staged_notation.join("/")
+    }
+
+    fn load_notation(&mut self, notation: &str) -> Result<(), String> {
+        let mut game = Game::new();
+        for line in notation.lines() {
+            let line = strip_notation_comments(line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let (_, turn_text) = line
+                .split_once('.')
+                .ok_or_else(|| format!("Missing turn prefix in `{line}`"))?;
+            for move_text in turn_text.split('/') {
+                let move_text = move_text.trim();
+                if move_text.is_empty() {
+                    continue;
+                }
+                game.apply_notation_move(move_text)?;
+            }
+            if game.submit_turn() == 0 {
+                return Err(game.last_message.clone());
+            }
+        }
+
+        *self = game;
+        Ok(())
+    }
+
+    fn apply_notation_move(&mut self, move_text: &str) -> Result<(), String> {
+        let parsed = ParsedMove::parse(move_text)?;
+        let piece = self
+            .piece_at(parsed.from)
+            .ok_or_else(|| format!("No piece at source in `{move_text}`"))?;
+        if piece.notation_symbol() != parsed.piece {
+            return Err(format!(
+                "Piece mismatch in `{move_text}`: source has {}",
+                piece.notation_symbol()
+            ));
+        }
+
+        let Some((_, move_kind)) = self.legal_move_kind(parsed.from, parsed.to) else {
+            return Err(format!("Illegal move `{move_text}`"));
+        };
+
+        if let Some(captured) = parsed.captured {
+            let actual = self
+                .captured_piece(parsed.to, move_kind)
+                .ok_or_else(|| format!("Capture marker without captured piece in `{move_text}`"))?;
+            if actual.notation_symbol() != captured {
+                return Err(format!(
+                    "Capture mismatch in `{move_text}`: target has {}",
+                    actual.notation_symbol()
+                ));
+            }
+        }
+
+        if let Some(actual_branch_timeline_id) = parsed.branch_timeline_id {
+            let expected = next_branch_timeline_id(piece.color, self);
+            if actual_branch_timeline_id != expected {
+                return Err(format!(
+                    "Branch timeline mismatch in `{move_text}`: expected L{expected}"
+                ));
+            }
+        }
+
+        if self.apply_move(parsed.from, parsed.to) == 0 {
+            return Err(self.last_message.clone());
+        }
+        Ok(())
+    }
+
+    fn move_notation(
+        &self,
+        piece: Piece,
+        from: Position,
+        to: Position,
+        move_kind: MoveKind,
+    ) -> String {
+        let mut notation = format!(
+            "{}{}{}{}{}",
+            position_prefix(from),
+            square_name(from),
+            piece.notation_symbol(),
+            target_prefix(from, to),
+            square_name(to)
+        );
+
+        if let Some(captured) = self.captured_piece(to, move_kind) {
+            notation.push('x');
+            notation.push(captured.notation_symbol());
+        }
+
+        if matches!(move_kind, MoveKind::Branch) && !self.is_latest_board(to.timeline_id, to.time) {
+            notation.push_str(&format!(">L{}", next_branch_timeline_id(piece.color, self)));
+        }
+
+        notation
+    }
+
+    fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
+        if self.royal_capture_available(color) || self.is_checkmate(color.opposite()) {
+            notation.push('#');
+        } else if self.is_in_check(color.opposite()) {
+            notation.push('+');
+        }
+        notation
+    }
+
+    fn captured_piece(&self, to: Position, move_kind: MoveKind) -> Option<Piece> {
+        match move_kind {
+            MoveKind::EnPassant {
+                captured_x,
+                captured_y,
+            } => self
+                .board(to.timeline_id, to.time)
+                .and_then(|board| board.board[captured_y as usize][captured_x as usize]),
+            _ => self.piece_at(to),
+        }
+    }
+
     fn in_bounds(x: i32, y: i32) -> bool {
         (0..8).contains(&x) && (0..8).contains(&y)
     }
@@ -148,6 +271,33 @@ impl PieceType {
             PieceType::Knight => "knight",
             PieceType::Pawn => "pawn",
             PieceType::Brawn => "brawn",
+        }
+    }
+
+    fn notation_letter(self) -> char {
+        match self {
+            PieceType::King => 'K',
+            PieceType::Knight => 'N',
+            PieceType::Bishop => 'B',
+            PieceType::Rook => 'R',
+            PieceType::Queen => 'Q',
+            PieceType::Pawn => 'P',
+            PieceType::Unicorn => 'U',
+            PieceType::Dragon => 'D',
+            PieceType::Princess => 'S',
+            PieceType::Brawn => 'W',
+            PieceType::CommonKing => 'C',
+            PieceType::RoyalQueen => 'Y',
+        }
+    }
+}
+
+impl Piece {
+    fn notation_symbol(self) -> char {
+        let symbol = self.piece_type.notation_letter();
+        match self.color {
+            Color::White => symbol,
+            Color::Black => symbol.to_ascii_lowercase(),
         }
     }
 }
@@ -301,6 +451,29 @@ fn position_json(position: Position) -> String {
         "{{\"timelineId\":{},\"time\":{},\"x\":{},\"y\":{}}}",
         position.timeline_id, position.time, position.x, position.y
     )
+}
+
+fn position_prefix(position: Position) -> String {
+    format!("T{}L{}", position.time, position.timeline_id)
+}
+
+fn target_prefix(from: Position, to: Position) -> String {
+    if from.timeline_id == to.timeline_id && from.time == to.time {
+        String::new()
+    } else {
+        position_prefix(to)
+    }
+}
+
+fn square_name(position: Position) -> String {
+    format!("{}{}", file_name(position.x), position.y + 1)
+}
+
+fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
+    match color {
+        Color::White => game.next_timeline_id,
+        Color::Black => game.next_black_timeline_id,
+    }
 }
 
 fn file_name(x: i32) -> &'static str {

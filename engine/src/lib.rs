@@ -10,6 +10,7 @@ include!("game.rs");
 include!("movegen.rs");
 include!("ai.rs");
 include!("notation.rs");
+include!("notation_parser.rs");
 
 // Training is native-only. It uses files, subprocesses, and git, none of which
 // should be pulled into the browser/WASM artifact.

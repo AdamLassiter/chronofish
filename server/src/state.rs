@@ -4,6 +4,7 @@ struct AppState {
     // static file and WASM artifact lookup.
     rooms: Arc<Mutex<HashMap<String, Room>>>,
     root: Arc<PathBuf>,
+    log_root: Arc<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -68,6 +69,11 @@ struct RoomBody {
     token: Option<String>,
     game: Option<Value>,
     message: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct LogBody {
+    notation: Option<String>,
 }
 
 #[derive(Serialize)]

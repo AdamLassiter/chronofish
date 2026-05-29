@@ -76,7 +76,7 @@ impl Game {
         depth: usize,
         max_depth: usize,
     ) -> bool {
-        if self.present_board().is_some_and(|board| board.side_to_move != color) {
+        if !self.has_pending_present_board(color) {
             return !self.is_in_check(color);
         }
 

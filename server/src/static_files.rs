@@ -24,6 +24,12 @@ async fn static_file(
                     header::CONTENT_TYPE,
                     HeaderValue::from_static(content_type(&path)),
                 );
+                response.headers_mut().insert(
+                    header::CONTENT_SECURITY_POLICY,
+                    HeaderValue::from_static(
+                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'",
+                    ),
+                );
                 response
             }
             Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
@@ -37,6 +43,7 @@ fn content_type(path: &Path) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("html") => "text/html; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
         Some("wasm") => "application/wasm",
         _ => "application/octet-stream",
     }
@@ -54,6 +61,11 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
         // The frontend imports a stable filename; Cargo writes the actual file in
         // target/wasm32-unknown-unknown/{debug,release}.
         return wasm_path(root);
+    }
+
+    if requested == Path::new("ai/parameters.json") {
+        let path = root.join("engine/src/ai/parameters.json");
+        return path.is_file().then_some(path);
     }
 
     let web_root = root.join("web");

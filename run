@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -eu
+set -xeu
 
 cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
 exec cargo run --bin chronofish-server

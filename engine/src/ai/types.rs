@@ -4,11 +4,15 @@
 const CHECKMATE_SCORE: i32 = 1_000_000;
 const MAX_TURN_PLANS: usize = 32;
 const MAX_MOVES_PER_NODE: usize = 24;
+const REQUIRED_MOVES_PER_BOARD: usize = 4;
 const MAX_QUIESCENCE_DEPTH: i32 = 2;
+const ASPIRATION_WINDOW: i32 = 400;
+const LATE_MOVE_REDUCTION_AFTER: usize = 8;
+const HISTORY_BONUS: i32 = 32;
 
 type SearchInstant = wasm_timer::Instant;
 
-#[derive(Clone)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct MoveStep {
     from: Position,
     to: Position,
@@ -30,7 +34,8 @@ struct AiSearchResult {
     status: &'static str,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EvalWeights {
     king: i32,
     common_king: i32,
@@ -94,11 +99,48 @@ struct SearchContext {
     max_nodes: usize,
     nodes: usize,
     deadline: Option<SearchInstant>,
-    table: std::collections::HashMap<String, SearchEntry>,
+    fast_eval: bool,
+    options: SearchOptions,
+    table: std::collections::HashMap<u64, SearchEntry>,
+    turn_plan_cache: std::collections::HashMap<u64, Vec<TurnPlan>>,
+    killers: Vec<[Option<MoveStep>; 2]>,
+    history: std::collections::HashMap<u64, i32>,
+    stats: SearchStats,
 }
 
 #[derive(Clone, Copy)]
 struct SearchEntry {
     depth: i32,
     score: i32,
+    best_move: Option<MoveStep>,
+}
+
+#[derive(Clone, Copy)]
+struct SearchOptions {
+    tt_best_move: bool,
+    killer_moves: bool,
+    history_heuristic: bool,
+    direct_quiescence: bool,
+    late_move_reduction: bool,
+    aspiration_windows: bool,
+    capture_sanity: bool,
+    turn_plan_cache: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SearchStats {
+    expensive_order_probes: usize,
+    turn_plan_cache_hits: usize,
+    tt_hits: usize,
+    beta_cutoffs: usize,
+    reduced_searches: usize,
+    aspiration_researches: usize,
+}
+
+#[derive(Clone)]
+struct SearchPerfSample {
+    label: &'static str,
+    elapsed_micros: u128,
+    nodes: usize,
+    stats: SearchStats,
 }

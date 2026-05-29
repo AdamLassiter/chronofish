@@ -31,13 +31,12 @@ export function isActiveTimeline(game, timeline) {
     return true;
   }
 
-  const sameOwnerRank = game.timelines
-    .filter((candidate) => candidate.owner === timeline.owner && candidate.id <= timeline.id)
-    .length;
-  const opponentOwner = timeline.owner === "white" ? "black" : "white";
-  const opponentCount = game.timelines.filter((candidate) => candidate.owner === opponentOwner).length;
+  const ids = game.timelines.map((candidate) => candidate.id);
+  const minTimeline = Math.min(...ids);
+  const maxTimeline = Math.max(...ids);
+  const activeDistance = Math.max(0, Math.min(-minTimeline, maxTimeline)) + 1;
 
-  return sameOwnerRank <= opponentCount + 1;
+  return Math.abs(timeline.id) <= activeDistance;
 }
 
 export function presentTime(game) {
@@ -48,6 +47,21 @@ export function presentTime(game) {
     .filter((time) => Number.isInteger(time));
 
   return activeLatestTimes.length ? Math.min(...activeLatestTimes) : 0;
+}
+
+export function hasUnplayedBoards(game) {
+  const activeLatestBoards = game.timelines
+    .filter((timeline) => isActiveTimeline(game, timeline))
+    .map((timeline) => getLatestBoard(game, timeline.id))
+    .filter(Boolean);
+  const present = activeLatestBoards.reduce(
+    (earliest, board) => (!earliest || board.time < earliest.time ? board : earliest),
+    null
+  );
+
+  return activeLatestBoards.some(
+    (board) => board.time === present?.time && board.sideToMove === game.turn
+  );
 }
 
 export function samePosition(a, b) {

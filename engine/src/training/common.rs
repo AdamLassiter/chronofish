@@ -12,7 +12,7 @@ struct TrainerConfig {
     nodes: usize,
     plies: usize,
     seed: u64,
-    time_budget_secs: u64,
+    max_seconds: Option<u64>,
     out: Option<String>,
     score: Option<String>,
     score_default: bool,
@@ -22,6 +22,13 @@ struct TrainerConfig {
     min_total_delta: i32,
     verify: String,
     ai_src: String,
+    hall_of_fame: String,
+    min_pairs: usize,
+    pair_batch: usize,
+    max_pairs: usize,
+    draw_window: usize,
+    draw_rate_limit: f64,
+    max_generations_without_candidate: usize,
 }
 
 #[derive(Clone)]

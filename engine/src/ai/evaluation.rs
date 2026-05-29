@@ -1,4 +1,57 @@
 impl Game {
+    fn evaluate_for_search(&self, color: Color, weights: &EvalWeights, fast: bool) -> i32 {
+        if fast {
+            self.evaluate_fast(color, weights)
+        } else {
+            self.evaluate(color, weights)
+        }
+    }
+
+    fn evaluate_fast(&self, color: Color, weights: &EvalWeights) -> i32 {
+        let mut score = 0;
+        for timeline in &self.timelines {
+            let active = self.is_active_timeline(timeline.id);
+            score += if active {
+                weights.active_timeline
+            } else {
+                weights.inactive_timeline
+            } * owner_factor(timeline.owner, color);
+
+            for board in &timeline.boards {
+                if !self.is_latest_board(timeline.id, board.time) {
+                    continue;
+                }
+                for (y, rank) in board.board.iter().enumerate() {
+                    for (x, piece) in rank.iter().enumerate() {
+                        let Some(piece) = piece else {
+                            continue;
+                        };
+                        let value = weights.piece_value(piece.piece_type);
+                        let positional = weights.advancement * advancement(piece.color, y as i32)
+                            + weights.centrality * centrality(x as i32, y as i32);
+                        score += if piece.color == color {
+                            value + positional
+                        } else {
+                            -value - positional
+                        };
+                    }
+                }
+            }
+        }
+        if self.is_in_check(color) {
+            score -= weights.check_penalty;
+        }
+        if self.is_in_check(color.opposite()) {
+            score += weights.check_penalty;
+        }
+        score
+            + self.present_progress(color) * weights.present_progress
+            + self.timeline_coordination(color, weights)
+            + self.royal_capture_pressure(color, weights)
+            + self.royal_shelter_balance(color, weights)
+            + self.space_advantage_balance(color, weights)
+    }
+
     fn evaluate(&self, color: Color, weights: &EvalWeights) -> i32 {
         if self.royal_capture_available(color) {
             return CHECKMATE_SCORE;

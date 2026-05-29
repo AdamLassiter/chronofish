@@ -97,7 +97,8 @@ shared without exposing a broad crate API:
   move ordering, and turn-plan generation;
 - `ai/evaluation.rs` scores material, timelines, safety, tactics, and 5D
   strategic features;
-- `ai/parameters.rs` contains the committed tuned evaluation weights;
+- `ai/parameters.json` contains the committed tuned evaluation weights and is
+  also served to the frontend at `/ai/parameters.json`;
 - `wasm_api.rs` exposes the C ABI consumed by the frontend.
 
 The default setup still uses orthodox pieces, but the engine models the variant
@@ -114,24 +115,32 @@ Run a continuous training cycle with:
 
 The trainer is native-only and lives under `engine/src/training/`. It mutates
 the evaluation weights, scores candidates in short self-play matches, verifies a
-candidate against the committed baseline, and only promotes it when the
-comparison clears the configured win/delta/significance thresholds.
+candidate against the committed baseline, and only promotes it when paired match
+evidence clears the configured confidence thresholds.
 
 Candidate scoring and seed comparisons use Rayon parallel iterators, so training
-uses available CPU cores without launching extra trainer processes. If a
-candidate is promoted, the trainer rewrites `engine/src/ai/parameters.rs`, runs
-verification, and commits the updated parameters.
+uses available CPU cores without launching extra trainer processes. Fitness uses
+paired candidate/baseline matches from identical seeded starts, mixes in tactical
+mate-training positions, tracks win-rate confidence and Elo-style estimates, and
+keeps recent promoted weights in a JSONL hall of fame. `./train` is evidence
+bounded rather than time bounded by default: it runs comparison pairs until a
+candidate is promoted, rejected, or marked inconclusive because it hit the pair
+or draw-stagnation caps. Set `TRAIN_MAX_SECONDS` for an optional wall-clock
+safety limit. If a candidate is promoted, the trainer rewrites
+`engine/src/ai/parameters.json`, appends the candidate to the hall of fame, runs
+verification, and commits the updated data.
 
 For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 --time-seconds 5
+  --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 \
+  --min-pairs 4 --max-pairs 8 --max-seconds 20
 ```
 
 ## AI Parameters
 
-`engine/src/ai/parameters.rs` returns an `EvalWeights` value. Larger positive
+`engine/src/ai/parameters.json` is deserialized into an `EvalWeights` value. Larger positive
 weights generally make the bot care more about that feature. Some fields are
 piece values, while others scale positional, tactical, or multiverse-specific
 terms.

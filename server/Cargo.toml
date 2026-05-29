@@ -1,6 +1,6 @@
 [package]
 name = "chronofish-server"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "Rust web and multiplayer room server for Chronofish"
 

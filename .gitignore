@@ -3,3 +3,6 @@
 
 # Ignore hidden files and directories
 .*
+
+# Ignore log files
+/logs

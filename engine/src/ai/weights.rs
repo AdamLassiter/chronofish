@@ -1,8 +1,9 @@
 impl EvalWeights {
     fn default_tuned() -> Self {
-        // Committed training data lives in a dedicated include target so the
-        // trainer never edits this type definition.
-        include!("parameters.rs")
+        // Committed training data lives in a dedicated JSON include target so
+        // the trainer never edits this type definition.
+        serde_json::from_str(include_str!("parameters.json"))
+            .expect("committed AI parameters should be valid JSON")
     }
 
     fn piece_value(self, piece_type: PieceType) -> i32 {

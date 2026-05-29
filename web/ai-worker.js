@@ -9,6 +9,13 @@ function readWasmString(ptr) {
   return new TextDecoder("utf-8").decode(bytes);
 }
 
+function writeWasmString(value) {
+  const bytes = new TextEncoder().encode(value ?? "");
+  const ptr = engine.chronofish_alloc(bytes.length);
+  new Uint8Array(engine.memory.buffer, ptr, bytes.length).set(bytes);
+  return { ptr, len: bytes.length };
+}
+
 async function loadEngine() {
   // The worker owns a separate WASM instance so AI search cannot block the UI
   // thread or mutate the visible game state.
@@ -42,13 +49,28 @@ function replayTurns(turns) {
   }
 }
 
+function replayNotation(notation) {
+  const { ptr, len } = writeWasmString(notation);
+  try {
+    if (!engine.chronofish_load_notation(ptr, len)) {
+      throw new Error(readWasmString(engine.chronofish_last_message()));
+    }
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
 self.addEventListener("message", async (event) => {
   // id is echoed back so the main thread can discard stale search results.
-  const { id, turns, depth, nodes, timeMs } = event.data;
+  const { id, notation, turns, depth, nodes, timeMs } = event.data;
 
   try {
     await loadEngine();
-    replayTurns(turns);
+    if (notation) {
+      replayNotation(notation);
+    } else {
+      replayTurns(turns ?? []);
+    }
     const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
     const pointer = engine.chronofish_ai_turn_timed_json
       ? fn(depth, nodes, timeMs ?? 10_000)

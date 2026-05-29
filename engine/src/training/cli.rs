@@ -8,14 +8,14 @@ pub fn run_training_cli() {
     }
 
     if config.score_default {
-        println!("{}", fitness(EvalWeights::default_tuned(), &config));
+        println!("{}", fitness(EvalWeights::default_tuned(), &config).summary());
         return;
     }
 
     if let Some(path) = &config.score {
         let json = std::fs::read_to_string(path).expect("failed to read score weights");
         let weights = EvalWeights::from_json(&json).expect("failed to parse score weights");
-        println!("{}", fitness(weights, &config));
+        println!("{}", fitness(weights, &config).summary());
         return;
     }
 
@@ -35,11 +35,11 @@ impl TrainerConfig {
         let mut config = Self {
             generations: usize::MAX,
             population: auto_population(),
-            depth: 2,
+            depth: 1,
             nodes: auto_nodes(),
-            plies: 4,
+            plies: 2,
             seed,
-            time_budget_secs: 600,
+            max_seconds: None,
             out: None,
             score: None,
             score_default: false,
@@ -48,7 +48,14 @@ impl TrainerConfig {
             min_wins: 0,
             min_total_delta: 0,
             verify: "cargo test -q".to_string(),
-            ai_src: "engine/src/ai/parameters.rs".to_string(),
+            ai_src: "engine/src/ai/parameters.json".to_string(),
+            hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
+            min_pairs: 12,
+            pair_batch: 4,
+            max_pairs: 48,
+            draw_window: 24,
+            draw_rate_limit: 0.80,
+            max_generations_without_candidate: 12,
         };
         let mut index = 0;
         let mut compare_seeds_overridden = false;
@@ -83,8 +90,8 @@ impl TrainerConfig {
                     config.seed = parse_arg(value, config.seed);
                     index += 2;
                 }
-                "--time-seconds" | "--time-budget" => {
-                    config.time_budget_secs = parse_arg(value, config.time_budget_secs);
+                "--max-seconds" | "--time-seconds" | "--time-budget" => {
+                    config.max_seconds = value.and_then(|raw| raw.parse().ok());
                     index += 2;
                 }
                 "--out" => {
@@ -121,11 +128,45 @@ impl TrainerConfig {
                     config.ai_src = value.unwrap_or(config.ai_src);
                     index += 2;
                 }
+                "--hall-of-fame" => {
+                    config.hall_of_fame = value.unwrap_or(config.hall_of_fame);
+                    index += 2;
+                }
+                "--min-pairs" => {
+                    config.min_pairs = parse_arg(value, config.min_pairs);
+                    index += 2;
+                }
+                "--pair-batch" => {
+                    config.pair_batch = parse_arg(value, config.pair_batch);
+                    index += 2;
+                }
+                "--max-pairs" => {
+                    config.max_pairs = parse_arg(value, config.max_pairs);
+                    index += 2;
+                }
+                "--draw-window" => {
+                    config.draw_window = parse_arg(value, config.draw_window);
+                    index += 2;
+                }
+                "--draw-rate-limit" => {
+                    config.draw_rate_limit = parse_arg(value, config.draw_rate_limit);
+                    index += 2;
+                }
+                "--max-generations-without-candidate" => {
+                    config.max_generations_without_candidate =
+                        parse_arg(value, config.max_generations_without_candidate);
+                    index += 2;
+                }
                 _ => index += 1,
             }
         }
         config.population = config.population.max(4);
-        config.time_budget_secs = config.time_budget_secs.max(1);
+        config.pair_batch = config.pair_batch.max(1);
+        config.min_pairs = config.min_pairs.max(1);
+        config.max_pairs = config.max_pairs.max(config.min_pairs);
+        config.draw_window = config.draw_window.max(1);
+        config.draw_rate_limit = config.draw_rate_limit.clamp(0.0, 1.0);
+        config.max_generations_without_candidate = config.max_generations_without_candidate.max(1);
         if !compare_seeds_overridden {
             config.compare_seeds = default_compare_seeds(config.seed);
         }
@@ -136,27 +177,6 @@ impl TrainerConfig {
             config.min_total_delta = (config.compare_seeds.len() as i32) * 50;
         }
         config
-    }
-
-    fn with_seed(&self, seed: u64) -> Self {
-        Self {
-            generations: self.generations,
-            population: self.population,
-            depth: self.depth,
-            nodes: self.nodes,
-            plies: self.plies,
-            seed,
-            time_budget_secs: self.time_budget_secs,
-            out: self.out.clone(),
-            score: self.score.clone(),
-            score_default: self.score_default,
-            train_cycle: self.train_cycle,
-            compare_seeds: self.compare_seeds.clone(),
-            min_wins: self.min_wins,
-            min_total_delta: self.min_total_delta,
-            verify: self.verify.clone(),
-            ai_src: self.ai_src.clone(),
-        }
     }
 
     fn with_search(&self, depth: i32, nodes: usize, plies: usize) -> Self {

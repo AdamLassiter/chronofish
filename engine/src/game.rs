@@ -52,6 +52,7 @@ impl Game {
             next_timeline_id: 1,
             next_black_timeline_id: -1,
             staged_turn: Vec::new(),
+            staged_notation: Vec::new(),
             last_message: "Select a white piece on a latest board.".to_string(),
         }
     }
@@ -168,8 +169,10 @@ impl Game {
 
         // Moves are staged until submit_turn accepts the whole turn. This allows
         // a side to make the multiple moves needed to advance the present line.
+        let notation = self.move_notation(piece, from, to, move_kind);
         self.staged_turn.push(self.checkpoint());
         self.apply_move_unchecked(from, to, piece, move_kind);
+        self.staged_notation.push(self.finish_move_notation(notation, piece.color));
         self.last_message = self.move_message(
             piece,
             from,
@@ -193,6 +196,7 @@ impl Game {
             timelines: self.timelines.clone(),
             next_timeline_id: self.next_timeline_id,
             next_black_timeline_id: self.next_black_timeline_id,
+            staged_notation: self.staged_notation.clone(),
             last_message: self.last_message.clone(),
         }
     }
@@ -202,6 +206,7 @@ impl Game {
         self.timelines = checkpoint.timelines;
         self.next_timeline_id = checkpoint.next_timeline_id;
         self.next_black_timeline_id = checkpoint.next_black_timeline_id;
+        self.staged_notation = checkpoint.staged_notation;
         self.last_message = checkpoint.last_message;
     }
 
@@ -234,7 +239,7 @@ impl Game {
             return 0;
         };
 
-        if present_side == self.turn {
+        if self.has_pending_present_board(self.turn) {
             self.last_message =
                 "Make moves until the present line reaches the opponent's turn.".to_string();
             return 0;
@@ -242,6 +247,7 @@ impl Game {
 
         self.turn = present_side;
         self.staged_turn.clear();
+        self.staged_notation.clear();
 
         if self.royal_capture_available(self.turn) {
             self.last_message = format!(
@@ -433,34 +439,46 @@ impl Game {
             .min_by_key(|board| board.time)
     }
 
+    fn present_time(&self) -> Option<i32> {
+        self.present_board().map(|board| board.time)
+    }
+
+    fn has_pending_present_board(&self, color: Color) -> bool {
+        let Some(present_time) = self.present_time() else {
+            return false;
+        };
+        self.timelines
+            .iter()
+            .filter(|timeline| self.is_active_timeline(timeline.id))
+            .filter_map(|timeline| timeline.boards.iter().max_by_key(|board| board.time))
+            .any(|board| board.time == present_time && board.side_to_move == color)
+    }
+
     fn is_active_timeline(&self, timeline_id: i32) -> bool {
         let Some(timeline) = self.timeline(timeline_id) else {
             return false;
         };
-        match timeline.owner {
-            TimelineOwner::Neutral => true,
-            TimelineOwner::White | TimelineOwner::Black => {
-                // A side may have at most one more active owned timeline than the
-                // opponent. Farther branches wait inactive until balance returns.
-                let same_owner = self
-                    .timelines
-                    .iter()
-                    .filter(|candidate| {
-                        candidate.owner == timeline.owner && candidate.id.abs() <= timeline.id.abs()
-                    })
-                    .count();
-                let opponent_owner = match timeline.owner {
-                    TimelineOwner::White => TimelineOwner::Black,
-                    TimelineOwner::Black => TimelineOwner::White,
-                    TimelineOwner::Neutral => TimelineOwner::Neutral,
-                };
-                let opponent_count = self
-                    .timelines
-                    .iter()
-                    .filter(|candidate| candidate.owner == opponent_owner)
-                    .count();
-                same_owner <= opponent_count + 1
-            }
+        if timeline.owner == TimelineOwner::Neutral {
+            return true;
         }
+
+        // Active timelines are balanced by distance from T0, not by owner rank.
+        // If one side has branched farther than the other, only the outermost
+        // timelines on that side go inactive.
+        let min_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .min()
+            .unwrap_or(0);
+        let max_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .max()
+            .unwrap_or(0);
+        let active_distance = (-min_timeline).min(max_timeline).max(0) + 1;
+
+        timeline.id.abs() <= active_distance
     }
 }

@@ -11,31 +11,18 @@ fn parse_seed_list(value: Option<&str>) -> Option<Vec<u64>> {
     (!seeds.is_empty()).then_some(seeds)
 }
 
-fn json_i32(value: &str, key: &str) -> Result<i32, String> {
-    let needle = format!("\"{key}\":");
-    let Some(start) = value.find(&needle).map(|index| index + needle.len()) else {
-        return Err(format!("missing key {key}"));
-    };
-    let tail = &value[start..];
-    let end = tail
-        .find(|character: char| !character.is_ascii_digit() && character != '-')
-        .unwrap_or(tail.len());
-    tail[..end]
-        .parse()
-        .map_err(|_| format!("invalid integer for {key}"))
-}
 fn auto_population() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(8)
-        .clamp(4, 12)
+        .clamp(4, 8)
 }
 
 fn auto_nodes() -> usize {
     std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get() * 50)
-        .unwrap_or(400)
-        .clamp(200, 800)
+        .map(|parallelism| parallelism.get() * 20)
+        .unwrap_or(160)
+        .clamp(80, 240)
 }
 
 fn random_seed() -> u64 {
@@ -51,9 +38,36 @@ fn default_compare_seeds(seed: u64) -> Vec<u64> {
 }
 
 fn promote_weights(weights: EvalWeights, ai_src: &str) {
-    // Runtime weights live in a small include file. Overwriting the whole file is
-    // less clever than field patching and avoids ever touching EvalWeights types.
-    std::fs::write(ai_src, weights.to_rust_parameters()).expect("failed to write AI parameters");
+    // Runtime weights live in a small JSON include file. Overwriting the whole
+    // file is less clever than field patching and avoids ever touching types.
+    let json = serde_json::to_string_pretty(&weights).expect("EvalWeights should serialize");
+    std::fs::write(ai_src, format!("{json}\n")).expect("failed to write AI parameters");
+}
+
+fn load_hall_of_fame(path: &str) -> Vec<EvalWeights> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .rev()
+        .filter_map(|line| EvalWeights::from_json(line).ok())
+        .take(4)
+        .collect()
+}
+
+fn append_hall_of_fame(path: &str, weights: EvalWeights) {
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        std::fs::create_dir_all(parent).expect("failed to create hall-of-fame directory");
+    }
+    let mut line = weights.to_json();
+    line.push('\n');
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    use std::io::Write;
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .expect("failed to append hall-of-fame weights");
 }
 
 fn ai_source_is_dirty(ai_src: &str) -> bool {

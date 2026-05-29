@@ -157,7 +157,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
 
   const lane = document.createElement("div");
   lane.className = "timeline-label";
-  lane.textContent = timeline.label;
+  lane.textContent = `L${timeline.id}`;
   row.append(lane);
 
   const marker = document.createElement("div");
