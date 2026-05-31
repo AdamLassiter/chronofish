@@ -58,6 +58,37 @@ for LAN play:
 HOST=0.0.0.0 PORT=5173 ./run
 ```
 
+Build and run the hosting container:
+
+```sh
+docker build -t chronofish .
+docker run --rm -p 5173:5173 chronofish
+```
+
+Build and run the training-enabled container:
+
+```sh
+docker build -f Dockerfile.training -t chronofish-training .
+docker volume create chronofish-models
+docker run --rm -p 5173:5173 -v chronofish-models:/app/engine/models/value-v1 chronofish-training
+```
+
+The training image exposes the frontend model replacement endpoints by compiling
+the server with `frontend-training`. Use the regular `Dockerfile` for public
+hosting.
+
+The same examples are available through Docker Compose:
+
+```sh
+docker compose up chronofish
+docker compose --profile training up chronofish-training
+```
+
+The regular service binds to <http://localhost:5173>. The training service binds
+to <http://localhost:5174> and persists trained models in the
+`chronofish-models` volume. Both services persist match logs in the
+`chronofish-logs` volume.
+
 Useful checks before committing:
 
 ```sh

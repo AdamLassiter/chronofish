@@ -3,9 +3,13 @@
 
 # Ignore hidden files and directories
 .*
+!.github/
+!.github/**
+!.dockerignore
 
 # Ignore backup models
 *.bak.cfnn
+*.bak.json
 
 # Ignore log files
 /logs

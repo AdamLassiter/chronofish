@@ -24,7 +24,7 @@ let aiEffortConfigs = {
   },
   expert: {
     label: "Bot: Expert",
-    displayNames: ["Kasparadox", "Deep Blue Shift", "Premove Checkamura"],
+    displayNames: ["Kasparadox", "Deep Blue Shift", "Premovaru Checkamura"],
     depth: 5,
     nodes: 200_000,
     timeMs: 15000
@@ -495,11 +495,64 @@ function render() {
     onSquareClick: handleSquareClick,
     setMultiplayerStatus
   });
+  renderEvaluationBar();
 
   if (phase === "game" && nextPresentTime !== null && nextPresentTime !== previousPresentTime) {
     scrollMultiverseToPresent();
   }
   lastScrolledPresentTime = nextPresentTime;
+}
+
+function renderEvaluationBar() {
+  if (!elements.evaluationBar || !elements.evaluationWhite || !elements.evaluationScore) {
+    return;
+  }
+  if (!engine?.chronofish_evaluation_json || phase !== "game") {
+    elements.evaluationBar.hidden = true;
+    return;
+  }
+
+  try {
+    const evaluation = JSON.parse(readWasmString(engine, engine.chronofish_evaluation_json()));
+    const score = Number(evaluation.score);
+    if (!Number.isFinite(score)) {
+      elements.evaluationBar.hidden = true;
+      return;
+    }
+    const whiteShare = 0.5 + 0.5 * normalizedEvaluation(score);
+    const whitePercent = Math.max(3, Math.min(97, whiteShare * 100));
+    elements.evaluationWhite.style.height = `${whitePercent}%`;
+    elements.evaluationScore.textContent = formatEvaluation(score);
+    elements.evaluationBar.dataset.leader = score >= 0 ? "white" : "black";
+    elements.evaluationBar.title = `White ${formatSignedPawns(score)}. Source: ${evaluation.source ?? "evaluation"}.`;
+    elements.evaluationBar.hidden = false;
+  } catch {
+    elements.evaluationBar.hidden = true;
+  }
+}
+
+function formatEvaluation(score) {
+  if (Math.abs(score) >= 90000) {
+    return score > 0 ? "M" : "-M";
+  }
+  return formatSignedPawns(score);
+}
+
+function normalizedEvaluation(score) {
+  const maxCentipawns = 100000;
+  const kneeCentipawns = 100;
+  const magnitude = Math.min(Math.abs(score), maxCentipawns);
+  const scaled = Math.log1p(magnitude / kneeCentipawns)
+    / Math.log1p(maxCentipawns / kneeCentipawns);
+  return Math.sign(score) * scaled;
+}
+
+function formatSignedPawns(score) {
+  const pawns = score / 100;
+  if (Math.abs(pawns) < 0.05) {
+    return "0.0";
+  }
+  return `${pawns > 0 ? "+" : ""}${pawns.toFixed(1)}`;
 }
 
 function scrollMultiverseToPresent() {

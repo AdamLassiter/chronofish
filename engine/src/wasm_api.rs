@@ -240,6 +240,38 @@ pub extern "C" fn chronofish_neural_position_json() -> *const u8 {
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_evaluation_json() -> *const u8 {
+    let json = with_game(|game| {
+        let weights = EvalWeights::default_tuned();
+        let (white, black, source) = VALUE_MODEL.with(|value_model| {
+            if let Some(model) = value_model.borrow().clone() {
+                let evaluator = ValueEvaluator::hybrid_from_model(model, 3, 1);
+                (
+                    evaluator.evaluate(game, Color::White, &weights),
+                    evaluator.evaluate(game, Color::Black, &weights),
+                    "nn",
+                )
+            } else {
+                (
+                    game.evaluate_heuristic(Color::White, &weights),
+                    game.evaluate_heuristic(Color::Black, &weights),
+                    "heuristic",
+                )
+            }
+        });
+        let score = (white - black) / 2;
+        serde_json::json!({
+            "score": score,
+            "white": white,
+            "black": black,
+            "source": source,
+        })
+        .to_string()
+    });
+    set_output(json)
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_training_sample_json(
     max_depth: i32,
     max_nodes: i32,

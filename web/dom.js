@@ -3,6 +3,9 @@
 export const elements = {
   multiverse: document.querySelector("#multiverse"),
   timelineGrid: document.querySelector("#timeline-grid"),
+  evaluationBar: document.querySelector("#evaluation-bar"),
+  evaluationWhite: document.querySelector("#evaluation-white"),
+  evaluationScore: document.querySelector("#evaluation-score"),
   message: document.querySelector("#message"),
   wasmStatus: document.querySelector("#wasm-status"),
   serverStatus: document.querySelector("#server-status"),

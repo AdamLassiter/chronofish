@@ -1,0 +1,33 @@
+services:
+  chronofish:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: chronofish:local
+    ports:
+      - "5173:5173"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5173
+    volumes:
+      - chronofish-logs:/app/logs
+
+  chronofish-training:
+    profiles:
+      - training
+    build:
+      context: .
+      dockerfile: Dockerfile.training
+    image: chronofish-training:local
+    ports:
+      - "5174:5173"
+    environment:
+      HOST: 0.0.0.0
+      PORT: 5173
+    volumes:
+      - chronofish-logs:/app/logs
+      - chronofish-models:/app/engine/models/value-v1
+
+volumes:
+  chronofish-logs:
+  chronofish-models:

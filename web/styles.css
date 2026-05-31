@@ -20,7 +20,7 @@ button {
 
 .app {
   min-height: 100vh;
-  padding: 18px;
+  padding: 18px 18px 18px 72px;
   background-color: #15181d;
   background-position: 0 0, 0 96px, 96px -96px, -96px 0, 0 0;
   background-size: 192px 192px;
@@ -336,6 +336,78 @@ button {
   padding: 10px 0 32px;
 }
 
+.evaluation-bar {
+  position: fixed;
+  left: 14px;
+  top: 96px;
+  bottom: 24px;
+  z-index: 8;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  justify-items: center;
+  gap: 8px;
+  width: 42px;
+  max-height: 620px;
+  color: #e9efe8;
+  user-select: none;
+}
+
+.evaluation-bar[hidden] {
+  display: none;
+}
+
+.evaluation-track {
+  position: relative;
+  width: 30px;
+  min-height: 220px;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 7px;
+  background: #08090b;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
+}
+
+.evaluation-white {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 50%;
+  background: #f4f7f2;
+  transition: height 160ms ease;
+}
+
+.evaluation-score {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  min-width: 42px;
+  transform: translate(-50%, -50%) rotate(-90deg);
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: rgba(13, 15, 18, 0.82);
+  color: #f4f7f2;
+  font-size: 0.72rem;
+  font-weight: 900;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.evaluation-bar[data-leader="white"] .evaluation-score {
+  background: rgba(244, 247, 242, 0.88);
+  color: #101315;
+}
+
+.evaluation-label {
+  writing-mode: vertical-rl;
+  color: #bfcac4;
+  font-size: 0.68rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
 .timeline-grid {
   position: relative;
   display: grid;
@@ -593,7 +665,7 @@ button {
 
 @media (max-width: 760px) {
   .app {
-    padding: 12px;
+    padding: 12px 12px 12px 58px;
   }
 
   .topbar {
@@ -622,5 +694,17 @@ button {
 
   .square {
     font-size: 1.35rem;
+  }
+
+  .evaluation-bar {
+    left: 9px;
+    top: 84px;
+    bottom: 18px;
+    width: 36px;
+  }
+
+  .evaluation-track {
+    width: 26px;
+    min-height: 180px;
   }
 }
