@@ -144,7 +144,10 @@ function renderSquare({ position, board, selected, legalTargets, highlights, onS
     square.classList.add("is-check");
   }
 
-  square.addEventListener("click", () => onSquareClick(position));
+  square.addEventListener("click", (event) => {
+    event.preventDefault();
+    onSquareClick(position);
+  });
   return square;
 }
 

@@ -169,6 +169,16 @@ function botDisplayName(color) {
   return names[stableIndex(`${multiplayer.roomId}:${color}:${effortName}`, names.length)];
 }
 
+function playerDisplayName(color) {
+  return isBotAssignment(assignments[color]) ? botDisplayName(color) : capitalize(color);
+}
+
+function displayGameMessage(message) {
+  return String(message ?? "")
+    .replace(/\bWhite\b/g, playerDisplayName("white"))
+    .replace(/\bBlack\b/g, playerDisplayName("black"));
+}
+
 function readAssignments() {
   return {
     white: normalizeAssignment(elements.whitePlayerSelect.value, "local"),
@@ -212,6 +222,10 @@ function engineSnapshot() {
 
 function engineLastMessage() {
   return readWasmString(engine, engine.chronofish_last_message());
+}
+
+function engineDisplayMessage() {
+  return displayGameMessage(engineLastMessage());
 }
 
 function stagedTurnNotation() {
@@ -298,7 +312,7 @@ function replayNotation(notation) {
   const { ptr, len } = writeWasmString(engine, text);
   try {
     if (!engine.chronofish_load_notation(ptr, len)) {
-      throw new Error(engineLastMessage());
+      throw new Error(engineDisplayMessage());
     }
   } finally {
     engine.chronofish_dealloc(ptr, len);
@@ -402,7 +416,7 @@ function applyEngineMove(from, to) {
     to.x,
     to.y
   );
-  const message = engineLastMessage();
+  const message = engineDisplayMessage();
 
   if (!ok) {
     elements.message.textContent = message;
@@ -432,8 +446,8 @@ function handleSquareClick(position) {
     elements.message.textContent = phase !== "game"
       ? "Start the game from the lobby first."
       : multiplayer.connected
-        ? `You are ${multiplayer.color}; waiting for ${game.turn}.`
-        : `Waiting for ${game.turn}.`;
+        ? `You are ${multiplayer.color}; waiting for ${playerDisplayName(game.turn)}.`
+        : `Waiting for ${playerDisplayName(game.turn)}.`;
     return;
   }
 
@@ -444,7 +458,7 @@ function handleSquareClick(position) {
   // request legal targets from the engine.
   if (selected && existingTarget) {
     const moveMessage = applyEngineMove(selected, position);
-    render();
+    render({ preserveScroll: true });
     return;
   }
 
@@ -459,17 +473,18 @@ function handleSquareClick(position) {
     selected = position;
     legalTargets = legalTargetsFor(position);
     elements.message.textContent = `${capitalize(piece.color)} ${piece.type} selected. ${legalTargets.length} legal target${legalTargets.length === 1 ? "" : "s"}.`;
-    render();
+    render({ preserveScroll: true });
     return;
   }
 
   selected = null;
   legalTargets = [];
   elements.message.textContent = `Select a ${game.turn} piece on a latest board.`;
-  render();
+  render({ preserveScroll: true });
 }
 
-function render() {
+function render(options = {}) {
+  const scrollState = options.preserveScroll ? captureScrollState() : null;
   const previousPresentTime = lastScrolledPresentTime;
   const nextPresentTime = committedGame.timelines.length ? presentTime(committedGame) : null;
   const inGame = phase === "game";
@@ -497,10 +512,29 @@ function render() {
   });
   renderEvaluationBar();
 
-  if (phase === "game" && nextPresentTime !== null && nextPresentTime !== previousPresentTime) {
+  if (scrollState) {
+    restoreScrollState(scrollState);
+  } else if (phase === "game" && nextPresentTime !== null && nextPresentTime !== previousPresentTime) {
     scrollMultiverseToPresent();
   }
   lastScrolledPresentTime = nextPresentTime;
+}
+
+function captureScrollState() {
+  return {
+    windowX: window.scrollX,
+    windowY: window.scrollY,
+    multiverseX: elements.multiverse?.scrollLeft ?? 0,
+    multiverseY: elements.multiverse?.scrollTop ?? 0
+  };
+}
+
+function restoreScrollState(state) {
+  if (elements.multiverse) {
+    elements.multiverse.scrollLeft = state.multiverseX;
+    elements.multiverse.scrollTop = state.multiverseY;
+  }
+  window.scrollTo(state.windowX, state.windowY);
 }
 
 function renderEvaluationBar() {
@@ -744,8 +778,8 @@ async function enterPostMatchReview(message, credentials = null) {
 }
 
 function victoryMessage(loser) {
-  const winner = loser === "white" ? "Black" : "White";
-  return `${winner} wins. ${capitalize(loser)} conceded.`;
+  const winner = loser === "white" ? "black" : "white";
+  return `${playerDisplayName(winner)} wins. ${playerDisplayName(loser)} conceded.`;
 }
 
 async function concede(color = game.turn, credentials = null) {
@@ -882,7 +916,7 @@ function handleAiWorkerMessage(event) {
   }
 
   if (result.status !== "ok" || result.moves.length === 0) {
-    elements.message.textContent = "Bot found no legal turn and conceded.";
+    elements.message.textContent = `${botDisplayName(botColor)} found no legal turn and conceded.`;
     concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
     return;
   }
@@ -901,12 +935,12 @@ function handleAiWorkerMessage(event) {
 
   const turnNotation = stagedTurnNotation();
   if (!engine.chronofish_submit_turn()) {
-    elements.message.textContent = engineLastMessage();
+    elements.message.textContent = engineDisplayMessage();
     concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
     return;
   }
 
-  const message = engineLastMessage();
+  const message = engineDisplayMessage();
   game = engineSnapshot();
   submittedTurns.push(stagedMoves.map(cloneMove));
   appendSubmittedNotation(turnNotation, botColor);
@@ -914,7 +948,7 @@ function handleAiWorkerMessage(event) {
   committedGame = game;
   selected = null;
   legalTargets = [];
-  const botMessage = `Bot ${botColor} moved. ${message}`;
+  const botMessage = `${botDisplayName(botColor)} moved. ${message}`;
   elements.message.textContent = botMessage;
   render();
   if (isMatchOverMessage(message)) {
@@ -1178,7 +1212,7 @@ elements.resetButton.addEventListener("click", () => {
     return;
   }
   if (!canActNow()) {
-    elements.message.textContent = `Waiting for ${game.turn}.`;
+    elements.message.textContent = `Waiting for ${playerDisplayName(game.turn)}.`;
     return;
   }
 
@@ -1202,12 +1236,12 @@ elements.undoMoveButton.addEventListener("click", () => {
     return;
   }
   if (!canActNow()) {
-    elements.message.textContent = `Waiting for ${game.turn}.`;
+    elements.message.textContent = `Waiting for ${playerDisplayName(game.turn)}.`;
     return;
   }
 
   if (!engine.chronofish_undo_staged_move()) {
-    elements.message.textContent = engineLastMessage();
+    elements.message.textContent = engineDisplayMessage();
     return;
   }
 
@@ -1218,7 +1252,7 @@ elements.undoMoveButton.addEventListener("click", () => {
   }
   selected = null;
   legalTargets = [];
-  elements.message.textContent = engineLastMessage();
+  elements.message.textContent = engineDisplayMessage();
   render();
 });
 
@@ -1228,18 +1262,18 @@ elements.submitTurnButton.addEventListener("click", () => {
     return;
   }
   if (!canActNow()) {
-    elements.message.textContent = `Waiting for ${game.turn}.`;
+    elements.message.textContent = `Waiting for ${playerDisplayName(game.turn)}.`;
     return;
   }
 
   const actor = game.turn;
   const turnNotation = stagedTurnNotation();
   if (!engine.chronofish_submit_turn()) {
-    elements.message.textContent = engineLastMessage();
+    elements.message.textContent = engineDisplayMessage();
     return;
   }
 
-  const message = engineLastMessage();
+  const message = engineDisplayMessage();
   game = engineSnapshot();
   if (stagedMoves.length > 0) {
     submittedTurns.push(stagedMoves.map(cloneMove));
@@ -1265,7 +1299,7 @@ elements.concedeButton.addEventListener("click", () => {
     return;
   }
   if (!canActNow()) {
-    elements.message.textContent = `Waiting for ${game.turn}.`;
+    elements.message.textContent = `Waiting for ${playerDisplayName(game.turn)}.`;
     return;
   }
 
