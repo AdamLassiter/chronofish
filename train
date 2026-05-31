@@ -1,26 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-ENGINE="$ROOT/engine/Cargo.toml"
+echo "Frontend WebGPU training is served by the dev server with training endpoints enabled."
+echo "Open the app and use the Neural training HUD panel."
 
-VERIFY="${TRAIN_VERIFY:-cargo test -q}"
-MAX_SECONDS="${TRAIN_MAX_SECONDS:-}"
-CONFIG="${TRAIN_CONFIG:-expert}"
-
-while :; do
-  if [ -n "$MAX_SECONDS" ]; then
-    cargo run --release --manifest-path "$ENGINE" --bin train -- \
-      --train-cycle \
-      --config "$CONFIG" \
-      --max-seconds "$MAX_SECONDS" \
-      --verify "$VERIFY" \
-      "$@"
-  else
-    cargo run --release --manifest-path "$ENGINE" --bin train -- \
-      --train-cycle \
-      --config "$CONFIG" \
-      --verify "$VERIFY" \
-      "$@"
-  fi
-done
+cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
+exec cargo run --features frontend-training --bin chronofish-server

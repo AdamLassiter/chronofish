@@ -10,13 +10,14 @@ fn run_training_cycle(config: &TrainerConfig) {
     }
 
     println!(
-        "training config={} max_seconds={} population={} base_depth={} base_nodes={} plies={} seed={} min_pairs={} max_pairs={}",
+        "training config={} max_seconds={} population={} finalists={} base_depth={} base_nodes={} plies={} seed={} min_pairs={} max_pairs={}",
         config.effort,
         config
             .max_seconds
             .map(|seconds| seconds.to_string())
             .unwrap_or_else(|| "none".to_string()),
         config.population,
+        config.finalist_count,
         config.depth,
         config.nodes,
         config.plies,
@@ -47,15 +48,23 @@ fn run_training_cycle(config: &TrainerConfig) {
             println!("comparison stopped: max seconds exhausted");
             break;
         }
-        for _ in 0..config.pair_batch {
-            if training_expired(deadline) || comparison_stats.played >= config.max_pairs {
-                break;
-            }
-            let seed = rng.next_u64();
-            let report = paired_baseline_report(candidate, seed, config, deadline);
-        comparison_match_stats.add(report.candidate.matches);
-        comparison_match_stats.add(report.baseline.matches);
-        let delta = report.delta();
+        let remaining_pairs = config.max_pairs.saturating_sub(comparison_stats.played);
+        let seeds: Vec<u64> = (0..config.pair_batch.min(remaining_pairs))
+            .take_while(|_| !training_expired(deadline))
+            .map(|_| rng.next_u64())
+            .collect();
+        if seeds.is_empty() {
+            break;
+        }
+        let reports: Vec<(u64, PairReport)> = seeds
+            .par_iter()
+            .copied()
+            .map(|seed| (seed, paired_baseline_report(candidate, seed, config, deadline)))
+            .collect();
+        for (seed, report) in reports {
+            comparison_match_stats.add(report.candidate.matches);
+            comparison_match_stats.add(report.baseline.matches);
+            let delta = report.delta();
         comparison_stats.record(delta);
         deltas.push(delta);
         let result = if delta > 0 {
@@ -67,9 +76,9 @@ fn run_training_cycle(config: &TrainerConfig) {
         };
         println!(
             "seed {seed}: {result} candidate={} baseline={} delta={delta}",
-            report.candidate.summary(),
-            report.baseline.summary()
-        );
+                report.candidate.summary(),
+                report.baseline.summary()
+            );
         }
         let significance = significance(&deltas);
         match statistical_decision(comparison_stats, &deltas, significance, config) {
@@ -154,11 +163,12 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
         let search_nodes = config.nodes * search_depth as usize;
         let search_plies = config.plies + depth_boost as usize * 2;
         let scoring_config = config.with_search(search_depth, search_nodes, search_plies);
+        let screening_config = scoring_config.screening_search();
         let baseline_report =
             fitness_until(EvalWeights::default_tuned(), &scoring_config, deadline);
         let started_candidates = AtomicUsize::new(0);
         let population_len = population.len();
-        let mut scored: Vec<(FitnessReport, EvalWeights)> = population
+        let mut screened: Vec<(FitnessReport, EvalWeights)> = population
             .par_iter()
             .copied()
             .filter_map(|weights| {
@@ -168,9 +178,42 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
                 let index = started_candidates.fetch_add(1, Ordering::Relaxed);
                 let remaining = remaining_seconds(deadline);
                 eprintln!(
-                    "generation {generation}: scoring candidate {}/{} depth={search_depth} nodes={search_nodes} plies={search_plies} remaining={}s",
+                    "generation {generation}: screening candidate {}/{} depth={} nodes={} plies={} remaining={}s",
                     index + 1,
                     population_len,
+                    screening_config.depth,
+                    screening_config.nodes,
+                    screening_config.plies,
+                    remaining
+                );
+                let report = fitness_until_with_opponent_limit(weights, &screening_config, deadline, 2);
+                Some((report, weights))
+            })
+            .collect();
+        if screened.is_empty() {
+            break;
+        }
+        screened.sort_by_key(|entry| std::cmp::Reverse(entry.0.score));
+        let finalist_count = config.finalist_count.min(screened.len()).max(2);
+        let finalists: Vec<EvalWeights> = screened
+            .iter()
+            .take(finalist_count)
+            .map(|entry| entry.1)
+            .collect();
+        let finalist_started = AtomicUsize::new(0);
+        let mut scored: Vec<(FitnessReport, EvalWeights)> = finalists
+            .par_iter()
+            .copied()
+            .filter_map(|weights| {
+                if training_expired(deadline) {
+                    return None;
+                }
+                let index = finalist_started.fetch_add(1, Ordering::Relaxed);
+                let remaining = remaining_seconds(deadline);
+                eprintln!(
+                    "generation {generation}: scoring finalist {}/{} depth={search_depth} nodes={search_nodes} plies={search_plies} remaining={}s",
+                    index + 1,
+                    finalist_count,
                     remaining
                 );
                 let report = fitness_until(weights, &scoring_config, deadline);
@@ -201,7 +244,11 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
         previous_best = Some(best);
         let remaining = remaining_seconds(deadline);
         eprintln!(
-            "generation {generation}: depth={search_depth} nodes={search_nodes} plies={search_plies} best={best} avg={average:.1} worst={worst} improvement={improvement:+} population={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
+            "generation {generation}: screen_depth={} screen_nodes={} screen_plies={} depth={search_depth} nodes={search_nodes} plies={search_plies} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
+            screening_config.depth,
+            screening_config.nodes,
+            screening_config.plies,
+            screened.len(),
             scored.len(),
             generation_match_stats.summary(),
             quality.wins,
@@ -276,6 +323,15 @@ fn fitness_until(
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> FitnessReport {
+    fitness_until_with_opponent_limit(weights, config, deadline, 4)
+}
+
+fn fitness_until_with_opponent_limit(
+    weights: EvalWeights,
+    config: &TrainerConfig,
+    deadline: Option<SearchInstant>,
+    opponent_limit: usize,
+) -> FitnessReport {
     // Score candidates from paired seeded starts against the committed default,
     // nearby mutations, and recent promoted weights. Match results are primary;
     // heuristic margins only break ties and guide selection inside noisy draws.
@@ -289,9 +345,18 @@ fn fitness_until(
         opponents.push(default.mutate(&mut rng));
     }
 
-    for (index, opponent) in opponents.into_iter().take(4).enumerate() {
-        let seed = rng.next_u64() ^ ((index as u64) << 32);
-        let pair = paired_report(weights, opponent, seed, config, deadline);
+    let work: Vec<(EvalWeights, u64)> = opponents
+        .into_iter()
+        .take(opponent_limit.max(1))
+        .enumerate()
+        .map(|(index, opponent)| (opponent, rng.next_u64() ^ ((index as u64) << 32)))
+        .collect();
+    let pairs: Vec<PairReport> = work
+        .par_iter()
+        .map(|(opponent, seed)| paired_report(weights, *opponent, *seed, config, deadline))
+        .collect();
+
+    for pair in pairs {
         report.matches.add(pair.candidate.matches);
         report.score += pair.delta();
         report.blunders += pair.candidate.blunders;
@@ -415,17 +480,30 @@ fn paired_report(
     deadline: Option<SearchInstant>,
 ) -> PairReport {
     let start = seeded_start_position(seed, config, deadline);
-    let candidate_white = play_match_until(
-        start.clone(),
-        candidate,
-        baseline,
-        Color::White,
-        config,
-        deadline,
+    let black_start = start.clone();
+    let (candidate_white, candidate_black) = rayon::join(
+        || {
+            play_match_until(
+                start,
+                candidate,
+                baseline,
+                Color::White,
+                config,
+                deadline,
+            )
+        },
+        || {
+            play_match_until(
+                black_start,
+                candidate,
+                baseline,
+                Color::Black,
+                config,
+                deadline,
+            )
+        },
     );
     let baseline_black = invert_report(candidate_white);
-    let candidate_black =
-        play_match_until(start, candidate, baseline, Color::Black, config, deadline);
     let baseline_white = invert_report(candidate_black);
 
     let mut report = PairReport::default();
@@ -469,21 +547,35 @@ fn select_league_winner(
     opponents.extend(hall_of_fame.iter().copied().take(2));
     opponents.extend(contenders.iter().copied());
 
-    let mut best = None;
-    let mut best_stats = ComparisonStats::default();
-    for (index, contender) in contenders.into_iter().enumerate() {
-        let mut stats = ComparisonStats::default();
-        for (opponent_index, opponent) in opponents.iter().copied().enumerate() {
-            if training_expired(deadline) {
-                break;
+    let mut results: Vec<(usize, EvalWeights, ComparisonStats)> = contenders
+        .par_iter()
+        .copied()
+        .enumerate()
+        .map(|(index, contender)| {
+            let mut stats = ComparisonStats::default();
+            let reports: Vec<PairReport> = opponents
+                .par_iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(opponent_index, opponent)| {
+                    if training_expired(deadline) {
+                        return None;
+                    }
+                    let seed = config.seed
+                        ^ ((index as u64) << 32)
+                        ^ ((opponent_index as u64) << 48)
+                        ^ 0xa5a5_5a5a_d3c3_b4b4;
+                    Some(paired_report(contender, opponent, seed, config, deadline))
+                })
+                .collect();
+            for report in reports {
+                stats.record(report.delta());
             }
-            let seed = config.seed
-                ^ ((index as u64) << 32)
-                ^ ((opponent_index as u64) << 48)
-                ^ 0xa5a5_5a5a_d3c3_b4b4;
-            let report = paired_report(contender, opponent, seed, config, deadline);
-            stats.record(report.delta());
-        }
+            (index, contender, stats)
+        })
+        .collect();
+    results.sort_by_key(|entry| entry.0);
+    for (index, _, stats) in &results {
         eprintln!(
             "league candidate {}: pairs={} wins={} losses={} draws={} win_rate={:.1}% elo={:+.0}",
             index + 1,
@@ -494,15 +586,18 @@ fn select_league_winner(
             stats.win_rate() * 100.0,
             stats.estimated_elo()
         );
-        if best.is_none()
-            || stats.points > best_stats.points
-            || stats.points == best_stats.points && stats.total_delta > best_stats.total_delta
-        {
-            best = Some(contender);
-            best_stats = stats;
-        }
     }
-    best
+    results
+        .into_iter()
+        .max_by(|left, right| {
+            left.2
+                .points
+                .partial_cmp(&right.2.points)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.2.total_delta.cmp(&right.2.total_delta))
+                .then_with(|| right.0.cmp(&left.0))
+        })
+        .map(|entry| entry.1)
 }
 
 fn tournament(scored: &[(FitnessReport, EvalWeights)], rng: &mut Lcg) -> EvalWeights {

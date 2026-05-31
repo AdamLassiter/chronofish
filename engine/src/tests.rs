@@ -1635,6 +1635,7 @@ mod tests {
             draw_window: 3,
             draw_rate_limit: 0.8,
             max_generations_without_candidate: 1,
+            finalist_count: 2,
         };
 
         assert_eq!(train_weights(&config).to_json(), train_weights(&config).to_json());
@@ -1666,6 +1667,7 @@ mod tests {
             draw_window: 4,
             draw_rate_limit: 0.75,
             max_generations_without_candidate: 1,
+            finalist_count: 2,
         }
     }
 
@@ -1714,6 +1716,99 @@ mod tests {
         assert_eq!(
             statistical_decision(stats, &deltas, significance(&deltas), &config),
             StatisticalDecision::Inconclusive
+        );
+    }
+
+    #[test]
+    fn neural_encoder_shape_mask_and_order_are_stable() {
+        let game = Game::new();
+        let encoded = game.encode_neural_position(Color::White);
+
+        assert_eq!(encoded.values.len(), NEURAL_INPUT_SIZE);
+        assert_eq!(encoded.board_count, 1);
+        for square in 0..NEURAL_BOARD_SQUARES {
+            assert_eq!(encoded.values[neural_feature_index(0, 30, square)], 1.0);
+            assert_eq!(encoded.values[neural_feature_index(1, 30, square)], 0.0);
+        }
+        assert_eq!(
+            game.neural_board_selection(),
+            game.neural_board_selection(),
+            "board ordering must be deterministic"
+        );
+    }
+
+    #[test]
+    fn neural_evaluator_missing_model_falls_back_to_heuristic() {
+        let game = Game::new();
+        let weights = EvalWeights::default_tuned();
+        let evaluator = NeuralEvaluator::missing_model(Some("missing/value-model.json".to_string()));
+
+        assert!(!evaluator.is_available());
+        assert_eq!(evaluator.model_path(), Some("missing/value-model.json"));
+        assert_eq!(
+            evaluator.evaluate(&game, Color::White, &weights),
+            game.evaluate(Color::White, &weights)
+        );
+    }
+
+    #[test]
+    fn neural_model_inference_is_deterministic_for_fixed_model() {
+        let path = std::env::temp_dir().join(format!(
+            "chronofish-value-model-{}.json",
+            std::process::id()
+        ));
+        let model = NeuralLinearModel {
+            bias: 42.0,
+            scale: 1.0,
+            feature_weights: vec![0.0; NEURAL_INPUT_SIZE],
+            projection_size: 0,
+            projection_seed: default_projection_seed(),
+            hidden_layers: Vec::new(),
+            hidden_weights: Vec::new(),
+        };
+        std::fs::write(&path, serde_json::to_string(&model).unwrap()).unwrap();
+
+        let game = Game::new();
+        let evaluator = NeuralEvaluator::from_path(path.to_string_lossy().to_string());
+        assert!(evaluator.is_available());
+        assert_eq!(evaluator.predict(&game, Color::White), Some(42));
+        assert_eq!(evaluator.predict(&game, Color::White), Some(42));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn hybrid_evaluator_completes_legal_bot_move_with_missing_model() {
+        let game = Game::new();
+        let evaluator = ValueEvaluator::Hybrid(HybridEvaluator {
+            heuristic_weight: 3,
+            neural_weight: 1,
+            neural: NeuralEvaluator::missing_model(None),
+        });
+        let (result, _) = game.best_ai_turn_with_value_evaluator(
+            1,
+            20,
+            None,
+            SearchOptions::optimized(),
+            evaluator,
+            None,
+        );
+
+        assert_eq!(result.status, "ok");
+        assert!(!result.moves.is_empty());
+    }
+
+    #[test]
+    fn projected_neural_features_are_dense_and_deterministic() {
+        let game = Game::new();
+        let encoded = game.encode_neural_position(Color::White);
+        let projected = project_neural_features(&encoded.values, 64, default_projection_seed());
+
+        assert_eq!(projected.len(), 64);
+        assert!(projected.iter().filter(|value| **value != 0.0).count() > 48);
+        assert_eq!(
+            projected,
+            project_neural_features(&encoded.values, 64, default_projection_seed())
         );
     }
 }

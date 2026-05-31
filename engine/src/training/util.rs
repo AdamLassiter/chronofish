@@ -15,7 +15,14 @@ fn auto_population() -> usize {
     std::thread::available_parallelism()
         .map(|parallelism| parallelism.get())
         .unwrap_or(8)
-        .clamp(4, 8)
+        .clamp(4, 16)
+}
+
+fn auto_finalists() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get() / 2)
+        .unwrap_or(4)
+        .clamp(3, 6)
 }
 
 fn auto_nodes() -> usize {

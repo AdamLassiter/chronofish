@@ -1,5 +1,9 @@
 impl Game {
     fn evaluate(&self, color: Color, weights: &EvalWeights) -> i32 {
+        HeuristicEvaluator.evaluate(self, color, weights)
+    }
+
+    fn evaluate_heuristic(&self, color: Color, weights: &EvalWeights) -> i32 {
         if let Some(score) = self.terminal_score(color) {
             return score;
         }

@@ -30,6 +30,7 @@ struct TrainerConfig {
     draw_window: usize,
     draw_rate_limit: f64,
     max_generations_without_candidate: usize,
+    finalist_count: usize,
 }
 
 #[derive(Clone)]

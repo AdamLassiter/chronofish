@@ -3,6 +3,7 @@
 // write UTF-8 into OUTPUT for JavaScript to copy immediately.
 thread_local! {
     static GAME: RefCell<Option<Game>> = const { RefCell::new(None) };
+    static VALUE_MODEL: RefCell<Option<NeuralLinearModel>> = const { RefCell::new(None) };
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -135,7 +136,7 @@ pub extern "C" fn chronofish_undo_staged_move() -> i32 {
 
 #[no_mangle]
 pub extern "C" fn chronofish_ai_turn_json(max_depth: i32, max_nodes: i32) -> *const u8 {
-    let json = with_game(|game| game.ai_turn_json(max_depth, max_nodes));
+    let json = with_game(|game| ai_turn_json_with_optional_model(game, max_depth, max_nodes, None));
     set_output(json)
 }
 
@@ -145,7 +146,144 @@ pub extern "C" fn chronofish_ai_turn_timed_json(
     max_nodes: i32,
     millis: i32,
 ) -> *const u8 {
-    let json = with_game(|game| game.ai_turn_timed_json(max_depth, max_nodes, millis));
+    let json = with_game(|game| {
+        ai_turn_json_with_optional_model(game, max_depth, max_nodes, search_deadline(millis))
+    });
+    set_output(json)
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 model JSON in this WASM
+/// instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_set_neural_model_json(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Ok(json) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    let Ok(model) = serde_json::from_str::<NeuralLinearModel>(json) else {
+        return 0;
+    };
+    VALUE_MODEL.with(|value_model| {
+        *value_model.borrow_mut() = Some(model);
+    });
+    1
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable compact model data in this WASM
+/// instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_set_neural_model_bytes(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Some(model) = parse_compact_neural_model(bytes) else {
+        return 0;
+    };
+    VALUE_MODEL.with(|value_model| {
+        *value_model.borrow_mut() = Some(model);
+    });
+    1
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_clear_neural_model() {
+    VALUE_MODEL.with(|value_model| {
+        *value_model.borrow_mut() = None;
+    });
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_neural_sample_json(max_depth: i32, max_nodes: i32) -> *const u8 {
+    let json = with_game(|game| {
+        let result = game.best_ai_turn(max_depth.max(1), max_nodes.max(1), None);
+        let encoded = game.encode_neural_position(game.turn);
+        serde_json::json!({
+            "label": result.score,
+            "policy": policy_bucket(result.moves.first()),
+            "depth": result.depth,
+            "nodes": result.nodes,
+            "sideToMove": match game.turn {
+                Color::White => "white",
+                Color::Black => "black",
+            },
+            "boardCount": encoded.board_count,
+            "features": encoded.values
+        })
+        .to_string()
+    });
+    set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_neural_position_json() -> *const u8 {
+    let json = with_game(|game| {
+        let encoded = game.encode_neural_position(game.turn);
+        serde_json::json!({
+            "sideToMove": match game.turn {
+                Color::White => "white",
+                Color::Black => "black",
+            },
+            "boardCount": encoded.board_count,
+            "features": encoded.values
+        })
+        .to_string()
+    });
+    set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_training_sample_json(
+    max_depth: i32,
+    max_nodes: i32,
+    seed: u32,
+    plies: i32,
+) -> *const u8 {
+    let json = with_game(|game| {
+        let mut sample_game = game.clone_for_search();
+        apply_training_playout(&mut sample_game, seed, plies.max(0) as usize);
+        let result = sample_game.best_ai_turn(max_depth.max(1), max_nodes.max(1), None);
+        let encoded = sample_game.encode_neural_position(sample_game.turn);
+        serde_json::json!({
+            "label": result.score,
+            "policy": policy_bucket(result.moves.first()),
+            "depth": result.depth,
+            "nodes": result.nodes,
+            "sideToMove": match sample_game.turn {
+                Color::White => "white",
+                Color::Black => "black",
+            },
+            "boardCount": encoded.board_count,
+            "features": encoded.values
+        })
+        .to_string()
+    });
+    set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_training_position_json(seed: u32, plies: i32) -> *const u8 {
+    let json = with_game(|game| {
+        let mut sample_game = game.clone_for_search();
+        apply_training_playout(&mut sample_game, seed, plies.max(0) as usize);
+        let encoded = sample_game.encode_neural_position(sample_game.turn);
+        serde_json::json!({
+            "sideToMove": match sample_game.turn {
+                Color::White => "white",
+                Color::Black => "black",
+            },
+            "boardCount": encoded.board_count,
+            "features": encoded.values
+        })
+        .to_string()
+    });
     set_output(json)
 }
 
@@ -195,4 +333,64 @@ fn with_game_mut<T>(callback: impl FnOnce(&mut Game) -> T) -> T {
 
         callback(game.as_mut().expect("game initialized"))
     })
+}
+
+fn ai_turn_json_with_optional_model(
+    game: &Game,
+    max_depth: i32,
+    max_nodes: i32,
+    deadline: Option<SearchInstant>,
+) -> String {
+    VALUE_MODEL.with(|value_model| {
+        let Some(model) = value_model.borrow().clone() else {
+            return match deadline {
+                Some(deadline) => game.best_ai_turn(max_depth, max_nodes, Some(deadline)).to_json(),
+                None => game.ai_turn_json(max_depth, max_nodes),
+            };
+        };
+        game.best_ai_turn_with_value_evaluator(
+            max_depth,
+            max_nodes,
+            deadline,
+            SearchOptions::optimized(),
+            ValueEvaluator::hybrid_from_model(model, 3, 1),
+            None,
+        )
+        .0
+        .to_json()
+    })
+}
+
+fn policy_bucket(movement: Option<&MoveStep>) -> usize {
+    let Some(movement) = movement else {
+        return 0;
+    };
+    let from = ((movement.from.y.clamp(0, 7) as usize) << 3) | movement.from.x.clamp(0, 7) as usize;
+    let to = ((movement.to.y.clamp(0, 7) as usize) << 3) | movement.to.x.clamp(0, 7) as usize;
+    1 + ((from * 64 + to) % 256)
+}
+
+fn apply_training_playout(game: &mut Game, seed: u32, plies: usize) {
+    let weights = EvalWeights::default_tuned();
+    let mut state = seed as u64 ^ 0x9e37_79b9_7f4a_7c15;
+    for ply in 0..plies {
+        let moves = game.legal_single_moves(&weights);
+        if moves.is_empty() {
+            break;
+        }
+        state = training_mix64(state ^ ply as u64);
+        let movement = moves[(state as usize) % moves.len()];
+        if !game.apply_move_for_search(movement.from, movement.to) {
+            break;
+        }
+        let _ = game.submit_turn_for_search();
+    }
+}
+
+fn training_mix64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }

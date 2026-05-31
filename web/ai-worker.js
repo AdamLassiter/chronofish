@@ -27,6 +27,34 @@ async function loadEngine() {
   engine = instance.exports;
 }
 
+async function loadActiveModel() {
+  if (!engine?.chronofish_set_neural_model_bytes) {
+    return;
+  }
+  try {
+    const response = await fetch("/api/training/model");
+    if (!response.ok) {
+      engine.chronofish_clear_neural_model?.();
+      return;
+    }
+    const model = new Uint8Array(await response.arrayBuffer());
+    const { ptr, len } = writeWasmBytes(model);
+    try {
+      engine.chronofish_set_neural_model_bytes(ptr, len);
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
+  } catch {
+    engine.chronofish_clear_neural_model?.();
+  }
+}
+
+function writeWasmBytes(bytes) {
+  const ptr = engine.chronofish_alloc(bytes.length);
+  new Uint8Array(engine.memory.buffer, ptr, bytes.length).set(bytes);
+  return { ptr, len: bytes.length };
+}
+
 function replayTurns(turns) {
   // Rebuild state from submitted turns so the worker evaluates the same game the
   // main thread would reconstruct locally.
@@ -66,6 +94,7 @@ self.addEventListener("message", async (event) => {
 
   try {
     await loadEngine();
+    await loadActiveModel();
     if (notation) {
       replayNotation(notation);
     } else {

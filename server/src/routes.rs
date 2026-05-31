@@ -108,6 +108,112 @@ async fn log_match_event(
     Json(json!({ "ok": true }))
 }
 
+#[cfg(feature = "frontend-training")]
+async fn training_status(State(state): State<AppState>) -> impl IntoResponse {
+    let path = active_training_model_path(&state);
+    let metadata = std::fs::metadata(&path).ok();
+    Json(json!({
+        "enabled": true,
+        "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "modelPresent": metadata.is_some(),
+        "modelBytes": metadata.as_ref().map(|metadata| metadata.len()),
+        "updatedAt": metadata
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis())
+    }))
+}
+
+#[cfg(feature = "frontend-training")]
+async fn get_training_model(State(state): State<AppState>) -> Response {
+    let path = active_training_model_path(&state);
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: "No active training model has been saved.".to_string(),
+                room: None,
+            }),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to read active training model: {error}"),
+                room: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "frontend-training")]
+async fn put_training_model(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(error) = validate_training_model(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody { error, room: None }),
+        )
+            .into_response();
+    }
+
+    let path = active_training_model_path(&state);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("Failed to create model directory: {error}"),
+                    room: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    if path.is_file() {
+        let backup = path.with_file_name(format!("value-model.{}.bak.cfnn", now_millis()));
+        if let Err(error) = std::fs::copy(&path, &backup) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("Failed to back up active model: {error}"),
+                    room: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    let tmp = path.with_file_name("value-model.tmp.cfnn");
+    if let Err(error) = write_atomic(&tmp, &path, &body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to replace active model: {error}"),
+                room: None,
+            }),
+        )
+            .into_response();
+    }
+
+    Json(json!({
+        "ok": true,
+        "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "updatedAt": now_millis()
+    }))
+    .into_response()
+}
+
 async fn unknown_api_route() -> impl IntoResponse {
     (
         StatusCode::NOT_FOUND,
@@ -158,4 +264,34 @@ fn mutate_game_room(state: AppState, room_id: String, body: RoomBody, action: &s
     let _ = room.events.send(event);
 
     Json(public).into_response()
+}
+
+#[cfg(feature = "frontend-training")]
+fn active_training_model_path(state: &AppState) -> PathBuf {
+    state.root.join("engine/models/value-v1/value-model.cfnn")
+}
+
+#[cfg(feature = "frontend-training")]
+fn validate_training_model(model: &[u8]) -> Result<(), String> {
+    if model.len() < 40 || &model[0..4] != b"CFNN" {
+        return Err("Model must use the compact CFNN binary format.".to_string());
+    }
+    let version = u32::from_le_bytes(model[4..8].try_into().expect("slice length checked"));
+    if version != 1 {
+        return Err("Unsupported compact model version.".to_string());
+    }
+    if model.len() > 64 * 1024 * 1024 {
+        return Err("Model is too large.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "frontend-training")]
+fn write_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    {
+        let mut file = std::fs::File::create(tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(tmp, path)
 }

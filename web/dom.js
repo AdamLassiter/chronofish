@@ -20,5 +20,15 @@ export const elements = {
   joinBlackButton: document.querySelector("#join-black"),
   joinSpectatorButton: document.querySelector("#join-spectator"),
   multiplayerStatus: document.querySelector("#multiplayer-status"),
-  shareLink: document.querySelector("#share-link")
+  shareLink: document.querySelector("#share-link"),
+  trainingPanel: document.querySelector("#training-panel"),
+  trainingSamplesInput: document.querySelector("#training-samples"),
+  trainingDepthInput: document.querySelector("#training-depth"),
+  trainingNodesInput: document.querySelector("#training-nodes"),
+  trainingRateInput: document.querySelector("#training-rate"),
+  trainingEpochsInput: document.querySelector("#training-epochs"),
+  trainingBufferInput: document.querySelector("#training-buffer"),
+  startTrainingButton: document.querySelector("#start-training"),
+  stopTrainingButton: document.querySelector("#stop-training"),
+  trainingStatus: document.querySelector("#training-status")
 };

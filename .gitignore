@@ -4,5 +4,8 @@
 # Ignore hidden files and directories
 .*
 
+# Ignore backup models
+*.bak.cfnn
+
 # Ignore log files
 /logs

@@ -27,7 +27,7 @@ async fn static_file(
                 response.headers_mut().insert(
                     header::CONTENT_SECURITY_POLICY,
                     HeaderValue::from_static(
-                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'",
+                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'",
                     ),
                 );
                 response

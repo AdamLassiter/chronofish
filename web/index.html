@@ -60,6 +60,96 @@
             <span id="share-link"></span>
           </section>
 
+          <section class="training" id="training-panel" aria-label="Neural training controls" hidden>
+            <label>
+              Labels
+              <input
+                id="training-samples"
+                type="number"
+                min="1"
+                max="64"
+                step="1"
+                value="8"
+                title="Expert CPU labels collected per cycle. Higher values improve label coverage but increase CPU search time before GPU training starts."
+                aria-describedby="training-samples-help"
+              >
+              <span id="training-samples-help" class="field-help">CPU labels</span>
+            </label>
+            <label>
+              Depth
+              <input
+                id="training-depth"
+                type="number"
+                min="1"
+                max="8"
+                step="1"
+                value="5"
+                title="CPU search depth for expert labels. Higher depth gives stronger targets but grows CPU cost sharply."
+                aria-describedby="training-depth-help"
+              >
+              <span id="training-depth-help" class="field-help">CPU quality</span>
+            </label>
+            <label>
+              Nodes
+              <input
+                id="training-nodes"
+                type="number"
+                min="1"
+                max="16384"
+                step="1000"
+                value="4096"
+                title="CPU node budget per expert label. Higher values improve tactical label quality but directly increase CPU labeling time."
+                aria-describedby="training-nodes-help"
+              >
+              <span id="training-nodes-help" class="field-help">CPU budget</span>
+            </label>
+            <label>
+              Rate
+              <input
+                id="training-rate"
+                type="number"
+                min="0.0001"
+                max="0.1"
+                step="0.0001"
+                value="0.01"
+                title="GPU learning rate. Higher values adapt faster but can destabilize training; lower values are steadier but need more GPU steps."
+                aria-describedby="training-rate-help"
+              >
+              <span id="training-rate-help" class="field-help">GPU step size</span>
+            </label>
+            <label>
+              Steps
+              <input
+                id="training-epochs"
+                type="number"
+                min="1"
+                max="16384"
+                step="50"
+                value="2048"
+                title="GPU optimization steps per cycle. Higher values use more GPU time and squeeze more value from each CPU-labeled batch, but may overfit stale labels."
+                aria-describedby="training-epochs-help"
+              >
+              <span id="training-epochs-help" class="field-help">GPU work</span>
+            </label>
+            <label>
+              Buffer
+              <input
+                id="training-buffer"
+                type="number"
+                min="16"
+                max="65536"
+                step="16"
+                value="16384"
+                title="Replay buffer size used for GPU training. Larger buffers improve variety and reduce forgetting but increase GPU memory and per-step work."
+                aria-describedby="training-buffer-help"
+              >
+              <span id="training-buffer-help" class="field-help">GPU memory</span>
+            </label>
+            <button id="start-training" type="button">Train</button>
+            <button id="stop-training" type="button" disabled>Stop</button>
+            <span id="training-status">Training disabled</span>
+          </section>
+
           <section class="legend" aria-label="Timeline legend">
             <span><i class="swatch selected"></i>Selected piece</span>
             <span><i class="swatch target"></i>Legal target</span>

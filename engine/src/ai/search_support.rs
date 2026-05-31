@@ -7,6 +7,7 @@ impl SearchContext {
     ) -> Self {
         Self {
             weights,
+            evaluator: ValueEvaluator::heuristic(),
             root_color,
             max_nodes,
             nodes: 0,

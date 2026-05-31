@@ -3,7 +3,7 @@ import { capitalize, getBoard, hasUnplayedBoards, isLatestBoard, presentTime, sa
 import { renderGame } from "./render.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { appendNotationLine, postMatchLog } from "./match-log.js";
-import { readWasmString, writeWasmString } from "./engine-io.js";
+import { readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
 
 let engine = null;
 let aiParameters = null;
@@ -17,7 +17,7 @@ let aiEffortConfigs = {
   },
   balanced: {
     label: "Bot: Balanced",
-    displayNames: ["Multiverse Magnus", "Timeline Tal", "Causally Capablanca"],
+    displayNames: ["Multiverse Magnus", "Timeline Tal", "Causality Capablanca"],
     depth: 4,
     nodes: 80_000,
     timeMs: 5000
@@ -43,6 +43,11 @@ let submittedNotation = "";
 let stagedMoves = [];
 let aiWorker = null;
 let aiRequestId = 0;
+let trainingWorker = null;
+let trainingRequestId = 0;
+let trainingEnabled = false;
+let trainingRunning = false;
+let trainingCycle = 0;
 let phase = "lobby";
 let lastScrolledPresentTime = null;
 let lastMatchAlertMessage = "";
@@ -123,7 +128,17 @@ function normalizeAssignment(value, fallback = "local") {
   if (value === "bot") {
     return "bot-balanced";
   }
-  return ["local", "human", "open", "bot-fast", "bot-balanced", "bot-expert"].includes(value) ? value : fallback;
+  if (typeof value === "string" && value.startsWith("nn-bot-")) {
+    return value.replace("nn-bot-", "bot-");
+  }
+  return [
+    "local",
+    "human",
+    "open",
+    "bot-fast",
+    "bot-balanced",
+    "bot-expert"
+  ].includes(value) ? value : fallback;
 }
 
 function isBotAssignment(value) {
@@ -201,6 +216,29 @@ function engineLastMessage() {
 
 function stagedTurnNotation() {
   return readWasmString(engine, engine.chronofish_staged_turn_notation());
+}
+
+async function loadActiveModelIntoEngine() {
+  if (!engine?.chronofish_set_neural_model_bytes) {
+    return false;
+  }
+  try {
+    const response = await fetch("/api/training/model");
+    if (!response.ok) {
+      engine.chronofish_clear_neural_model?.();
+      return false;
+    }
+    const model = new Uint8Array(await response.arrayBuffer());
+    const { ptr, len } = writeWasmBytes(engine, model);
+    try {
+      return Boolean(engine.chronofish_set_neural_model_bytes(ptr, len));
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
+  } catch {
+    engine.chronofish_clear_neural_model?.();
+    return false;
+  }
 }
 
 function isMatchOverMessage(message) {
@@ -314,6 +352,14 @@ function ensureAiWorker() {
     aiWorker.addEventListener("message", handleAiWorkerMessage);
   }
   return aiWorker;
+}
+
+function ensureTrainingWorker() {
+  if (!trainingWorker) {
+    trainingWorker = new Worker("./training-worker.js", { type: "module" });
+    trainingWorker.addEventListener("message", handleTrainingWorkerMessage);
+  }
+  return trainingWorker;
 }
 
 function turnSignature() {
@@ -436,6 +482,7 @@ function render() {
   elements.undoMoveButton.disabled = !canActNow() || !hasStagedMoves();
   elements.submitTurnButton.disabled = !canActNow() || !hasStagedMoves() || hasUnplayedBoards(game);
   elements.concedeButton.disabled = !canActNow();
+  renderTrainingButtons();
 
   // State and IO live here; renderGame only rebuilds the DOM from supplied data.
   renderGame({
@@ -831,6 +878,7 @@ async function loadWasmStatus() {
     const instance = await instantiateChronofishWasm(wasmPath);
     engine = instance.exports;
     resetEngine();
+    await loadActiveModelIntoEngine();
     elements.wasmStatus.textContent = `Engine v${readWasmString(engine, engine.chronofish_version())}`;
     elements.wasmStatus.dataset.state = "ready";
     elements.message.textContent = "Configure the lobby, then start the game.";
@@ -865,11 +913,202 @@ async function loadServerStatus() {
 
     elements.serverStatus.textContent = `Server v${payload.version}`;
     elements.serverStatus.dataset.state = "ready";
+    await loadTrainingStatus();
   } catch (error) {
     console.error(error);
     elements.serverStatus.textContent = "Server unavailable";
     elements.serverStatus.dataset.state = "error";
   }
+}
+
+async function loadTrainingStatus() {
+  try {
+    const response = await fetch("/api/training/status");
+    if (!response.ok) {
+      throw new Error("Training endpoints disabled");
+    }
+    const payload = await response.json();
+    trainingEnabled = payload.enabled === true;
+    elements.trainingPanel.hidden = !trainingEnabled;
+    elements.trainingStatus.textContent = payload.modelPresent
+      ? `Active model ${payload.modelBytes ?? 0} bytes`
+      : "No active model";
+    renderTrainingButtons();
+  } catch {
+    trainingEnabled = false;
+    elements.trainingPanel.hidden = true;
+  }
+}
+
+function trainingConfig() {
+  return {
+    samples: clampNumber(elements.trainingSamplesInput.value, 1, 64, 4),
+    depth: clampNumber(elements.trainingDepthInput.value, 1, 5, 5),
+    nodes: clampNumber(elements.trainingNodesInput.value, 1, 200000, 200000),
+    learningRate: clampNumber(elements.trainingRateInput.value, 0.0001, 0.1, 0.001),
+    epochs: clampNumber(elements.trainingEpochsInput.value, 1, 5000, 1000),
+    maxBuffer: clampNumber(elements.trainingBufferInput.value, 16, 2048, 256),
+    labelWorkers: autoTrainingWorkers()
+  };
+}
+
+function autoTrainingWorkers() {
+  const cores = navigator.hardwareConcurrency ?? 4;
+  return Math.max(1, Math.min(cores - 1, 16));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
+}
+
+function renderTrainingButtons() {
+  if (!elements.trainingPanel || elements.trainingPanel.hidden) {
+    return;
+  }
+  elements.startTrainingButton.disabled = !engine || !trainingEnabled || trainingRunning;
+  elements.stopTrainingButton.disabled = !trainingRunning;
+}
+
+async function startFrontendTraining() {
+  if (!trainingEnabled || trainingRunning) {
+    return;
+  }
+  if (!engine?.chronofish_neural_sample_json) {
+    elements.trainingStatus.textContent = "Rebuild WASM for neural sampling.";
+    return;
+  }
+  trainingRunning = true;
+  trainingCycle = 0;
+  renderTrainingButtons();
+  runFrontendTrainingCycle();
+}
+
+function runFrontendTrainingCycle() {
+  if (!trainingRunning) {
+    return;
+  }
+  const config = trainingConfig();
+  const cycle = trainingCycle + 1;
+  elements.trainingStatus.textContent = `Run ${cycle}: collecting samples.`;
+  try {
+    const id = ++trainingRequestId;
+    ensureTrainingWorker().postMessage({
+      id,
+      type: "train",
+      notation: submittedNotation,
+      config
+    });
+  } catch (error) {
+    trainingRunning = false;
+    elements.trainingStatus.textContent = error.message;
+    renderTrainingButtons();
+  }
+}
+
+function stopFrontendTraining() {
+  if (!trainingRunning) {
+    return;
+  }
+  trainingRequestId += 1;
+  trainingWorker?.terminate();
+  trainingWorker = null;
+  trainingRunning = false;
+  elements.trainingStatus.textContent = "Training stopped.";
+  renderTrainingButtons();
+}
+
+async function replaceActiveModel(model) {
+  const response = await fetch("/api/training/model", {
+    method: "PUT",
+    headers: { "content-type": "application/octet-stream" },
+    body: model
+  });
+  const payload = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(payload?.error ?? `Failed to replace model (${response.status})`);
+  }
+  await loadActiveModelIntoEngine();
+  await loadTrainingStatus();
+}
+
+async function readJsonResponse(response) {
+  const text = await response.text();
+  if (!text) {
+    return null;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text };
+  }
+}
+
+async function handleTrainingWorkerMessage(event) {
+  const {
+    id,
+    ok,
+    error,
+    model,
+    loss,
+    epoch,
+    collected,
+    sampleCount,
+    labelWorkers,
+    bufferSize,
+    pseudoCount,
+    gpuPhase
+  } = event.data;
+  if (id !== trainingRequestId) {
+    return;
+  }
+  if (!ok) {
+    trainingRunning = false;
+    elements.trainingStatus.textContent = error;
+    renderTrainingButtons();
+    return;
+  }
+  if (labelWorkers !== undefined) {
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: labeling with ${labelWorkers} workers.`;
+    return;
+  }
+  if (model) {
+    trainingCycle += 1;
+    elements.trainingStatus.textContent = `Run ${trainingCycle}: replacing model. Loss ${formatLoss(loss)}.`;
+    try {
+      await replaceActiveModel(model);
+    } catch (replaceError) {
+      trainingRunning = false;
+      elements.trainingStatus.textContent = replaceError.message;
+      renderTrainingButtons();
+      return;
+    }
+    if (!trainingRunning) {
+      renderTrainingButtons();
+      return;
+    }
+    elements.trainingStatus.textContent = `Run ${trainingCycle}: ${model.nonZeroWeights ?? 0} weights changed. Restarting.`;
+    setTimeout(runFrontendTrainingCycle, 0);
+    return;
+  }
+  if (collected !== undefined) {
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: collected ${collected}/${sampleCount}.`;
+    return;
+  }
+  if (gpuPhase) {
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} pseudo).`;
+    return;
+  }
+  if (epoch !== undefined) {
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: epoch ${epoch}. Loss ${formatLoss(loss)}.`;
+  }
+}
+
+function formatLoss(loss) {
+  return Number.isFinite(loss) ? loss.toFixed(2) : "pending";
 }
 
 elements.resetButton.addEventListener("click", () => {
@@ -1003,6 +1242,14 @@ elements.startGameButton.addEventListener("click", () => {
   startGame().catch((error) => {
     elements.message.textContent = error.message;
   });
+});
+
+elements.startTrainingButton.addEventListener("click", () => {
+  startFrontendTraining();
+});
+
+elements.stopTrainingButton.addEventListener("click", () => {
+  stopFrontendTraining();
 });
 
 for (const select of [elements.whitePlayerSelect, elements.blackPlayerSelect]) {

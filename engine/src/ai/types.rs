@@ -115,6 +115,7 @@ struct AttackSummary {
 struct SearchContext {
     // The node budget is shared across iterative-deepening branches.
     weights: EvalWeights,
+    evaluator: ValueEvaluator,
     root_color: Color,
     max_nodes: usize,
     nodes: usize,

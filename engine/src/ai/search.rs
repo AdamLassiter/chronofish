@@ -11,6 +11,7 @@ impl Game {
         self.best_ai_turn(max_depth, max_nodes, None).to_json()
     }
 
+    #[allow(dead_code)]
     fn ai_turn_timed_json(&self, max_depth: i32, max_nodes: i32, millis: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, search_deadline(millis))
             .to_json()
@@ -40,12 +41,32 @@ impl Game {
         options: SearchOptions,
         label: Option<&'static str>,
     ) -> (AiSearchResult, Option<SearchPerfSample>) {
+        self.best_ai_turn_with_value_evaluator(
+            max_depth,
+            max_nodes,
+            deadline,
+            options,
+            ValueEvaluator::heuristic(),
+            label,
+        )
+    }
+
+    fn best_ai_turn_with_value_evaluator(
+        &self,
+        max_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        options: SearchOptions,
+        evaluator: ValueEvaluator,
+        label: Option<&'static str>,
+    ) -> (AiSearchResult, Option<SearchPerfSample>) {
         let started = SearchInstant::now();
         let depth = max_depth.max(1);
         let nodes = max_nodes.max(1) as usize;
         let weights = EvalWeights::default_tuned();
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
         context.options = options;
+        context.evaluator = evaluator;
         context.killers.resize((depth as usize).saturating_add(3), [None, None]);
 
         // Check evasions are tactically forced and should not wait behind the
@@ -193,7 +214,7 @@ impl Game {
             return score;
         }
         if context.exhausted() {
-            return self.evaluate(maximizing_color, &context.weights);
+            return context.evaluator.evaluate(self, maximizing_color, &context.weights);
         }
 
         if depth <= 0 {
@@ -216,7 +237,7 @@ impl Game {
 
         let plans = self.legal_turn_plans_with_context(context);
         if plans.is_empty() {
-            return self.evaluate(maximizing_color, &context.weights);
+            return context.evaluator.evaluate(self, maximizing_color, &context.weights);
         }
 
         let result = if self.turn == maximizing_color {
@@ -324,7 +345,7 @@ impl Game {
         if let Some(score) = self.terminal_score(maximizing_color) {
             return score;
         }
-        let stand_pat = self.evaluate(maximizing_color, &context.weights);
+        let stand_pat = context.evaluator.evaluate(self, maximizing_color, &context.weights);
         if depth <= 0 || context.exhausted() {
             return stand_pat;
         }

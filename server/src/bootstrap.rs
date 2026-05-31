@@ -18,7 +18,7 @@ async fn main() {
 
     // Axum 0.8 uses `{name}` and `{*name}` route captures; the old `:name`
     // syntax now fails at router construction.
-    let app = Router::new()
+    let app = training_routes(Router::new())
         .route("/api/version", get(server_version))
         .route("/api/rooms/{room_id}", get(get_room))
         .route("/api/rooms/{room_id}/events", get(room_events))
@@ -42,6 +42,19 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server failed");
+}
+
+#[cfg(feature = "frontend-training")]
+fn training_routes(router: Router<AppState>) -> Router<AppState> {
+    router
+        .route("/api/training/status", get(training_status))
+        .route("/api/training/model", get(get_training_model).put(put_training_model))
+        .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+}
+
+#[cfg(not(feature = "frontend-training"))]
+fn training_routes(router: Router<AppState>) -> Router<AppState> {
+    router
 }
 
 async fn shutdown_signal() {

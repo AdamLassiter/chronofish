@@ -58,6 +58,7 @@ impl TrainerConfig {
             draw_window: 24,
             draw_rate_limit: 0.80,
             max_generations_without_candidate: 12,
+            finalist_count: auto_finalists(),
         };
         let mut index = 0;
         let mut compare_seeds_overridden = false;
@@ -165,6 +166,10 @@ impl TrainerConfig {
                         parse_arg(value, config.max_generations_without_candidate);
                     index += 2;
                 }
+                "--finalists" => {
+                    config.finalist_count = parse_arg(value, config.finalist_count);
+                    index += 2;
+                }
                 _ => index += 1,
             }
         }
@@ -175,6 +180,7 @@ impl TrainerConfig {
         config.draw_window = config.draw_window.max(1);
         config.draw_rate_limit = config.draw_rate_limit.clamp(0.0, 1.0);
         config.max_generations_without_candidate = config.max_generations_without_candidate.max(1);
+        config.finalist_count = config.finalist_count.clamp(2, config.population);
         if !compare_seeds_overridden {
             config.compare_seeds = default_compare_seeds(config.seed);
         }
@@ -192,6 +198,14 @@ impl TrainerConfig {
         config.depth = depth;
         config.nodes = nodes;
         config.plies = plies;
+        config
+    }
+
+    fn screening_search(&self) -> Self {
+        let mut config = self.clone();
+        config.depth = (self.depth - 1).max(1);
+        config.nodes = (self.nodes / 4).max(20).min(self.nodes);
+        config.plies = (self.plies / 2).max(2.min(self.plies)).min(self.plies);
         config
     }
 
