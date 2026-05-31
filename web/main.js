@@ -1085,7 +1085,15 @@ async function replaceActiveModel(model) {
     throw new Error(payload?.error ?? `Failed to replace model (${response.status})`);
   }
   await loadActiveModelIntoEngine();
+  resetAiWorker();
   await loadTrainingStatus();
+}
+
+function resetAiWorker() {
+  aiRequestId += 1;
+  bot.thinking = false;
+  aiWorker?.terminate();
+  aiWorker = null;
 }
 
 async function readJsonResponse(response) {

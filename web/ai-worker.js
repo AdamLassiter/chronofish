@@ -1,6 +1,8 @@
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 
 let engine = null;
+let activeModelLoaded = false;
+let activeModelLoad = null;
 
 function readWasmString(ptr) {
   // Same shared-output convention as the main thread: copy before another export
@@ -28,6 +30,20 @@ async function loadEngine() {
 }
 
 async function loadActiveModel() {
+  if (activeModelLoaded) {
+    return;
+  }
+  if (activeModelLoad) {
+    return activeModelLoad;
+  }
+  activeModelLoad = loadActiveModelOnce().finally(() => {
+    activeModelLoaded = true;
+    activeModelLoad = null;
+  });
+  return activeModelLoad;
+}
+
+async function loadActiveModelOnce() {
   if (!engine?.chronofish_set_neural_model_bytes) {
     return;
   }
