@@ -33,6 +33,7 @@
   "branchAttack": 45,
   "checkBonus": 220,
   "royalCaptureThreat": 260,
+  "royalCaptureSetup": 900,
   "royalEscapePressure": 40,
   "forcingMovePressure": 35,
   "ownRoyalExposure": 180,

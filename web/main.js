@@ -7,6 +7,29 @@ import { readWasmString, writeWasmString } from "./engine-io.js";
 
 let engine = null;
 let aiParameters = null;
+let aiEffortConfigs = {
+  fast: {
+    label: "Bot: Fast",
+    displayNames: ["Bullet Fischer", "Speedrun Steinitz", "Blitz Botvinnik"],
+    depth: 2,
+    nodes: 20_000,
+    timeMs: 1500
+  },
+  balanced: {
+    label: "Bot: Balanced",
+    displayNames: ["Multiverse Magnus", "Timeline Tal", "Causally Capablanca"],
+    depth: 4,
+    nodes: 80_000,
+    timeMs: 5000
+  },
+  expert: {
+    label: "Bot: Expert",
+    displayNames: ["Kasparadox", "Deep Blue Shift", "Premove Checkamura"],
+    depth: 5,
+    nodes: 200_000,
+    timeMs: 15000
+  }
+};
 let game = { turn: "white", timelines: [], nextTimelineId: 1 };
 // Last submitted snapshot. While a turn is staged, rendering compares against
 // this so the present line and board status labels do not jump before Submit.
@@ -63,7 +86,7 @@ function normalizeRoomId(value) {
 }
 
 function canControlTurn() {
-  if (!engine || phase !== "game" || assignments[game.turn] === "bot") {
+  if (!engine || phase !== "game" || isBotAssignment(assignments[game.turn])) {
     return false;
   }
 
@@ -97,7 +120,38 @@ function updateShareLink() {
 }
 
 function normalizeAssignment(value, fallback = "local") {
-  return ["local", "human", "bot", "open"].includes(value) ? value : fallback;
+  if (value === "bot") {
+    return "bot-balanced";
+  }
+  return ["local", "human", "open", "bot-fast", "bot-balanced", "bot-expert"].includes(value) ? value : fallback;
+}
+
+function isBotAssignment(value) {
+  return typeof value === "string" && value.startsWith("bot-");
+}
+
+function botEffortName(value) {
+  return isBotAssignment(value) ? value.slice("bot-".length) : "balanced";
+}
+
+function botEffort(value) {
+  return aiEffortConfigs[botEffortName(value)] ?? aiEffortConfigs.balanced;
+}
+
+function stableIndex(value, count) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash) % count;
+}
+
+function botDisplayName(color) {
+  const effortName = botEffortName(assignments[color]);
+  const effort = botEffort(assignments[color]);
+  const names = effort.displayNames ?? [effort.label ?? "Bot"];
+  return names[stableIndex(`${multiplayer.roomId}:${color}:${effortName}`, names.length)];
 }
 
 function readAssignments() {
@@ -117,6 +171,8 @@ function writeAssignments(nextAssignments) {
   localStorage.setItem("chronofish.whitePlayer", assignments.white);
   localStorage.setItem("chronofish.blackPlayer", assignments.black);
 }
+
+writeAssignments(assignments);
 
 function gamePayload(nextPhase = phase) {
   return {
@@ -248,7 +304,7 @@ function botToken(color) {
 }
 
 function botColors() {
-  return ["white", "black"].filter((color) => assignments[color] === "bot");
+  return ["white", "black"].filter((color) => isBotAssignment(assignments[color]));
 }
 
 function ensureAiWorker() {
@@ -687,7 +743,7 @@ function maybeStartBotTurn() {
   if (
     !engine ||
     phase !== "game" ||
-    assignments[game.turn] !== "bot" ||
+    !isBotAssignment(assignments[game.turn]) ||
     bot.thinking ||
     stagedMoves.length > 0
   ) {
@@ -695,14 +751,15 @@ function maybeStartBotTurn() {
   }
 
   const id = ++aiRequestId;
+  const effort = botEffort(assignments[game.turn]);
   bot.thinking = true;
-  elements.message.textContent = `Bot ${game.turn} thinking.`;
+  elements.message.textContent = `${botDisplayName(game.turn)} thinking.`;
   ensureAiWorker().postMessage({
     id,
     notation: submittedNotation,
-    depth: 4,
-    nodes: 80_000,
-    timeMs: 5000
+    depth: effort.depth,
+    nodes: effort.nodes,
+    timeMs: effort.timeMs
   });
 }
 
@@ -720,7 +777,7 @@ function handleAiWorkerMessage(event) {
   }
 
   const botColor = game.turn;
-  if (assignments[botColor] !== "bot" || stagedMoves.length > 0) {
+  if (!isBotAssignment(assignments[botColor]) || stagedMoves.length > 0) {
     return;
   }
 
@@ -789,9 +846,10 @@ async function loadWasmStatus() {
 
 async function loadServerStatus() {
   try {
-    const [versionResponse, parametersResponse] = await Promise.all([
+    const [versionResponse, parametersResponse, effortResponse] = await Promise.all([
       fetch("/api/version"),
-      fetch("/ai/parameters.json")
+      fetch("/ai/parameters.json"),
+      fetch("/ai/effort.json")
     ]);
     const payload = await versionResponse.json();
 
@@ -800,6 +858,9 @@ async function loadServerStatus() {
     }
     if (parametersResponse.ok) {
       aiParameters = await parametersResponse.json();
+    }
+    if (effortResponse.ok) {
+      aiEffortConfigs = await effortResponse.json();
     }
 
     elements.serverStatus.textContent = `Server v${payload.version}`;

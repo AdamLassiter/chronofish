@@ -48,6 +48,13 @@ impl EvalWeights {
                 0,
                 3_000,
             ),
+            royal_capture_setup: mutate_weight(
+                self.royal_capture_setup,
+                rng,
+                spread(80),
+                0,
+                6_000,
+            ),
             royal_escape_pressure: mutate_weight(
                 self.royal_escape_pressure,
                 rng,
@@ -121,6 +128,7 @@ impl EvalWeights {
             branch_attack: pick!(branch_attack),
             check_bonus: pick!(check_bonus),
             royal_capture_threat: pick!(royal_capture_threat),
+            royal_capture_setup: pick!(royal_capture_setup),
             royal_escape_pressure: pick!(royal_escape_pressure),
             forcing_move_pressure: pick!(forcing_move_pressure),
             own_royal_exposure: pick!(own_royal_exposure),

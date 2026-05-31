@@ -34,6 +34,19 @@ mod tests {
     }
 
     #[test]
+    fn quiet_development_orders_non_pawn_moves_before_pawn_pushes() {
+        let game = Game::new();
+        let weights = EvalWeights::default_tuned();
+        let moves = game.legal_single_moves(&weights);
+        let first = moves.first().expect("opening position has legal moves");
+
+        assert!(matches!(
+            game.piece_at(first.from).map(|piece| piece.piece_type),
+            Some(PieceType::Knight)
+        ));
+    }
+
+    #[test]
     fn standard_move_advances_main_timeline() {
         let mut game = Game::new();
         assert_eq!(
@@ -1121,6 +1134,222 @@ mod tests {
     }
 
     #[test]
+    fn time_travel_source_board_still_counts_for_checkmate() {
+        let mut game = Game::new();
+        game.load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0g8nf6\n\
+             5. T4L0f1Bc4\n\
+             6. T5L0d7pd5\n\
+             7. T6L0c4Bd5xp\n\
+             8. T7L0d8qd6\n\
+             9. T8L0g4Qc8xb+",
+        )
+        .expect("notation should replay to black in check");
+
+        assert_eq!(game.turn, Color::Black);
+        assert!(game.is_in_check(Color::Black));
+        assert!(game.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 9,
+                x: 3,
+                y: 5,
+            },
+            Position {
+                timeline_id: 0,
+                time: 9,
+                x: 3,
+                y: 7,
+            },
+        ));
+        let mut blocked = game.clone_for_search();
+        assert_eq!(
+            blocked.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 9,
+                    x: 3,
+                    y: 5,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 9,
+                    x: 3,
+                    y: 7,
+                },
+            ),
+            1
+        );
+        assert_eq!(blocked.submit_turn(), 1);
+        assert_ne!(blocked.last_message, "White wins by checkmate.");
+
+        let result = game.best_ai_turn(2, 80_000, None);
+        assert_eq!(result.status, "ok");
+        let mut replay = game.clone_for_search();
+        for movement in &result.moves {
+            assert_eq!(replay.apply_move(movement.from, movement.to), 1);
+        }
+        assert_eq!(replay.submit_turn(), 1);
+        assert_ne!(
+            replay.last_message,
+            "White wins by checkmate.",
+            "{}",
+            result.to_json()
+        );
+
+        assert_eq!(
+            game.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 9,
+                    x: 3,
+                    y: 5,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 1,
+                    x: 7,
+                    y: 1,
+                },
+            ),
+            1
+        );
+        assert_eq!(game.submit_turn(), 1);
+        assert_eq!(game.last_message, "White wins by checkmate.");
+        assert!(game.royal_capture_available(Color::White));
+    }
+
+    #[test]
+    fn ai_uses_immediate_king_capture_to_escape_check() {
+        let mut game = Game::new();
+        game.load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0g8nf6\n\
+             5. T4L0f1Bc4\n\
+             6. T5L0d7pd5\n\
+             7. T6L0c4Bd5xp\n\
+             8. T7L0d8qd6\n\
+             9. T8L0g4Qc8xb+\n\
+             10. T9L0d6qd8\n\
+             11. T10L0c8QT6L0e8xk>L1\n\
+             12. T7L1d8qe8xQ\n\
+             13. T8L1c4Bd5xp\n\
+             14. T9L1c8bg4xQ\n\
+             15. T10L1g1Nf3\n\
+             16. T11L0d8qT9L0c8xQ>L-1\n\
+             17. T10L-1d5Bf7xp+\n\
+             18. T11L-1e8kf7xB/T11L1g4bf3xN\n\
+             19. T12L0d5BT6L0d8xq>L2\n\
+             20. T7L2c8bg4xQ\n\
+             21. T8L2d8BT8L1e8xq>L3\n\
+             22. T9L3c8bg4xQ/T9L2d5pc4xB\n\
+             23. T10L3e8BT8L2e8xk>L4/T12L1g2Pf3xb/T10L2b1NT10L3b3>L5\n\
+             24. T13L0b8nT9L0c8xQ>L-2\n\
+             25. T10L-2d5Bf7xp+",
+        )
+        .expect("notation should replay");
+
+        let expected = MoveStep {
+            from: Position {
+                timeline_id: -2,
+                time: 11,
+                x: 4,
+                y: 7,
+            },
+            to: Position {
+                timeline_id: -2,
+                time: 11,
+                x: 5,
+                y: 6,
+            },
+        };
+
+        assert_eq!(game.turn, Color::Black);
+        assert!(game.is_in_check(Color::Black));
+        assert!(game.can_move_to(expected.from, expected.to));
+
+        let result = game.best_ai_turn(2, 80_000, None);
+        assert_eq!(result.status, "ok");
+        assert_eq!(result.moves.first().copied(), Some(expected));
+
+        let mut replay = game.clone_for_search();
+        for movement in result.moves {
+            assert_eq!(replay.apply_move(movement.from, movement.to), 1);
+        }
+        assert_eq!(replay.submit_turn(), 1);
+        assert_ne!(replay.last_message, "White wins by checkmate.");
+    }
+
+    #[test]
+    fn submit_detects_committed_branch_royal_capture() {
+        let mut game = Game::new();
+        game.load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0g8nf6\n\
+             5. T4L0f1Bc4\n\
+             6. T5L0d7pd5\n\
+             7. T6L0c4Bd5xp\n\
+             8. T7L0d8qd6\n\
+             9. T8L0g4Qc8xb+\n\
+             10. T9L0d6qd8",
+        )
+        .expect("notation should replay before royal capture");
+
+        assert_eq!(
+            game.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 10,
+                    x: 2,
+                    y: 7,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 6,
+                    x: 4,
+                    y: 7,
+                },
+            ),
+            1
+        );
+        assert_eq!(game.submit_turn(), 1);
+        assert_eq!(game.last_message, "White wins by checkmate.");
+        assert!(game.to_json().contains(
+            "\"checkedRoyals\":[{\"timelineId\":0,\"time\":6,\"x\":4,\"y\":7}]"
+        ));
+    }
+
+    #[test]
+    fn evaluator_sees_one_move_temporal_royal_capture_setup() {
+        let mut game = Game::new();
+        game.load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0g8nf6\n\
+             5. T4L0f1Bc4\n\
+             6. T5L0d7pd5\n\
+             7. T6L0c4Bd5xp\n\
+             8. T7L0d8qd6",
+        )
+        .expect("notation should replay before recurring queen tactic");
+
+        let weights = EvalWeights::default_tuned();
+        let setup_pressure = game.royal_capture_setup_pressure_for(Color::White, &weights);
+        assert!(
+            setup_pressure >= weights.royal_capture_setup,
+            "expected Qc8 to register as a one-move temporal royal-capture setup, got {setup_pressure}"
+        );
+    }
+
+    #[test]
     fn ai_timed_json_has_expected_shape() {
         let game = Game::new();
         let json = game.ai_turn_timed_json(3, 10_000, 250);
@@ -1156,7 +1385,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_detects_historical_royal_capture() {
+    fn submit_ignores_stale_historical_royal_capture() {
         let mut game = Game::new();
         let mut past = empty_board_with_kings();
         past[4][4] = Some(Piece {
@@ -1183,7 +1412,7 @@ mod tests {
         game.staged_turn.push(game.checkpoint());
 
         assert_eq!(game.submit_turn(), 1);
-        assert_eq!(game.last_message, "White wins by checkmate.");
+        assert_eq!(game.last_message, "White to move.");
     }
 
     #[test]
@@ -1382,6 +1611,7 @@ mod tests {
     #[test]
     fn training_mutation_is_seeded() {
         let config = TrainerConfig {
+            effort: "expert".to_string(),
             generations: 1,
             population: 4,
             depth: 1,
@@ -1412,6 +1642,7 @@ mod tests {
 
     fn trainer_test_config() -> TrainerConfig {
         TrainerConfig {
+            effort: "expert".to_string(),
             generations: 1,
             population: 4,
             depth: 1,

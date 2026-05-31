@@ -1,5 +1,7 @@
 # Chronofish
 
+![Chronofish](logo.svg)
+
 Chronofish is a playable Rust/WASM prototype for **5D Chess with Multiverse
 Time Travel**. The rules engine lives in Rust, compiles to WebAssembly for the
 browser, and is served by a small Rust backend that also provides in-memory
@@ -130,13 +132,28 @@ safety limit. If a candidate is promoted, the trainer rewrites
 `engine/src/ai/parameters.json`, appends the candidate to the hall of fame, runs
 verification, and commits the updated data.
 
+Training uses the shared AI effort presets from `engine/src/ai/effort.json`.
+`./train` defaults to `expert`; set `TRAIN_CONFIG=fast`, `TRAIN_CONFIG=balanced`,
+or pass `--config fast|balanced|expert` to run another preset.
+
 For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 \
+  --config fast --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 \
   --min-pairs 4 --max-pairs 8 --max-seconds 20
 ```
+
+## AI Effort Presets
+
+`engine/src/ai/effort.json` is shared by the Rust engine/trainer and the
+frontend via `/ai/effort.json`.
+
+| Preset | Runtime purpose | Training purpose |
+| --- | --- | --- |
+| `fast` | Low latency bot turns for quick local play. | Small search budget for smoke checks. |
+| `balanced` | Default interactive strength/speed tradeoff. | Moderate self-play search. |
+| `expert` | Highest included browser bot effort. | Default trainer configuration. |
 
 ## AI Parameters
 
@@ -181,6 +198,7 @@ terms.
 | `branch_attack` | Bonus for tactically useful branch moves, especially attacking branches. |
 | `check_bonus` | Move-ordering and evaluation bonus for checking lines. |
 | `royal_capture_threat` | Rewards positions where a royal piece can be captured, including temporal capture paths. |
+| `royal_capture_setup` | Rewards one-move setup moves that would create a royal capture threat, such as queen moves that line up a later time-travel mate. |
 | `royal_escape_pressure` | Rewards own royal escape squares and penalizes boxed-in royals. |
 | `forcing_move_pressure` | Rewards attacks that force replies, captures, or urgent defense. |
 | `own_royal_exposure` | Penalty for attacks against the bot's own royal pieces. |

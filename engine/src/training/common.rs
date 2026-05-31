@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Clone)]
 struct TrainerConfig {
+    effort: String,
     generations: usize,
     population: usize,
     depth: i32,

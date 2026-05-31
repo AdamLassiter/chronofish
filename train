@@ -6,17 +6,20 @@ ENGINE="$ROOT/engine/Cargo.toml"
 
 VERIFY="${TRAIN_VERIFY:-cargo test -q}"
 MAX_SECONDS="${TRAIN_MAX_SECONDS:-}"
+CONFIG="${TRAIN_CONFIG:-expert}"
 
 while :; do
   if [ -n "$MAX_SECONDS" ]; then
     cargo run --release --manifest-path "$ENGINE" --bin train -- \
       --train-cycle \
+      --config "$CONFIG" \
       --max-seconds "$MAX_SECONDS" \
       --verify "$VERIFY" \
       "$@"
   else
     cargo run --release --manifest-path "$ENGINE" --bin train -- \
       --train-cycle \
+      --config "$CONFIG" \
       --verify "$VERIFY" \
       "$@"
   fi

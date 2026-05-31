@@ -34,6 +34,20 @@ struct AiSearchResult {
     status: &'static str,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+struct AiEffort {
+    label: String,
+    display_names: Vec<String>,
+    depth: i32,
+    nodes: usize,
+    time_ms: u64,
+    training_depth: i32,
+    training_nodes: usize,
+    training_plies: usize,
+}
+
 #[derive(Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EvalWeights {
@@ -71,6 +85,8 @@ struct EvalWeights {
     branch_attack: i32,
     check_bonus: i32,
     royal_capture_threat: i32,
+    #[serde(default = "default_royal_capture_setup")]
+    royal_capture_setup: i32,
     royal_escape_pressure: i32,
     forcing_move_pressure: i32,
     own_royal_exposure: i32,
@@ -82,6 +98,10 @@ struct EvalWeights {
     present_tempo: i32,
     royal_shelter: i32,
     space_advantage: i32,
+}
+
+fn default_royal_capture_setup() -> i32 {
+    900
 }
 
 #[derive(Default)]
@@ -99,7 +119,6 @@ struct SearchContext {
     max_nodes: usize,
     nodes: usize,
     deadline: Option<SearchInstant>,
-    fast_eval: bool,
     options: SearchOptions,
     table: std::collections::HashMap<u64, SearchEntry>,
     turn_plan_cache: std::collections::HashMap<u64, Vec<TurnPlan>>,

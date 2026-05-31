@@ -68,6 +68,11 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
 
+    if requested == Path::new("ai/effort.json") {
+        let path = root.join("engine/src/ai/effort.json");
+        return path.is_file().then_some(path);
+    }
+
     let web_root = root.join("web");
     let web_path = web_root.join(&requested);
     if is_safe_existing_path(&web_root, &web_path) {

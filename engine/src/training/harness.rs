@@ -10,7 +10,8 @@ fn run_training_cycle(config: &TrainerConfig) {
     }
 
     println!(
-        "training max_seconds={} population={} base_depth={} base_nodes={} plies={} seed={} min_pairs={} max_pairs={}",
+        "training config={} max_seconds={} population={} base_depth={} base_nodes={} plies={} seed={} min_pairs={} max_pairs={}",
+        config.effort,
         config
             .max_seconds
             .map(|seconds| seconds.to_string())
@@ -340,7 +341,7 @@ fn play_match_until(
             };
         };
         game = plan.game;
-        let eval = game.evaluate_fast(color, &weights);
+        let eval = game.evaluate(color, &weights);
         score += eval / 20 + eval.signum() * (config.plies - ply) as i32;
         if game.royal_capture_available(color) || game.is_checkmate(color.opposite()) {
             return MatchReport {
@@ -376,7 +377,7 @@ fn play_match_until(
             };
         }
     }
-    let final_score = score + game.evaluate_fast(color, &weights) / 4;
+    let final_score = score + game.evaluate(color, &weights) / 4;
     let result = if final_score > 300 {
         MatchResult::Win
     } else if final_score < -300 {

@@ -38,34 +38,68 @@ function addHighlight(highlights, position, type) {
   highlights.set(key, existing);
 }
 
-function movementHighlights(game) {
+function samePiece(left, right) {
+  if (!left || !right) {
+    return left === right;
+  }
+
+  return left.color === right.color && left.type === right.type;
+}
+
+function previousBoard(timeline, time) {
+  return timeline.boards.find((board) => board.time === time - 1) ?? null;
+}
+
+function addArrivalHighlights(highlights, timeline, board) {
+  const previous = previousBoard(timeline, board.time);
+
+  if (!previous) {
+    if (board.origin && board.origin.type !== "source-advance") {
+      addHighlight(highlights, {
+        timelineId: timeline.id,
+        time: board.time,
+        x: board.origin.to.x,
+        y: board.origin.to.y
+      }, "arrived");
+    }
+    return;
+  }
+
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const piece = board.board[y][x];
+      if (piece && !samePiece(piece, previous.board[y][x])) {
+        addHighlight(highlights, { timelineId: timeline.id, time: board.time, x, y }, "arrived");
+      }
+    }
+  }
+}
+
+function movementVisuals(game) {
   const highlights = new Map();
+  const arrows = [];
 
   for (const timeline of game.timelines) {
     for (const board of timeline.boards) {
       const origin = board.origin;
-      if (!origin) {
-        continue;
-      }
+      addArrivalHighlights(highlights, timeline, board);
 
-      addHighlight(highlights, origin.from, "departed");
-
-      if (origin.type === "branch") {
-        addHighlight(highlights, origin.to, "branch-target");
-      }
-
-      if (origin.type !== "source-advance") {
-        addHighlight(highlights, {
-          timelineId: timeline.id,
-          time: board.time,
-          x: origin.to.x,
-          y: origin.to.y
-        }, "arrived");
+      if (origin && origin.type !== "source-advance") {
+        addHighlight(highlights, origin.from, "move-source");
+        addHighlight(highlights, origin.to, "move-target");
+        arrows.push({
+          from: origin.from,
+          to: origin.to
+        });
       }
     }
   }
 
-  return highlights;
+  for (const position of game.checkedRoyals ?? []) {
+    addHighlight(highlights, position, "check");
+  }
+
+  return { highlights, arrows };
 }
 
 function renderSquare({ position, board, selected, legalTargets, highlights, onSquareClick }) {
@@ -77,6 +111,7 @@ function renderSquare({ position, board, selected, legalTargets, highlights, onS
   square.type = "button";
   square.className = "square";
   square.dataset.light = String((position.x + position.y) % 2 === 1);
+  square.dataset.positionKey = highlightKey(position);
   square.ariaLabel = `${FILES[position.x]}${position.y + 1}`;
 
   if (piece) {
@@ -93,16 +128,20 @@ function renderSquare({ position, board, selected, legalTargets, highlights, onS
     square.classList.add("is-target");
   }
 
-  if (squareHighlights?.has("departed")) {
-    square.classList.add("was-departure");
+  if (squareHighlights?.has("move-source")) {
+    square.classList.add("was-move-source");
   }
 
   if (squareHighlights?.has("arrived")) {
     square.classList.add("was-arrival");
   }
 
-  if (squareHighlights?.has("branch-target")) {
-    square.classList.add("was-branch-target");
+  if (squareHighlights?.has("move-target")) {
+    square.classList.add("was-move-target");
+  }
+
+  if (squareHighlights?.has("check")) {
+    square.classList.add("is-check");
   }
 
   square.addEventListener("click", () => onSquareClick(position));
@@ -148,6 +187,84 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
   return boardEl;
 }
 
+function squareCenter(grid, position) {
+  const square = grid.querySelector(`[data-position-key="${highlightKey(position)}"]`);
+  if (!square) {
+    return null;
+  }
+
+  const gridRect = grid.getBoundingClientRect();
+  const squareRect = square.getBoundingClientRect();
+  return {
+    x: squareRect.left - gridRect.left + squareRect.width / 2,
+    y: squareRect.top - gridRect.top + squareRect.height / 2
+  };
+}
+
+function arrowPath(from, to) {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance === 0) {
+    return "";
+  }
+
+  // Pull endpoints inward so arrowheads do not obscure piece glyphs or highlight
+  // rings on the source/target squares.
+  const inset = Math.min(18, distance / 3);
+  const start = {
+    x: from.x + dx / distance * inset,
+    y: from.y + dy / distance * inset
+  };
+  const end = {
+    x: to.x - dx / distance * inset,
+    y: to.y - dy / distance * inset
+  };
+  return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
+}
+
+function appendArrowPath(svg, from, to, className) {
+  const pathData = arrowPath(from, to);
+  if (!pathData) {
+    return;
+  }
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("class", className);
+  path.setAttribute("d", pathData);
+  path.setAttribute("marker-end", "url(#move-arrow-head)");
+  svg.append(path);
+}
+
+function renderMoveArrows(grid, arrows) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const width = grid.scrollWidth;
+  const height = grid.scrollHeight;
+  svg.setAttribute("class", "move-arrows");
+  svg.setAttribute("width", String(width));
+  svg.setAttribute("height", String(height));
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = `
+    <defs>
+      <marker id="move-arrow-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="3" markerHeight="3" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+    </defs>
+  `;
+  grid.append(svg);
+
+  for (const arrow of arrows) {
+    const from = squareCenter(grid, arrow.from);
+    const to = squareCenter(grid, arrow.to);
+    if (!from || !to) {
+      continue;
+    }
+
+    appendArrowPath(svg, from, to, "move-arrow");
+  }
+}
+
 function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, highlights, onSquareClick }) {
   const row = document.createElement("div");
   row.className = "timeline-row";
@@ -180,7 +297,7 @@ export function renderGame({ game, presentGame, selected, legalTargets, multipla
   // incremental reconciliation.
   const maxTime = Math.max(0, ...game.timelines.flatMap((timeline) => timeline.boards.map((board) => board.time)));
   const currentPresentTime = presentTime(presentGame);
-  const highlights = movementHighlights(game);
+  const { highlights, arrows } = movementVisuals(game);
   elements.timelineGrid.replaceChildren(
     ...sortedTimelines(game).map((timeline) => renderTimeline({
       game,
@@ -194,6 +311,7 @@ export function renderGame({ game, presentGame, selected, legalTargets, multipla
       onSquareClick
     }))
   );
+  renderMoveArrows(elements.timelineGrid, arrows);
 
   if (multiplayer.connected) {
     const role = multiplayer.color === "spectator" ? "spectating" : `playing ${multiplayer.color}`;

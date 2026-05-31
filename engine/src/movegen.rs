@@ -8,6 +8,46 @@ impl Game {
             .any(|position| self.is_square_attacked(*position, color.opposite()))
     }
 
+    fn checked_royal_positions(&self) -> Vec<Position> {
+        let mut positions = [Color::White, Color::Black]
+            .into_iter()
+            .flat_map(|color| {
+                self.royal_piece_positions(color)
+                    .into_iter()
+                    .filter(move |position| self.is_square_attacked(*position, color.opposite()))
+            })
+            .collect::<Vec<_>>();
+
+        for position in self.royal_capture_origin_targets() {
+            if !positions.contains(&position) {
+                positions.push(position);
+            }
+        }
+
+        positions
+    }
+
+    fn royal_capture_origin_targets(&self) -> Vec<Position> {
+        let mut positions = Vec::new();
+        for timeline in &self.timelines {
+            for board in &timeline.boards {
+                let Origin::Move { to, move_type, .. } = board.origin else {
+                    continue;
+                };
+                if move_type == "source-advance" {
+                    continue;
+                }
+                if self
+                    .piece_at(to)
+                    .is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
+                {
+                    positions.push(to);
+                }
+            }
+        }
+        positions
+    }
+
     fn is_checkmate(&self, color: Color) -> bool {
         if !self.is_in_check(color) {
             return false;
@@ -22,11 +62,7 @@ impl Game {
         let mut search = self.clone_for_search();
         search.turn = color;
 
-        for (target, piece) in search.royal_pieces(color.opposite()) {
-            if !Self::is_royal_piece(piece.piece_type) {
-                continue;
-            }
-
+        for target in search.royal_piece_positions(color.opposite()) {
             for timeline in &search.timelines {
                 for board in &timeline.boards {
                     if !search.is_latest_board(timeline.id, board.time)

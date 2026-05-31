@@ -29,14 +29,19 @@ impl Game {
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
 
         format!(
-            "{{\"turn\":\"{}\",\"timelines\":[{}],\"nextTimelineId\":{}}}",
+            "{{\"turn\":\"{}\",\"timelines\":[{}],\"nextTimelineId\":{},\"checkedRoyals\":[{}]}}",
             self.turn.as_str(),
             timelines
                 .iter()
                 .map(Timeline::to_json)
                 .collect::<Vec<_>>()
                 .join(","),
-            self.next_timeline_id
+            self.next_timeline_id,
+            self.checked_royal_positions()
+                .iter()
+                .map(|position| position_json(*position))
+                .collect::<Vec<_>>()
+                .join(",")
         )
     }
 
@@ -143,7 +148,9 @@ impl Game {
     }
 
     fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
-        if self.royal_capture_available(color) || self.is_checkmate(color.opposite()) {
+        if self.terminal_score(color) == Some(CHECKMATE_SCORE)
+            || self.is_checkmate(color.opposite())
+        {
             notation.push('#');
         } else if self.is_in_check(color.opposite()) {
             notation.push('+');

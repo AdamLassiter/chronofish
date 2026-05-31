@@ -35,7 +35,9 @@
               <select id="white-player">
                 <option value="local">Local</option>
                 <option value="human">Online</option>
-                <option value="bot">Bot</option>
+                <option value="bot-fast">Bot: Fast</option>
+                <option value="bot-balanced">Bot: Balanced</option>
+                <option value="bot-expert">Bot: Expert</option>
                 <option value="open">Open</option>
               </select>
             </label>
@@ -44,7 +46,9 @@
               <select id="black-player">
                 <option value="local">Local</option>
                 <option value="human">Online</option>
-                <option value="bot">Bot</option>
+                <option value="bot-fast">Bot: Fast</option>
+                <option value="bot-balanced">Bot: Balanced</option>
+                <option value="bot-expert">Bot: Expert</option>
                 <option value="open">Open</option>
               </select>
             </label>
@@ -60,9 +64,10 @@
             <span><i class="swatch selected"></i>Selected piece</span>
             <span><i class="swatch target"></i>Legal target</span>
             <span><i class="swatch present-line-swatch"></i>Present line</span>
-            <span><i class="swatch departed"></i>Piece departed</span>
+            <span><i class="swatch move-source"></i>Move source</span>
+            <span><i class="swatch move-target"></i>Move target</span>
             <span><i class="swatch arrived"></i>Piece arrived</span>
-            <span><i class="swatch branch-target"></i>Piece time-traveled</span>
+            <span><i class="swatch check"></i>Royal in check</span>
           </section>
         </div>
 

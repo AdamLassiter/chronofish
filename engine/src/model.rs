@@ -100,6 +100,7 @@ struct Game {
     next_black_timeline_id: i32,
     staged_turn: Vec<GameCheckpoint>,
     staged_notation: Vec<String>,
+    staged_royal_capture_by: Option<Color>,
     last_message: String,
 }
 
@@ -112,6 +113,7 @@ struct GameCheckpoint {
     next_timeline_id: i32,
     next_black_timeline_id: i32,
     staged_notation: Vec<String>,
+    staged_royal_capture_by: Option<Color>,
     last_message: String,
 }
 

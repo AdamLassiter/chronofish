@@ -11,7 +11,6 @@ impl SearchContext {
             max_nodes,
             nodes: 0,
             deadline,
-            fast_eval: true,
             options: SearchOptions::optimized(),
             table: std::collections::HashMap::new(),
             turn_plan_cache: std::collections::HashMap::new(),

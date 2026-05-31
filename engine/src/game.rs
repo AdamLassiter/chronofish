@@ -53,6 +53,7 @@ impl Game {
             next_black_timeline_id: -1,
             staged_turn: Vec::new(),
             staged_notation: Vec::new(),
+            staged_royal_capture_by: None,
             last_message: "Select a white piece on a latest board.".to_string(),
         }
     }
@@ -169,8 +170,10 @@ impl Game {
 
         // Moves are staged until submit_turn accepts the whole turn. This allows
         // a side to make the multiple moves needed to advance the present line.
+        let captured = self.captured_piece(to, move_kind);
         let notation = self.move_notation(piece, from, to, move_kind);
         self.staged_turn.push(self.checkpoint());
+        self.record_staged_capture(piece.color, captured);
         self.apply_move_unchecked(from, to, piece, move_kind);
         self.staged_notation.push(self.finish_move_notation(notation, piece.color));
         self.last_message = self.move_message(
@@ -197,6 +200,7 @@ impl Game {
             next_timeline_id: self.next_timeline_id,
             next_black_timeline_id: self.next_black_timeline_id,
             staged_notation: self.staged_notation.clone(),
+            staged_royal_capture_by: self.staged_royal_capture_by,
             last_message: self.last_message.clone(),
         }
     }
@@ -207,6 +211,7 @@ impl Game {
         self.next_timeline_id = checkpoint.next_timeline_id;
         self.next_black_timeline_id = checkpoint.next_black_timeline_id;
         self.staged_notation = checkpoint.staged_notation;
+        self.staged_royal_capture_by = checkpoint.staged_royal_capture_by;
         self.last_message = checkpoint.last_message;
     }
 
@@ -245,9 +250,19 @@ impl Game {
             return 0;
         }
 
+        if let Some(winner) = self.staged_royal_capture_by {
+            self.turn = present_side;
+            self.staged_turn.clear();
+            self.staged_notation.clear();
+            self.staged_royal_capture_by = None;
+            self.last_message = format!("{} wins by checkmate.", winner.capitalized());
+            return 1;
+        }
+
         self.turn = present_side;
         self.staged_turn.clear();
         self.staged_notation.clear();
+        self.staged_royal_capture_by = None;
 
         if self.royal_capture_available(self.turn) {
             self.last_message = format!(
@@ -270,6 +285,12 @@ impl Game {
             suffix
         );
         1
+    }
+
+    fn record_staged_capture(&mut self, color: Color, captured: Option<Piece>) {
+        if captured.is_some_and(|piece| Self::is_royal_piece(piece.piece_type)) {
+            self.staged_royal_capture_by = Some(color);
+        }
     }
 
     fn apply_move_unchecked(

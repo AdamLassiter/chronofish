@@ -1,4 +1,5 @@
 include!("ai/types.rs");
+include!("ai/effort.rs");
 include!("ai/search.rs");
 include!("ai/search_plans.rs");
 include!("ai/search_support.rs");

@@ -32,12 +32,14 @@ impl TrainerConfig {
         // The script-facing CLI is intentionally small, so hand parsing keeps the
         // training harness dependency-free.
         let seed = random_seed();
+        let effort = default_ai_effort();
         let mut config = Self {
+            effort: "expert".to_string(),
             generations: usize::MAX,
             population: auto_population(),
-            depth: 1,
-            nodes: auto_nodes(),
-            plies: 2,
+            depth: effort.training_depth,
+            nodes: effort.training_nodes.max(auto_nodes()),
+            plies: effort.training_plies,
             seed,
             max_seconds: None,
             out: None,
@@ -72,6 +74,12 @@ impl TrainerConfig {
                 }
                 "--population" => {
                     config.population = parse_arg(value, config.population);
+                    index += 2;
+                }
+                "--config" | "--effort" => {
+                    if let Some(name) = value {
+                        config.apply_effort(&name);
+                    }
                     index += 2;
                 }
                 "--depth" => {
@@ -185,5 +193,14 @@ impl TrainerConfig {
         config.nodes = nodes;
         config.plies = plies;
         config
+    }
+
+    fn apply_effort(&mut self, name: &str) {
+        if let Some(effort) = ai_effort_config(name) {
+            self.effort = name.to_string();
+            self.depth = effort.training_depth;
+            self.nodes = effort.training_nodes;
+            self.plies = effort.training_plies;
+        }
     }
 }

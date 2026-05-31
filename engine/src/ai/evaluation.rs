@@ -1,63 +1,7 @@
 impl Game {
-    fn evaluate_for_search(&self, color: Color, weights: &EvalWeights, fast: bool) -> i32 {
-        if fast {
-            self.evaluate_fast(color, weights)
-        } else {
-            self.evaluate(color, weights)
-        }
-    }
-
-    fn evaluate_fast(&self, color: Color, weights: &EvalWeights) -> i32 {
-        let mut score = 0;
-        for timeline in &self.timelines {
-            let active = self.is_active_timeline(timeline.id);
-            score += if active {
-                weights.active_timeline
-            } else {
-                weights.inactive_timeline
-            } * owner_factor(timeline.owner, color);
-
-            for board in &timeline.boards {
-                if !self.is_latest_board(timeline.id, board.time) {
-                    continue;
-                }
-                for (y, rank) in board.board.iter().enumerate() {
-                    for (x, piece) in rank.iter().enumerate() {
-                        let Some(piece) = piece else {
-                            continue;
-                        };
-                        let value = weights.piece_value(piece.piece_type);
-                        let positional = weights.advancement * advancement(piece.color, y as i32)
-                            + weights.centrality * centrality(x as i32, y as i32);
-                        score += if piece.color == color {
-                            value + positional
-                        } else {
-                            -value - positional
-                        };
-                    }
-                }
-            }
-        }
-        if self.is_in_check(color) {
-            score -= weights.check_penalty;
-        }
-        if self.is_in_check(color.opposite()) {
-            score += weights.check_penalty;
-        }
-        score
-            + self.present_progress(color) * weights.present_progress
-            + self.timeline_coordination(color, weights)
-            + self.royal_capture_pressure(color, weights)
-            + self.royal_shelter_balance(color, weights)
-            + self.space_advantage_balance(color, weights)
-    }
-
     fn evaluate(&self, color: Color, weights: &EvalWeights) -> i32 {
-        if self.royal_capture_available(color) {
-            return CHECKMATE_SCORE;
-        }
-        if self.royal_capture_available(color.opposite()) {
-            return -CHECKMATE_SCORE;
+        if let Some(score) = self.terminal_score(color) {
+            return score;
         }
 
         // Only latest boards contain live material. Historical boards are context
@@ -106,6 +50,8 @@ impl Game {
             + self.strategic_balance(color, weights)
             + self.timeline_coordination(color, weights)
             + self.royal_capture_pressure(color, weights)
+            + self.temporal_royal_corridor_balance(color, weights)
+            + self.royal_capture_setup_balance(color, weights)
             + self.royal_safety_balance(color, weights)
             + self.fork_pressure_balance(color, weights)
             + self.forcing_pressure_balance(color, weights)
@@ -121,6 +67,18 @@ impl Game {
             } else {
                 self.mobility_balance(color) * weights.mobility
             }
+    }
+
+    fn terminal_score(&self, color: Color) -> Option<i32> {
+        if self.staged_royal_capture_by == Some(color) || self.royal_capture_available(color) {
+            Some(CHECKMATE_SCORE)
+        } else if self.staged_royal_capture_by == Some(color.opposite())
+            || self.royal_capture_available(color.opposite())
+        {
+            Some(-CHECKMATE_SCORE)
+        } else {
+            None
+        }
     }
 
     fn present_progress(&self, color: Color) -> i32 {
@@ -395,6 +353,182 @@ impl Game {
                         score += weights.temporal_threat * urgency;
                     }
                 }
+            }
+        }
+        score
+    }
+
+    fn royal_capture_setup_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+        self.royal_capture_setup_pressure_for(color, weights)
+            - self.royal_capture_setup_pressure_for(color.opposite(), weights)
+    }
+
+    fn royal_capture_setup_pressure_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+        self.royal_capture_setup_pressure_for_limited(color, weights, 48)
+    }
+
+    fn royal_capture_setup_pressure_for_limited(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limit: usize,
+    ) -> i32 {
+        if weights.royal_capture_setup == 0 || self.royal_capture_available(color) {
+            return 0;
+        }
+
+        let mut score = 0;
+        let mut counted = 0;
+
+        for (from, piece) in self.latest_pieces() {
+            if piece.color != color || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+            {
+                continue;
+            }
+
+            for y in 0..8 {
+                for x in 0..8 {
+                    if counted >= limit {
+                        break;
+                    }
+                    let to = Position {
+                        timeline_id: from.timeline_id,
+                        time: from.time,
+                        x,
+                        y,
+                    };
+                    if self
+                        .piece_at(to)
+                        .is_some_and(|target| target.color == color)
+                        || self.move_kind_for(piece, from, to).is_none()
+                    {
+                        continue;
+                    }
+
+                    let arrival = Position {
+                        time: from.time + 1,
+                        ..to
+                    };
+                    let corridor_pressure =
+                        self.temporal_royal_corridor_from(piece, arrival, weights);
+                    if corridor_pressure <= 0 {
+                        continue;
+                    }
+
+                    counted += 1;
+                    let major_piece_bonus = match piece.piece_type {
+                        PieceType::Queen | PieceType::RoyalQueen => weights.royal_capture_setup / 2,
+                        PieceType::Bishop
+                        | PieceType::Rook
+                        | PieceType::Unicorn
+                        | PieceType::Dragon
+                        | PieceType::Princess => weights.royal_capture_setup / 3,
+                        _ => 0,
+                    };
+                    let capture_bonus = self
+                        .piece_at(to)
+                        .map(|target| weights.piece_value(target.piece_type) / 20)
+                        .unwrap_or(0);
+
+                    score += weights.royal_capture_setup
+                        + major_piece_bonus
+                        + capture_bonus
+                        + corridor_pressure;
+                }
+            }
+            if counted >= limit {
+                break;
+            }
+        }
+
+        score
+    }
+
+    fn temporal_royal_corridor_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+        self.temporal_royal_corridor_pressure_for(color, weights)
+            - self.temporal_royal_corridor_pressure_for(color.opposite(), weights)
+    }
+
+    fn temporal_royal_corridor_pressure_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+        if weights.royal_capture_setup == 0 {
+            return 0;
+        }
+
+        let royal_targets = self.royal_pieces(color.opposite());
+        let mut score = 0;
+        for (from, piece) in self.latest_pieces() {
+            if piece.color != color || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+            {
+                continue;
+            }
+            score += self.temporal_royal_corridor_from_with_targets(
+                piece,
+                from,
+                &royal_targets,
+                weights,
+            );
+        }
+
+        score
+    }
+
+    fn temporal_royal_corridor_from(
+        &self,
+        piece: Piece,
+        from: Position,
+        weights: &EvalWeights,
+    ) -> i32 {
+        let royal_targets = self.royal_pieces(piece.color.opposite());
+        self.temporal_royal_corridor_from_with_targets(piece, from, &royal_targets, weights)
+    }
+
+    fn temporal_royal_corridor_from_with_targets(
+        &self,
+        piece: Piece,
+        from: Position,
+        royal_targets: &[(Position, Piece)],
+        weights: &EvalWeights,
+    ) -> i32 {
+        let mut score = 0;
+        for (target, _) in royal_targets {
+            if from.timeline_id == target.timeline_id
+                && from.time == target.time
+                && from.x == target.x
+                && from.y == target.y
+            {
+                continue;
+            }
+
+            for wait in 1..=4 {
+                let future_from = Position {
+                    time: from.time + wait,
+                    ..from
+                };
+                if future_from.time <= target.time {
+                    continue;
+                }
+                if !self.attacks_square(piece, future_from, *target) {
+                    continue;
+                }
+
+                let urgency = 5 - wait;
+                let fixed_target_bonus = if self.is_latest_board(target.timeline_id, target.time) {
+                    0
+                } else {
+                    weights.temporal_threat * 2
+                };
+                let piece_bonus = match piece.piece_type {
+                    PieceType::Queen | PieceType::RoyalQueen => weights.royal_capture_setup / 2,
+                    PieceType::Bishop
+                    | PieceType::Rook
+                    | PieceType::Unicorn
+                    | PieceType::Dragon
+                    | PieceType::Princess => weights.royal_capture_setup / 3,
+                    _ => weights.royal_capture_setup / 6,
+                };
+                score +=
+                    weights.royal_capture_setup * urgency / 2 + piece_bonus + fixed_target_bonus;
+                break;
             }
         }
         score

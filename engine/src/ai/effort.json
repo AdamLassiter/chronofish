@@ -1,0 +1,44 @@
+{
+  "fast": {
+    "label": "Bot: Fast",
+    "displayNames": [
+      "Bullet Fischer",
+      "Speedrun Steinitz",
+      "Blitz Botvinnik"
+    ],
+    "depth": 3,
+    "nodes": 20000,
+    "timeMs": 2000,
+    "trainingDepth": 1,
+    "trainingNodes": 400,
+    "trainingPlies": 2
+  },
+  "balanced": {
+    "label": "Bot: Balanced",
+    "displayNames": [
+      "Multiverse Magnus",
+      "Timeline Tal",
+      "Causally Capablanca"
+    ],
+    "depth": 4,
+    "nodes": 80000,
+    "timeMs": 5000,
+    "trainingDepth": 1,
+    "trainingNodes": 800,
+    "trainingPlies": 4
+  },
+  "expert": {
+    "label": "Bot: Expert",
+    "displayNames": [
+      "Kasparadox",
+      "Deep Blue Shift",
+      "Premove Checkamura"
+    ],
+    "depth": 5,
+    "nodes": 200000,
+    "timeMs": 15000,
+    "trainingDepth": 2,
+    "trainingNodes": 1600,
+    "trainingPlies": 6
+  }
+}
