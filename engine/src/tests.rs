@@ -108,6 +108,154 @@ mod tests {
     }
 
     #[test]
+    fn search_ignores_inactive_timeline_sources() {
+        let mut game = Game::new();
+        let mut board = empty_board_with_kings();
+        board[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Rook,
+        });
+        game.timelines = vec![
+            Timeline {
+                id: 0,
+                row: 0,
+                label: "Sacred T0".to_string(),
+                owner: TimelineOwner::Neutral,
+                boards: vec![snapshot(0, Color::White, empty_board_with_kings())],
+            },
+            Timeline {
+                id: -1,
+                row: -1,
+                label: "Black T-1".to_string(),
+                owner: TimelineOwner::Black,
+                boards: vec![snapshot(0, Color::White, empty_board_with_kings())],
+            },
+            Timeline {
+                id: -2,
+                row: -2,
+                label: "Black T-2".to_string(),
+                owner: TimelineOwner::Black,
+                boards: vec![snapshot(0, Color::White, board)],
+            },
+        ];
+
+        let weights = EvalWeights::default_tuned();
+        let moves = game.legal_single_moves(&weights);
+
+        assert!(game.can_move_to(
+            Position {
+                timeline_id: -2,
+                time: 0,
+                x: 0,
+                y: 0,
+            },
+            Position {
+                timeline_id: -2,
+                time: 0,
+                x: 0,
+                y: 1,
+            },
+        ));
+        assert!(moves
+            .iter()
+            .all(|movement| movement.from.timeline_id != -2));
+    }
+
+    #[test]
+    fn search_does_not_create_inactive_timelines() {
+        let mut game = Game::new();
+        let mut latest = empty_board_with_kings();
+        latest[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Rook,
+        });
+        game.next_timeline_id = 2;
+        game.timelines = vec![
+            Timeline {
+                id: 0,
+                row: 0,
+                label: "Sacred T0".to_string(),
+                owner: TimelineOwner::Neutral,
+                boards: vec![
+                    snapshot(0, Color::White, empty_board_with_kings()),
+                    snapshot(1, Color::White, latest),
+                ],
+            },
+            Timeline {
+                id: 1,
+                row: 1,
+                label: "White T1".to_string(),
+                owner: TimelineOwner::White,
+                boards: vec![snapshot(0, Color::Black, empty_board_with_kings())],
+            },
+        ];
+
+        let from = Position {
+            timeline_id: 0,
+            time: 1,
+            x: 0,
+            y: 0,
+        };
+        let to = Position {
+            timeline_id: 0,
+            time: 0,
+            x: 0,
+            y: 0,
+        };
+
+        assert!(game.can_move_to(from, to));
+        assert!(!game.apply_move_for_search(from, to));
+    }
+
+    #[test]
+    fn search_allows_royal_pieces_to_create_inactive_timelines() {
+        let mut game = Game::new();
+        let mut latest = empty_board_with_kings();
+        latest[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::RoyalQueen,
+        });
+        game.next_timeline_id = 2;
+        game.timelines = vec![
+            Timeline {
+                id: 0,
+                row: 0,
+                label: "Sacred T0".to_string(),
+                owner: TimelineOwner::Neutral,
+                boards: vec![
+                    snapshot(0, Color::White, empty_board_with_kings()),
+                    snapshot(1, Color::White, latest),
+                ],
+            },
+            Timeline {
+                id: 1,
+                row: 1,
+                label: "White T1".to_string(),
+                owner: TimelineOwner::White,
+                boards: vec![snapshot(0, Color::Black, empty_board_with_kings())],
+            },
+        ];
+
+        let from = Position {
+            timeline_id: 0,
+            time: 1,
+            x: 0,
+            y: 0,
+        };
+        let to = Position {
+            timeline_id: 0,
+            time: 0,
+            x: 0,
+            y: 0,
+        };
+
+        assert!(game.can_move_to(from, to));
+        assert!(game.apply_move_for_search(from, to));
+        assert!(game.timeline(2).is_some());
+        assert!(!game.is_active_timeline(2));
+    }
+
+    #[test]
     fn branch_move_advances_source_and_destination() {
         let mut game = Game::new();
         let empty = [[None; 8]; 8];
@@ -1587,6 +1735,54 @@ mod tests {
             active.timeline_economy_for(Color::White, &weights)
                 > inactive.timeline_economy_for(Color::White, &weights)
         );
+    }
+
+    #[test]
+    fn evaluator_prunes_inactive_timelines() {
+        let weights = EvalWeights::default_tuned();
+        let board = empty_board_with_kings();
+        let mut active_only = Game::new();
+        active_only.timelines = vec![
+            Timeline {
+                id: 0,
+                row: 0,
+                label: "Sacred T0".to_string(),
+                owner: TimelineOwner::Neutral,
+                boards: vec![snapshot(0, Color::White, board)],
+            },
+            Timeline {
+                id: -1,
+                row: -1,
+                label: "Black T-1".to_string(),
+                owner: TimelineOwner::Black,
+                boards: vec![snapshot(0, Color::White, board)],
+            },
+        ];
+
+        let mut with_inactive = active_only.clone();
+        let mut inactive_board = board;
+        inactive_board[3][3] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Queen,
+        });
+        with_inactive.timelines.push(Timeline {
+            id: -2,
+            row: -2,
+            label: "Black T-2".to_string(),
+            owner: TimelineOwner::Black,
+            boards: vec![snapshot(0, Color::White, inactive_board)],
+        });
+
+        assert!(!with_inactive.is_active_timeline(-2));
+        assert_eq!(
+            active_only.evaluate_heuristic(Color::White, &weights),
+            with_inactive.evaluate_heuristic(Color::White, &weights)
+        );
+        assert!(with_inactive
+            .pruned_for_evaluation()
+            .timelines
+            .iter()
+            .all(|timeline| timeline.id != -2));
     }
 
     #[test]

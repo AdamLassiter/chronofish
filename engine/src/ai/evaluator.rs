@@ -83,7 +83,8 @@ impl NeuralEvaluator {
 
     fn predict(&self, game: &Game, color: Color) -> Option<i32> {
         let model = self.model.as_ref()?;
-        let encoded = game.encode_neural_position(color);
+        let evaluation_game = game.pruned_for_evaluation();
+        let encoded = evaluation_game.encode_neural_position(color);
         let mut score = model.bias;
         if model.projection_size > 0 && !model.hidden_layers.is_empty() {
             let projected = project_neural_features(

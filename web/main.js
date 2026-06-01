@@ -5,6 +5,10 @@ import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { appendNotationLine, postMatchLog } from "./match-log.js";
 import { readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
 
+const LOCAL_GAME_STORAGE_KEY = "chronofish.localGameState.v1";
+const initialSearchParams = new URLSearchParams(window.location.search);
+const initialUrlHasRoom = initialSearchParams.has("room");
+
 let engine = null;
 let aiParameters = null;
 let aiEffortConfigs = {
@@ -13,21 +17,21 @@ let aiEffortConfigs = {
     displayNames: ["Bullet Fischer", "Speedrun Steinitz", "Blitz Botvinnik"],
     depth: 2,
     nodes: 20_000,
-    timeMs: 1500
+    timeMs: 10_000
   },
   balanced: {
     label: "Bot: Balanced",
     displayNames: ["Multiverse Magnus", "Timeline Tal", "Causality Capablanca"],
     depth: 4,
     nodes: 80_000,
-    timeMs: 5000
+    timeMs: 50_000
   },
   expert: {
     label: "Bot: Expert",
     displayNames: ["Kasparadox", "Deep Blue Shift", "Premovaru Checkamura"],
     depth: 5,
     nodes: 200_000,
-    timeMs: 15000
+    timeMs: 250_000
   }
 };
 let game = { turn: "white", timelines: [], nextTimelineId: 1 };
@@ -41,7 +45,7 @@ let legalTargets = [];
 let submittedTurns = [];
 let submittedNotation = "";
 let stagedMoves = [];
-let aiWorker = null;
+let aiWorkers = [];
 let aiRequestId = 0;
 let trainingWorker = null;
 let trainingRequestId = 0;
@@ -59,11 +63,14 @@ let bot = {
   // Bot sides are chosen in the lobby. In multiplayer, a bot explicitly occupies
   // its side with its own token so it follows the same room seating rules.
   thinking: false,
+  timeoutId: null,
+  countdownId: null,
+  pendingSearch: null,
   tokens: {}
 };
 let multiplayer = {
   // Room id lives in the URL so sharing the address reconstructs the room.
-  roomId: new URLSearchParams(window.location.search).get("room") ?? makeRoomId(),
+  roomId: initialSearchParams.get("room") ?? makeRoomId(),
   token: localStorage.getItem("chronofish.playerToken") ?? crypto.randomUUID(),
   color: localStorage.getItem("chronofish.playerColor") ?? "local",
   events: null,
@@ -206,6 +213,81 @@ function gamePayload(nextPhase = phase) {
     notation: submittedNotation,
     snapshot: game
   };
+}
+
+function shouldPersistLocalGame() {
+  return !multiplayer.connected && (phase === "game" || phase === "review");
+}
+
+function persistLocalGameState() {
+  if (!engine) {
+    return;
+  }
+  if (!shouldPersistLocalGame()) {
+    localStorage.removeItem(LOCAL_GAME_STORAGE_KEY);
+    return;
+  }
+
+  localStorage.setItem(LOCAL_GAME_STORAGE_KEY, JSON.stringify({
+    phase,
+    assignments,
+    notation: submittedNotation,
+    turns: submittedTurns,
+    stagedMoves,
+    message: elements.message.textContent,
+    savedAt: Date.now()
+  }));
+}
+
+function clearLocalGameState() {
+  localStorage.removeItem(LOCAL_GAME_STORAGE_KEY);
+}
+
+function restoreLocalGameState() {
+  if (!engine || multiplayer.connected || initialUrlHasRoom) {
+    return false;
+  }
+
+  const saved = localStorage.getItem(LOCAL_GAME_STORAGE_KEY);
+  if (!saved) {
+    return false;
+  }
+
+  try {
+    const state = JSON.parse(saved);
+    if (!state || !["game", "review"].includes(state.phase)) {
+      clearLocalGameState();
+      return false;
+    }
+
+    writeAssignments(state.assignments ?? assignments);
+    phase = state.phase;
+    if (typeof state.notation === "string" && state.notation.trim()) {
+      replayNotation(state.notation);
+    } else if (Array.isArray(state.turns) && state.turns.length > 0) {
+      replayTurns(state.turns);
+    } else {
+      resetEngine();
+    }
+
+    committedGame = game;
+    for (const move of state.stagedMoves ?? []) {
+      if (!move?.from || !move?.to || !applyEngineMove(move.from, move.to)) {
+        break;
+      }
+    }
+    selected = null;
+    legalTargets = [];
+    elements.message.textContent = state.message || (phase === "game"
+      ? `${playerDisplayName(game.turn)} to move.`
+      : "Reviewing completed game.");
+    return true;
+  } catch (error) {
+    console.error(error);
+    clearLocalGameState();
+    resetEngine();
+    return false;
+  }
 }
 
 function lobbyPayload() {
@@ -359,13 +441,54 @@ function botColors() {
   return ["white", "black"].filter((color) => isBotAssignment(assignments[color]));
 }
 
-function ensureAiWorker() {
-  // Lazily create the worker so normal local play avoids WASM worker startup.
-  if (!aiWorker) {
-    aiWorker = new Worker("./ai-worker.js", { type: "module" });
-    aiWorker.addEventListener("message", handleAiWorkerMessage);
+function createAiWorker() {
+  const worker = new Worker("./ai-worker.js", { type: "module" });
+  worker.addEventListener("message", handleAiWorkerMessage);
+  aiWorkers.push(worker);
+  return worker;
+}
+
+function terminateAiWorkers() {
+  for (const worker of aiWorkers) {
+    worker.terminate();
   }
-  return aiWorker;
+  aiWorkers = [];
+  bot.pendingSearch = null;
+}
+
+function botSearchWorkerCount() {
+  const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 2);
+  return Math.max(1, Math.min(4, hardwareThreads - 1));
+}
+
+function clearBotTimeout() {
+  if (bot.timeoutId !== null) {
+    clearTimeout(bot.timeoutId);
+    bot.timeoutId = null;
+  }
+  if (bot.countdownId !== null) {
+    clearInterval(bot.countdownId);
+    bot.countdownId = null;
+  }
+}
+
+function formatBotTimeLimit(ms) {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  return `${seconds}s`;
+}
+
+function botMoveCredentials(color) {
+  return { color, token: bot.tokens[color] ?? botToken(color) };
+}
+
+function updateBotCountdownMessage(id) {
+  const pending = bot.pendingSearch;
+  if (!bot.thinking || !pending || pending.id !== id) {
+    return;
+  }
+  const remainingMs = Math.max(0, pending.deadlineAt - Date.now());
+  const workerText = `${pending.expected} worker${pending.expected === 1 ? "" : "s"}`;
+  elements.message.textContent = `${botDisplayName(pending.botColor)} thinking across ${workerText}. ${formatBotTimeLimit(remainingMs)} left.`;
 }
 
 function ensureTrainingWorker() {
@@ -433,6 +556,7 @@ function applyEngineMove(from, to) {
   selected = null;
   legalTargets = [];
   elements.message.textContent = message;
+  persistLocalGameState();
   return message;
 }
 
@@ -640,6 +764,8 @@ function applyRemoteRoom(room, message = "") {
   if (bot.thinking) {
     aiRequestId += 1;
     bot.thinking = false;
+    clearBotTimeout();
+    terminateAiWorkers();
   }
 
   if (room?.game?.phase) {
@@ -771,6 +897,7 @@ async function enterPostMatchReview(message, credentials = null) {
   selected = null;
   legalTargets = [];
   elements.message.textContent = message;
+  persistLocalGameState();
   render();
   showMatchDialog(message);
   postMatchLog(multiplayer.roomId, submittedNotation.split(/\n/).at(-1) ?? "");
@@ -838,6 +965,7 @@ async function startGame() {
 
   if (!multiplayer.connected) {
     elements.message.textContent = "Local game started.";
+    persistLocalGameState();
     render();
     maybeStartBotTurn();
     return;
@@ -885,46 +1013,130 @@ function maybeStartBotTurn() {
   }
 
   const id = ++aiRequestId;
-  const effort = botEffort(assignments[game.turn]);
+  const botColor = game.turn;
+  const effort = botEffort(assignments[botColor]);
+  const timeMs = Math.max(1, effort.timeMs ?? 10_000);
+  const workerTimeMs = botWorkerSearchTimeMs(timeMs);
+  const workerCount = botSearchWorkerCount();
+  terminateAiWorkers();
   bot.thinking = true;
-  elements.message.textContent = `${botDisplayName(game.turn)} thinking.`;
-  ensureAiWorker().postMessage({
+  bot.pendingSearch = {
     id,
-    notation: submittedNotation,
-    depth: effort.depth,
-    nodes: effort.nodes,
-    timeMs: effort.timeMs
-  });
+    botColor,
+    expected: workerCount,
+    deadlineAt: Date.now() + timeMs,
+    results: [],
+    errors: []
+  };
+  clearBotTimeout();
+  bot.timeoutId = setTimeout(() => handleBotTimeout(id, botColor, timeMs), timeMs);
+  bot.countdownId = setInterval(() => updateBotCountdownMessage(id), 250);
+  updateBotCountdownMessage(id);
+  for (let partitionIndex = 0; partitionIndex < workerCount; partitionIndex += 1) {
+    createAiWorker().postMessage({
+      id,
+      notation: submittedNotation,
+      depth: effort.depth,
+      nodes: effort.nodes,
+      timeMs: workerTimeMs,
+      partitionIndex,
+      partitionCount: workerCount
+    });
+  }
+}
+
+function botWorkerSearchTimeMs(timeMs) {
+  const margin = Math.min(1000, Math.max(100, Math.floor(timeMs * 0.05)));
+  return Math.max(1, timeMs - margin);
+}
+
+function handleBotTimeout(id, botColor, timeMs) {
+  if (id !== aiRequestId || !bot.thinking) {
+    return;
+  }
+
+  const pending = bot.pendingSearch;
+  const bestResult = selectBestAiResult(pending?.results.map((entry) => entry.result) ?? []);
+  aiRequestId += 1;
+  bot.thinking = false;
+  clearBotTimeout();
+  terminateAiWorkers();
+  if (bestResult) {
+    elements.message.textContent = `${botDisplayName(botColor)} used the best move found in ${formatBotTimeLimit(timeMs)}.`;
+    completeBotTurn(botColor, bestResult);
+    return;
+  }
+
+  elements.message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
+  completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
 }
 
 function handleAiWorkerMessage(event) {
-  const { id, ok, result, error } = event.data;
+  const { id, ok, result, error, partitionIndex } = event.data;
   if (id !== aiRequestId) {
     return;
   }
 
-  bot.thinking = false;
-  if (!ok) {
-    elements.message.textContent = error;
-    concede(game.turn, { color: game.turn, token: bot.tokens[game.turn] ?? botToken(game.turn) });
+  const pending = bot.pendingSearch;
+  if (!pending || pending.id !== id) {
     return;
   }
 
-  const botColor = game.turn;
+  if (ok) {
+    pending.results.push({ result, partitionIndex });
+  } else {
+    pending.errors.push(error);
+  }
+
+  if (pending.results.length + pending.errors.length < pending.expected) {
+    return;
+  }
+
+  bot.thinking = false;
+  clearBotTimeout();
+  terminateAiWorkers();
+
+  const bestResult = selectBestAiResult(pending.results.map((entry) => entry.result));
+  if (!bestResult && pending.errors.length > 0) {
+    elements.message.textContent = pending.errors[0];
+    concede(pending.botColor, botMoveCredentials(pending.botColor));
+    return;
+  }
+
+  completeBotTurn(pending.botColor, bestResult ?? { status: "noLegalTurn", moves: [] });
+}
+
+function selectBestAiResult(results) {
+  return results
+    .filter((result) => result?.status === "ok" && result.moves?.length > 0)
+    .sort((left, right) => {
+      const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
+      if (score !== 0) {
+        return score;
+      }
+      const depth = (right.depth ?? 0) - (left.depth ?? 0);
+      if (depth !== 0) {
+        return depth;
+      }
+      return (right.nodes ?? 0) - (left.nodes ?? 0);
+    })[0] ?? null;
+}
+
+function completeBotTurn(botColor, result) {
   if (!isBotAssignment(assignments[botColor]) || stagedMoves.length > 0) {
     return;
   }
 
   if (result.status !== "ok" || result.moves.length === 0) {
     elements.message.textContent = `${botDisplayName(botColor)} found no legal turn and conceded.`;
-    concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+    concede(botColor, botMoveCredentials(botColor));
     return;
   }
 
   const before = turnSignature();
   for (const move of result.moves) {
     if (!applyEngineMove(move.from, move.to)) {
-      concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+      concede(botColor, botMoveCredentials(botColor));
       return;
     }
   }
@@ -936,7 +1148,7 @@ function handleAiWorkerMessage(event) {
   const turnNotation = stagedTurnNotation();
   if (!engine.chronofish_submit_turn()) {
     elements.message.textContent = engineDisplayMessage();
-    concede(botColor, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+    concede(botColor, botMoveCredentials(botColor));
     return;
   }
 
@@ -950,12 +1162,13 @@ function handleAiWorkerMessage(event) {
   legalTargets = [];
   const botMessage = `${botDisplayName(botColor)} moved. ${message}`;
   elements.message.textContent = botMessage;
+  persistLocalGameState();
   render();
   if (isMatchOverMessage(message)) {
-    enterPostMatchReview(message, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+    enterPostMatchReview(message, botMoveCredentials(botColor));
     return;
   }
-  syncState("state", botMessage, { color: botColor, token: bot.tokens[botColor] ?? botToken(botColor) });
+  syncState("state", botMessage, botMoveCredentials(botColor));
   maybeStartBotTurn();
 }
 
@@ -966,10 +1179,16 @@ async function loadWasmStatus() {
     engine = instance.exports;
     resetEngine();
     await loadActiveModelIntoEngine();
+    const restored = restoreLocalGameState();
     elements.wasmStatus.textContent = `Engine v${readWasmString(engine, engine.chronofish_version())}`;
     elements.wasmStatus.dataset.state = "ready";
-    elements.message.textContent = "Configure the lobby, then start the game.";
+    if (!restored) {
+      elements.message.textContent = "Configure the lobby, then start the game.";
+    }
     render();
+    if (restored) {
+      maybeStartBotTurn();
+    }
   } catch (error) {
     console.error(error);
     elements.wasmStatus.textContent = "WASM not built";
@@ -1126,8 +1345,8 @@ async function replaceActiveModel(model) {
 function resetAiWorker() {
   aiRequestId += 1;
   bot.thinking = false;
-  aiWorker?.terminate();
-  aiWorker = null;
+  clearBotTimeout();
+  terminateAiWorkers();
 }
 
 async function readJsonResponse(response) {
@@ -1155,6 +1374,10 @@ async function handleTrainingWorkerMessage(event) {
     labelWorkers,
     bufferSize,
     pseudoCount,
+    selfPlayCount,
+    selfPlayCompleted,
+    selfPlayGames,
+    selfPlaySamples,
     gpuPhase
   } = event.data;
   if (id !== trainingRequestId) {
@@ -1193,8 +1416,12 @@ async function handleTrainingWorkerMessage(event) {
     elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: collected ${collected}/${sampleCount}.`;
     return;
   }
+  if (selfPlayCompleted !== undefined) {
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: self-play ${selfPlayCompleted}/${selfPlayGames} games, ${selfPlaySamples} outcome samples.`;
+    return;
+  }
   if (gpuPhase) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} pseudo).`;
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} pseudo, ${selfPlayCount ?? 0} self-play).`;
     return;
   }
   if (epoch !== undefined) {
@@ -1227,6 +1454,7 @@ elements.resetButton.addEventListener("click", () => {
   selected = null;
   legalTargets = [];
   elements.message.textContent = undone > 0 ? "Reset staged moves." : "No staged moves to reset.";
+  persistLocalGameState();
   render();
 });
 
@@ -1253,6 +1481,7 @@ elements.undoMoveButton.addEventListener("click", () => {
   selected = null;
   legalTargets = [];
   elements.message.textContent = engineDisplayMessage();
+  persistLocalGameState();
   render();
 });
 
@@ -1284,6 +1513,7 @@ elements.submitTurnButton.addEventListener("click", () => {
   selected = null;
   legalTargets = [];
   elements.message.textContent = message;
+  persistLocalGameState();
   render();
   if (isMatchOverMessage(message)) {
     enterPostMatchReview(message);

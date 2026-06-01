@@ -3,6 +3,8 @@ const BUFFER_KEY = "value-policy-buffer";
 const PROJECTION_SIZE = 2048;
 const PROJECTION_SEED = 2166136261;
 const MAX_PLAYOUT_PLIES = 10;
+const SELF_PLAY_MAX_TURNS = 48;
+const SELF_PLAY_LABEL_SCALE = 90000;
 const HIDDEN_LAYERS = [1024, 512, 256];
 const VALUE_EPOCHS_PER_SUBMIT = 8;
 const POLICY_STEPS_PER_SUBMIT = 64;
@@ -277,16 +279,20 @@ self.addEventListener("message", async (event) => {
         self.postMessage({ id, ok: true, labelWorkers: workers, sampleCount });
       }
     });
-    const pseudoTarget = Math.max(0, config.maxBuffer - buffer.length - expertSamples.length);
+    const selfPlaySamples = await collectSelfPlaySamples(notation ?? "", config, (completed, gameCount, sampleCount) => {
+      self.postMessage({ id, ok: true, selfPlayCompleted: completed, selfPlayGames: gameCount, selfPlaySamples: sampleCount });
+    });
+    const pseudoTarget = Math.max(0, config.maxBuffer - buffer.length - expertSamples.length - selfPlaySamples.length);
     const pseudoSamples = await collectPseudoSamples(notation ?? "", config, activeModel, pseudoTarget);
-    buffer = appendReplaySamples(buffer, expertSamples.concat(pseudoSamples), config.maxBuffer);
+    buffer = appendReplaySamples(buffer, expertSamples.concat(selfPlaySamples, pseudoSamples), config.maxBuffer);
     await saveReplayBuffer(buffer);
     self.postMessage({
       id,
       ok: true,
       gpuPhase: true,
       bufferSize: buffer.length,
-      pseudoCount: buffer.filter((sample) => sample.pseudo).length
+      pseudoCount: buffer.filter((sample) => sample.pseudo).length,
+      selfPlayCount: buffer.filter((sample) => sample.selfPlay).length
     });
     const model = await train(buffer, config, activeModel, (epoch, loss) => {
       self.postMessage({ id, ok: true, epoch, loss });
@@ -310,6 +316,40 @@ async function collectPseudoSamples(notation, config, activeModel, targetCount) 
     policy: 0,
     pseudo: true
   }));
+}
+
+async function collectSelfPlaySamples(notation, config, progress) {
+  const gameCount = Math.max(1, Math.min(4, Math.ceil(config.samples / 8)));
+  const jobs = Array.from({ length: gameCount }, (_, index) => ({
+    index,
+    notation,
+    seed: sampleSeed(notation, index, 0x51f1_a700)
+  }));
+  const workerCount = Math.min(jobs.length, Math.max(1, Math.min(config.labelWorkers ?? autoLabelWorkers(), 4)));
+  const games = new Array(jobs.length);
+  let nextJob = 0;
+  let completed = 0;
+  let sampleCount = 0;
+  progress(0, gameCount, 0);
+
+  await Promise.all(Array.from({ length: workerCount }, () => runSelfPlayWorker()));
+  return games.flat().filter(Boolean);
+
+  async function runSelfPlayWorker() {
+    const worker = new Worker("./training-label-worker.js", { type: "module" });
+    try {
+      while (nextJob < jobs.length) {
+        const job = jobs[nextJob];
+        nextJob += 1;
+        games[job.index] = await selfPlayGame(worker, job, config);
+        completed += 1;
+        sampleCount += games[job.index].length;
+        progress(completed, gameCount, sampleCount);
+      }
+    } finally {
+      worker.terminate();
+    }
+  }
 }
 
 async function collectSamples(notation, config, encodeOnly, progress) {
@@ -365,6 +405,30 @@ function notationPrefixes(notation, count) {
 }
 
 function labelSample(worker, job, config, encodeOnly) {
+  return workerRequest(worker, {
+    type: "sample",
+    notation: job.prefix,
+    depth: config.depth,
+    nodes: config.nodes,
+    encodeOnly,
+    seed: job.seed,
+    plies: job.plies
+  });
+}
+
+function selfPlayGame(worker, job, config) {
+  return workerRequest(worker, {
+    type: "selfPlay",
+    notation: job.notation,
+    depth: Math.max(1, Math.min(config.depth, 3)),
+    nodes: Math.max(1, Math.min(config.nodes, 8000)),
+    maxTurns: SELF_PLAY_MAX_TURNS,
+    outcomeScale: SELF_PLAY_LABEL_SCALE,
+    seed: job.seed
+  });
+}
+
+function workerRequest(worker, payload) {
   return new Promise((resolve, reject) => {
     const messageId = crypto.randomUUID();
     const handleMessage = (event) => {
@@ -390,12 +454,7 @@ function labelSample(worker, job, config, encodeOnly) {
     worker.addEventListener("error", handleError);
     worker.postMessage({
       id: messageId,
-      notation: job.prefix,
-      depth: config.depth,
-      nodes: config.nodes,
-      encodeOnly,
-      seed: job.seed,
-      plies: job.plies
+      ...payload
     });
   });
 }

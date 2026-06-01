@@ -143,17 +143,123 @@ impl Game {
         (best, sample)
     }
 
+    fn best_ai_turn_partitioned(
+        &self,
+        max_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        partition_index: usize,
+        partition_count: usize,
+    ) -> AiSearchResult {
+        self.best_ai_turn_partitioned_with_value_evaluator(
+            max_depth,
+            max_nodes,
+            deadline,
+            partition_index,
+            partition_count,
+            ValueEvaluator::heuristic(),
+        )
+    }
+
+    fn best_ai_turn_partitioned_with_value_evaluator(
+        &self,
+        max_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        partition_index: usize,
+        partition_count: usize,
+        evaluator: ValueEvaluator,
+    ) -> AiSearchResult {
+        let depth = max_depth.max(1);
+        let nodes = max_nodes.max(1) as usize;
+        let weights = EvalWeights::default_tuned();
+        let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
+        context.options = SearchOptions::optimized();
+        context.evaluator = evaluator;
+        context.killers.resize((depth as usize).saturating_add(3), [None, None]);
+
+        if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
+            return AiSearchResult {
+                moves: plan.moves,
+                score: plan.score_hint,
+                depth: 1,
+                nodes: context.nodes,
+                status: "ok",
+            };
+        }
+
+        let partition_count = partition_count.max(1);
+        let partition_index = partition_index.min(partition_count - 1);
+        let partition = Some((partition_index, partition_count));
+        let mut best = AiSearchResult {
+            moves: Vec::new(),
+            score: 0,
+            depth: 0,
+            nodes: 0,
+            status: "noLegalTurn",
+        };
+        let mut previous_score = 0;
+        for current_depth in 1..=depth {
+            let window = if context.options.aspiration_windows && current_depth > 1 {
+                Some((
+                    previous_score - ASPIRATION_WINDOW,
+                    previous_score + ASPIRATION_WINDOW,
+                ))
+            } else {
+                None
+            };
+            let Some((plan, score)) =
+                self.search_root_partitioned(current_depth, &mut context, window, partition)
+            else {
+                break;
+            };
+            previous_score = score;
+            best = AiSearchResult {
+                moves: plan.moves,
+                score,
+                depth: current_depth,
+                nodes: context.nodes,
+                status: "ok",
+            };
+            if context.exhausted() || score.abs() >= CHECKMATE_SCORE / 2 {
+                break;
+            }
+        }
+
+        best.nodes = context.nodes;
+        best
+    }
+
     fn search_root(
         &self,
         depth: i32,
         context: &mut SearchContext,
         window: Option<(i32, i32)>,
     ) -> Option<(TurnPlan, i32)> {
+        self.search_root_partitioned(depth, context, window, None)
+    }
+
+    fn search_root_partitioned(
+        &self,
+        depth: i32,
+        context: &mut SearchContext,
+        window: Option<(i32, i32)>,
+        partition: Option<(usize, usize)>,
+    ) -> Option<(TurnPlan, i32)> {
         if context.expired() {
             return None;
         }
 
-        let plans = self.legal_turn_plans_with_context(context);
+        let mut plans = self.legal_turn_plans_with_context(context);
+        if let Some((partition_index, partition_count)) = partition {
+            plans = plans
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, plan)| {
+                    (index % partition_count == partition_index).then_some(plan)
+                })
+                .collect();
+        }
         let (mut alpha, beta) = window.unwrap_or((-CHECKMATE_SCORE * 2, CHECKMATE_SCORE * 2));
         let mut best = self.search_root_with_bounds(depth, context, plans.clone(), alpha, beta);
 
@@ -422,6 +528,9 @@ impl Game {
     ) -> Vec<MoveStep> {
         let mut moves = Vec::new();
         for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
             for board in &timeline.boards {
                 if deadline_expired(deadline) {
                     return moves;
@@ -457,7 +566,12 @@ impl Game {
                                             x: target_x,
                                             y: target_y,
                                         };
-                                        if self.can_move_to(from, to) {
+                                        let Some((piece, move_kind)) =
+                                            self.legal_move_kind(from, to)
+                                        else {
+                                            continue;
+                                        };
+                                        if self.allows_search_move(from, to, piece, move_kind) {
                                             moves.push(MoveStep { from, to });
                                         }
                                     }
@@ -673,6 +787,9 @@ impl Game {
         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
             return false;
         };
+        if !self.allows_search_move(from, to, piece, move_kind) {
+            return false;
+        }
 
         let captured = self.captured_piece(to, move_kind);
         self.record_staged_capture(piece.color, captured);

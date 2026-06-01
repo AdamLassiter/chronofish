@@ -152,6 +152,27 @@ pub extern "C" fn chronofish_ai_turn_timed_json(
     set_output(json)
 }
 
+#[no_mangle]
+pub extern "C" fn chronofish_ai_turn_partitioned_timed_json(
+    max_depth: i32,
+    max_nodes: i32,
+    millis: i32,
+    partition_index: i32,
+    partition_count: i32,
+) -> *const u8 {
+    let json = with_game(|game| {
+        ai_turn_partitioned_json_with_optional_model(
+            game,
+            max_depth,
+            max_nodes,
+            search_deadline(millis),
+            partition_index.max(0) as usize,
+            partition_count.max(1) as usize,
+        )
+    });
+    set_output(json)
+}
+
 /// # Safety
 ///
 /// `ptr` must point to `len` bytes of readable UTF-8 model JSON in this WASM
@@ -389,6 +410,38 @@ fn ai_turn_json_with_optional_model(
             None,
         )
         .0
+        .to_json()
+    })
+}
+
+fn ai_turn_partitioned_json_with_optional_model(
+    game: &Game,
+    max_depth: i32,
+    max_nodes: i32,
+    deadline: Option<SearchInstant>,
+    partition_index: usize,
+    partition_count: usize,
+) -> String {
+    VALUE_MODEL.with(|value_model| {
+        let Some(model) = value_model.borrow().clone() else {
+            return game
+                .best_ai_turn_partitioned(
+                    max_depth,
+                    max_nodes,
+                    deadline,
+                    partition_index,
+                    partition_count,
+                )
+                .to_json();
+        };
+        game.best_ai_turn_partitioned_with_value_evaluator(
+            max_depth,
+            max_nodes,
+            deadline,
+            partition_index,
+            partition_count,
+            ValueEvaluator::hybrid_from_model(model, 3, 1),
+        )
         .to_json()
     })
 }

@@ -106,7 +106,7 @@ function replayNotation(notation) {
 
 self.addEventListener("message", async (event) => {
   // id is echoed back so the main thread can discard stale search results.
-  const { id, notation, turns, depth, nodes, timeMs } = event.data;
+  const { id, notation, turns, depth, nodes, timeMs, partitionIndex, partitionCount } = event.data;
 
   try {
     await loadEngine();
@@ -116,13 +116,30 @@ self.addEventListener("message", async (event) => {
     } else {
       replayTurns(turns ?? []);
     }
-    const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
-    const pointer = engine.chronofish_ai_turn_timed_json
-      ? fn(depth, nodes, timeMs ?? 10_000)
-      : fn(depth, nodes);
+    const searchTimeMs = Math.max(1, timeMs ?? 10_000);
+    const searchPartitionCount = Math.max(1, partitionCount ?? 1);
+    const searchPartitionIndex = Math.min(
+      searchPartitionCount - 1,
+      Math.max(0, partitionIndex ?? 0)
+    );
+    let pointer;
+    if (searchPartitionCount > 1 && engine.chronofish_ai_turn_partitioned_timed_json) {
+      pointer = engine.chronofish_ai_turn_partitioned_timed_json(
+        depth,
+        nodes,
+        searchTimeMs,
+        searchPartitionIndex,
+        searchPartitionCount
+      );
+    } else {
+      const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
+      pointer = engine.chronofish_ai_turn_timed_json
+        ? fn(depth, nodes, searchTimeMs)
+        : fn(depth, nodes);
+    }
     const result = JSON.parse(readWasmString(pointer));
-    self.postMessage({ id, ok: true, result });
+    self.postMessage({ id, ok: true, result, partitionIndex: searchPartitionIndex });
   } catch (error) {
-    self.postMessage({ id, ok: false, error: error.message });
+    self.postMessage({ id, ok: false, error: error.message, partitionIndex: partitionIndex ?? 0 });
   }
 });

@@ -102,6 +102,63 @@ impl Game {
         self.legal_move_kind(from, to).is_some()
     }
 
+    fn pruned_for_evaluation(&self) -> Self {
+        let active_timeline_ids: Vec<i32> = self
+            .timelines
+            .iter()
+            .filter(|timeline| self.is_active_timeline(timeline.id))
+            .map(|timeline| timeline.id)
+            .collect();
+        let mut pruned = self.clone_for_search();
+        pruned
+            .timelines
+            .retain(|timeline| active_timeline_ids.contains(&timeline.id));
+        pruned
+    }
+
+    fn allows_search_move(
+        &self,
+        from: Position,
+        to: Position,
+        piece: Piece,
+        move_kind: MoveKind,
+    ) -> bool {
+        if !self.is_active_timeline(from.timeline_id) {
+            return false;
+        }
+
+        if matches!(move_kind, MoveKind::Branch) && !self.is_latest_board(to.timeline_id, to.time) {
+            let branch_timeline_id = match piece.color {
+                Color::White => self.next_timeline_id,
+                Color::Black => self.next_black_timeline_id,
+            };
+            return self.would_be_active_timeline(branch_timeline_id)
+                || Self::is_royal_piece(piece.piece_type);
+        }
+
+        true
+    }
+
+    fn would_be_active_timeline(&self, timeline_id: i32) -> bool {
+        let min_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .chain(std::iter::once(timeline_id))
+            .min()
+            .unwrap_or(0);
+        let max_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .chain(std::iter::once(timeline_id))
+            .max()
+            .unwrap_or(0);
+        let active_distance = (-min_timeline).min(max_timeline).max(0) + 1;
+
+        timeline_id.abs() <= active_distance
+    }
+
     // Shared legality gate for UI highlighting, user moves, and AI search. It
     // checks turn ownership, latest-board source rules, destination turn rules
     // for time travel, and friendly occupancy before piece geometry runs.

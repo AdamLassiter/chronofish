@@ -64,6 +64,9 @@ impl Game {
 
         for target in search.royal_piece_positions(color.opposite()) {
             for timeline in &search.timelines {
+                if !search.is_active_timeline(timeline.id) {
+                    continue;
+                }
                 for board in &timeline.boards {
                     if !search.is_latest_board(timeline.id, board.time)
                         || board.side_to_move != color
@@ -121,6 +124,9 @@ impl Game {
         }
 
         for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
             for board in &timeline.boards {
                 if !self.is_latest_board(timeline.id, board.time) || board.side_to_move != color {
                     continue;
@@ -153,6 +159,9 @@ impl Game {
                                         else {
                                             continue;
                                         };
+                                        if !self.allows_search_move(from, to, piece, move_kind) {
+                                            continue;
+                                        }
                                         let mut next = self.clone_for_search();
                                         next.apply_move_unchecked(from, to, piece, move_kind);
                                         if next.has_legal_turn_completion_at_depth(

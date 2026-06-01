@@ -4,6 +4,11 @@ impl Game {
     }
 
     fn evaluate_heuristic(&self, color: Color, weights: &EvalWeights) -> i32 {
+        self.pruned_for_evaluation()
+            .evaluate_heuristic_without_pruning(color, weights)
+    }
+
+    fn evaluate_heuristic_without_pruning(&self, color: Color, weights: &EvalWeights) -> i32 {
         if let Some(score) = self.terminal_score(color) {
             return score;
         }

@@ -141,6 +141,9 @@ impl Game {
     ) -> Vec<MoveStep> {
         let mut moves = Vec::new();
         for from in positions {
+            if !self.is_active_timeline(from.timeline_id) {
+                continue;
+            }
             if !self
                 .piece_at(*from)
                 .is_some_and(|piece| piece.piece_type == PieceType::King)

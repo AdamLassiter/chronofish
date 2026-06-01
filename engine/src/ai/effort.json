@@ -8,7 +8,7 @@
     ],
     "depth": 3,
     "nodes": 20000,
-    "timeMs": 2000,
+    "timeMs": 10000,
     "trainingDepth": 1,
     "trainingNodes": 400,
     "trainingPlies": 2
@@ -22,7 +22,7 @@
     ],
     "depth": 4,
     "nodes": 80000,
-    "timeMs": 5000,
+    "timeMs": 50000,
     "trainingDepth": 1,
     "trainingNodes": 800,
     "trainingPlies": 4
@@ -36,7 +36,7 @@
     ],
     "depth": 5,
     "nodes": 200000,
-    "timeMs": 15000,
+    "timeMs": 250000,
     "trainingDepth": 2,
     "trainingNodes": 1600,
     "trainingPlies": 6
