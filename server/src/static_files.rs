@@ -1,12 +1,13 @@
 async fn static_file(
     State(state): State<AppState>,
     method: Method,
+    headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
     // Minimal static server for development: GET/HEAD only, no directory
     // listings, and every resolved path must stay under web/ or be the built wasm.
     if method != Method::GET && method != Method::HEAD {
-        return (
+        let mut response = (
             StatusCode::METHOD_NOT_ALLOWED,
             Json(ErrorBody {
                 error: "Method not allowed".to_string(),
@@ -14,28 +15,81 @@ async fn static_file(
             }),
         )
             .into_response();
+        apply_no_store_headers(&mut response);
+        return response;
     }
 
     match resolve_request_path(&state.root, uri.path()) {
         Some(path) => match tokio::fs::read(&path).await {
             Ok(bytes) => {
-                let mut response = bytes.into_response();
-                response.headers_mut().insert(
-                    header::CONTENT_TYPE,
-                    HeaderValue::from_static(content_type(&path)),
-                );
-                response.headers_mut().insert(
-                    header::CONTENT_SECURITY_POLICY,
-                    HeaderValue::from_static(
-                        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'",
-                    ),
-                );
+                let etag = asset_etag(&bytes);
+                let mut response = if etag_matches(headers.get(header::IF_NONE_MATCH), &etag) {
+                    StatusCode::NOT_MODIFIED.into_response()
+                } else if method == Method::HEAD {
+                    ().into_response()
+                } else {
+                    bytes.into_response()
+                };
+                apply_static_headers(&mut response, &path, &etag);
                 response
             }
-            Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+            Err(_) => static_no_store_error(StatusCode::NOT_FOUND, "Not found"),
         },
-        None => (StatusCode::NOT_FOUND, "Not found").into_response(),
+        None => static_no_store_error(StatusCode::NOT_FOUND, "Not found"),
     }
+}
+
+const STATIC_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'";
+const STATIC_CACHE_CONTROL: &str = "no-cache, max-age=0, must-revalidate";
+
+fn apply_static_headers(response: &mut Response, path: &Path, etag: &str) {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(path)),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(STATIC_CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(
+        HeaderName::from_static("content-security-policy-report-only"),
+        HeaderValue::from_static(STATIC_CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(STATIC_CACHE_CONTROL),
+    );
+    headers.insert(header::ETAG, HeaderValue::from_str(etag).expect("valid etag"));
+}
+
+fn asset_etag(bytes: &[u8]) -> String {
+    format!("\"cf-{:x}-{:016x}\"", bytes.len(), fnv1a64(bytes))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn etag_matches(header: Option<&HeaderValue>, etag: &str) -> bool {
+    header
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|candidate| matches!(candidate.trim(), "*") || candidate.trim() == etag)
+        })
+}
+
+fn static_no_store_error(status: StatusCode, message: &'static str) -> Response {
+    let mut response = (status, message).into_response();
+    apply_no_store_headers(&mut response);
+    response
 }
 
 fn content_type(path: &Path) -> &'static str {

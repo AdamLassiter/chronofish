@@ -456,9 +456,12 @@ function terminateAiWorkers() {
   bot.pendingSearch = null;
 }
 
-function botSearchWorkerCount() {
+function botSearchWorkerCount(effortName) {
+  if (effortName !== "expert") {
+    return 1;
+  }
   const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 2);
-  return Math.max(1, Math.min(4, hardwareThreads - 1));
+  return Math.max(1, Math.min(2, hardwareThreads - 1));
 }
 
 function clearBotTimeout() {
@@ -1014,16 +1017,17 @@ function maybeStartBotTurn() {
 
   const id = ++aiRequestId;
   const botColor = game.turn;
+  const effortName = botEffortName(assignments[botColor]);
   const effort = botEffort(assignments[botColor]);
   const timeMs = Math.max(1, effort.timeMs ?? 10_000);
   const workerTimeMs = botWorkerSearchTimeMs(timeMs);
-  const workerCount = botSearchWorkerCount();
+  const workerCount = botSearchWorkerCount(effortName);
   terminateAiWorkers();
   bot.thinking = true;
   bot.pendingSearch = {
     id,
     botColor,
-    expected: workerCount,
+    expected: 0,
     deadlineAt: Date.now() + timeMs,
     results: [],
     errors: []
@@ -1031,17 +1035,44 @@ function maybeStartBotTurn() {
   clearBotTimeout();
   bot.timeoutId = setTimeout(() => handleBotTimeout(id, botColor, timeMs), timeMs);
   bot.countdownId = setInterval(() => updateBotCountdownMessage(id), 250);
-  updateBotCountdownMessage(id);
   for (let partitionIndex = 0; partitionIndex < workerCount; partitionIndex += 1) {
-    createAiWorker().postMessage({
-      id,
-      notation: submittedNotation,
-      depth: effort.depth,
-      nodes: effort.nodes,
-      timeMs: workerTimeMs,
-      partitionIndex,
-      partitionCount: workerCount
-    });
+    try {
+      createAiWorker().postMessage({
+        id,
+        notation: submittedNotation,
+        depth: effort.depth,
+        nodes: effort.nodes,
+        timeMs: workerTimeMs,
+        partitionIndex,
+        partitionCount: workerCount
+      });
+      bot.pendingSearch.expected += 1;
+    } catch (error) {
+      console.error(error);
+      bot.pendingSearch.errors.push(error.message);
+    }
+  }
+  if (bot.pendingSearch.expected === 0) {
+    bot.pendingSearch.expected = 1;
+    setTimeout(() => runBotSearchOnMainThread(id, effort.depth, effort.nodes, workerTimeMs), 0);
+  }
+  updateBotCountdownMessage(id);
+}
+
+function runBotSearchOnMainThread(id, depth, nodes, timeMs) {
+  if (id !== aiRequestId || !bot.thinking) {
+    return;
+  }
+  try {
+    const searchTimeMs = Math.max(1, timeMs ?? 10_000);
+    const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
+    const pointer = engine.chronofish_ai_turn_timed_json
+      ? fn(depth, nodes, searchTimeMs)
+      : fn(depth, nodes);
+    const result = JSON.parse(readWasmString(engine, pointer));
+    handleAiWorkerMessage({ data: { id, ok: true, result, partitionIndex: 0 } });
+  } catch (error) {
+    handleAiWorkerMessage({ data: { id, ok: false, error: error.message, partitionIndex: 0 } });
   }
 }
 

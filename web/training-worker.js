@@ -8,6 +8,63 @@ const SELF_PLAY_LABEL_SCALE = 90000;
 const HIDDEN_LAYERS = [1024, 512, 256];
 const VALUE_EPOCHS_PER_SUBMIT = 8;
 const POLICY_STEPS_PER_SUBMIT = 64;
+const LABEL_REQUEST_MIN_TIMEOUT_MS = 30000;
+const LABEL_REQUEST_MAX_TIMEOUT_MS = 120000;
+const LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS = 3;
+const TRAINING_IO_TIMEOUT_MS = 15000;
+
+const PROJECT_FEATURES_SHADER = `
+struct Params {
+  sample_count: u32,
+  input_size: u32,
+  projection_size: u32,
+  seed: u32,
+};
+
+@group(0) @binding(0) var<storage, read> raw_features: array<f32>;
+@group(0) @binding(1) var<storage, read_write> projected_features: array<f32>;
+@group(0) @binding(2) var<uniform> params: Params;
+
+fn projection_hash(raw_index: u32, projection_index: u32, seed: u32) -> u32 {
+  var hash = seed ^ raw_index;
+  hash = hash * 16777619u;
+  hash = hash ^ projection_index;
+  hash = hash * 16777619u;
+  hash = hash ^ (hash >> 16u);
+  return hash;
+}
+
+@compute @workgroup_size(16, 16)
+fn project_features(@builtin(global_invocation_id) id: vec3<u32>) {
+  let sample = id.x;
+  let projection = id.y;
+  if (sample >= params.sample_count || projection >= params.projection_size) {
+    return;
+  }
+
+  let raw_base = sample * params.input_size;
+  var active_count = 0u;
+  for (var input = 0u; input < params.input_size; input = input + 1u) {
+    if (raw_features[raw_base + input] != 0.0) {
+      active_count = active_count + 1u;
+    }
+  }
+
+  var sum = 0.0;
+  if (active_count > 0u) {
+    let scale = sqrt(f32(active_count));
+    for (var input = 0u; input < params.input_size; input = input + 1u) {
+      let value = raw_features[raw_base + input];
+      if (value != 0.0) {
+        let sign = select(-1.0, 1.0, (projection_hash(input, projection, params.seed) & 1u) == 0u);
+        sum = sum + value * sign / scale;
+      }
+    }
+  }
+
+  projected_features[sample * params.projection_size + projection] = sum;
+}
+`;
 
 const FORWARD_LAYER_SHADER = `
 struct Params {
@@ -271,8 +328,6 @@ fn train_policy(@builtin(global_invocation_id) id: vec3<u32>) {
 self.addEventListener("message", async (event) => {
   const { id, notation, config } = event.data;
   try {
-    const activeModel = await fetchActiveModel();
-    let buffer = await loadReplayBuffer();
     const expertSamples = await collectSamples(notation ?? "", config, false, (collected, sampleCount, workers) => {
       self.postMessage({ id, ok: true, collected, sampleCount });
       if (collected === 0) {
@@ -282,6 +337,11 @@ self.addEventListener("message", async (event) => {
     const selfPlaySamples = await collectSelfPlaySamples(notation ?? "", config, (completed, gameCount, sampleCount) => {
       self.postMessage({ id, ok: true, selfPlayCompleted: completed, selfPlayGames: gameCount, selfPlaySamples: sampleCount });
     });
+    const [activeModel, loadedBuffer] = await Promise.all([
+      fetchActiveModel(),
+      loadReplayBuffer()
+    ]);
+    let buffer = loadedBuffer;
     const pseudoTarget = Math.max(0, config.maxBuffer - buffer.length - expertSamples.length - selfPlaySamples.length);
     const pseudoSamples = await collectPseudoSamples(notation ?? "", config, activeModel, pseudoTarget);
     buffer = appendReplaySamples(buffer, expertSamples.concat(selfPlaySamples, pseudoSamples), config.maxBuffer);
@@ -310,9 +370,10 @@ async function collectPseudoSamples(notation, config, activeModel, targetCount) 
   const samples = Math.min(config.maxBuffer, Math.max(targetCount, config.samples * 8));
   const pseudoConfig = { ...config, samples };
   const positions = await collectSamples(notation, pseudoConfig, true, () => {});
-  return positions.map((sample) => ({
+  const labels = await predictValues(positions, activeModel);
+  return positions.map((sample, index) => ({
     ...sample,
-    label: predictValue(sample.features, activeModel),
+    label: labels[index],
     policy: 0,
     pseudo: true
   }));
@@ -405,7 +466,7 @@ function notationPrefixes(notation, count) {
 }
 
 function labelSample(worker, job, config, encodeOnly) {
-  return workerRequest(worker, {
+  const payload = {
     type: "sample",
     notation: job.prefix,
     depth: config.depth,
@@ -413,11 +474,15 @@ function labelSample(worker, job, config, encodeOnly) {
     encodeOnly,
     seed: job.seed,
     plies: job.plies
+  };
+  return workerRequest(worker, {
+    ...payload,
+    timeMs: workerSearchTimeMs(payload)
   });
 }
 
 function selfPlayGame(worker, job, config) {
-  return workerRequest(worker, {
+  const payload = {
     type: "selfPlay",
     notation: job.notation,
     depth: Math.max(1, Math.min(config.depth, 3)),
@@ -425,12 +490,20 @@ function selfPlayGame(worker, job, config) {
     maxTurns: SELF_PLAY_MAX_TURNS,
     outcomeScale: SELF_PLAY_LABEL_SCALE,
     seed: job.seed
+  };
+  return workerRequest(worker, {
+    ...payload,
+    timeMs: workerSearchTimeMs(payload)
   });
 }
 
 function workerRequest(worker, payload) {
   return new Promise((resolve, reject) => {
     const messageId = crypto.randomUUID();
+    const timeout = setTimeout(() => {
+      cleanup();
+      reject(new Error(`${payload.type === "selfPlay" ? "Self-play" : "Label"} worker timed out.`));
+    }, workerRequestTimeout(payload));
     const handleMessage = (event) => {
       if (event.data.id !== messageId) {
         return;
@@ -447,15 +520,54 @@ function workerRequest(worker, payload) {
       reject(new Error(event.message || "Label worker failed."));
     };
     const cleanup = () => {
+      clearTimeout(timeout);
       worker.removeEventListener("message", handleMessage);
       worker.removeEventListener("error", handleError);
+      worker.removeEventListener("messageerror", handleError);
     };
     worker.addEventListener("message", handleMessage);
     worker.addEventListener("error", handleError);
+    worker.addEventListener("messageerror", handleError);
     worker.postMessage({
       id: messageId,
       ...payload
     });
+  });
+}
+
+function workerRequestTimeout(payload) {
+  const nodes = Math.max(1, Number(payload.nodes) || 1);
+  const multiplier = payload.type === "selfPlay" ? Math.max(1, Number(payload.maxTurns) || 1) : 1;
+  return Math.min(
+    LABEL_REQUEST_MAX_TIMEOUT_MS,
+    Math.max(
+      LABEL_REQUEST_MIN_TIMEOUT_MS,
+      nodes * LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS * multiplier
+    )
+  );
+}
+
+function workerSearchTimeMs(payload) {
+  const timeout = workerRequestTimeout(payload);
+  if (payload.type === "selfPlay") {
+    return Math.max(250, Math.floor(timeout / Math.max(1, Number(payload.maxTurns) || 1)) - 50);
+  }
+  return Math.max(1000, timeout - 1000);
+}
+
+function withTimeout(promise, timeoutMs, message) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      }
+    );
   });
 }
 
@@ -512,13 +624,8 @@ async function trainValue(device, samples, config, activeModel, progress) {
   }
 
   const sampleCount = samples.length;
-  const projectedFeatures = new Float32Array(sampleCount * PROJECTION_SIZE);
   const labels = new Float32Array(sampleCount);
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-    projectedFeatures.set(
-      projectFeatures(samples[sampleIndex].features, PROJECTION_SIZE),
-      sampleIndex * PROJECTION_SIZE
-    );
     labels[sampleIndex] = samples[sampleIndex].label;
   }
 
@@ -534,7 +641,7 @@ async function trainValue(device, samples, config, activeModel, progress) {
     outputWeights[outputSize] = labels.reduce((sum, value) => sum + value, 0) / labels.length;
   }
 
-  const featureBuffer = storageBuffer(device, projectedFeatures, GPUBufferUsage.STORAGE);
+  const featureBuffer = await projectSamplesToBuffer(device, samples, PROJECTION_SIZE, PROJECTION_SEED);
   const labelBuffer = storageBuffer(device, labels, GPUBufferUsage.STORAGE);
   const weightBuffers = layerWeights.map((weights) =>
     storageBuffer(device, weights, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC)
@@ -817,6 +924,52 @@ function storageBuffer(device, data, usage) {
   return buffer;
 }
 
+async function projectSamplesToBuffer(device, samples, projectionSize, seed = PROJECTION_SEED) {
+  const inputSize = featureLength(samples);
+  const rawFeatures = new Float32Array(samples.length * inputSize);
+  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
+    rawFeatures.set(samples[sampleIndex].features, sampleIndex * inputSize);
+  }
+
+  const rawBuffer = storageBuffer(device, rawFeatures, GPUBufferUsage.STORAGE);
+  const projectedBuffer = device.createBuffer({
+    size: align4(samples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const paramsBuffer = projectionParamsBuffer(device, samples.length, inputSize, projectionSize, seed);
+  const pipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: device.createShaderModule({ code: PROJECT_FEATURES_SHADER }), entryPoint: "project_features" }
+  });
+  runPipeline(
+    device,
+    pipeline,
+    [rawBuffer, projectedBuffer, paramsBuffer],
+    Math.ceil(samples.length / 16),
+    Math.ceil(projectionSize / 16)
+  );
+  await device.queue.onSubmittedWorkDone();
+  return projectedBuffer;
+}
+
+function featureLength(samples) {
+  const length = samples[0]?.features?.length;
+  if (!length || !samples.every((sample) => sample.features.length === length)) {
+    throw new Error("Training samples have inconsistent feature lengths.");
+  }
+  return length;
+}
+
+function projectionParamsBuffer(device, sampleCount, inputSize, projectionSize, seed) {
+  const params = new ArrayBuffer(16);
+  const view = new DataView(params);
+  view.setUint32(0, sampleCount, true);
+  view.setUint32(4, inputSize, true);
+  view.setUint32(8, projectionSize, true);
+  view.setUint32(12, seed >>> 0, true);
+  return storageBuffer(device, params, GPUBufferUsage.UNIFORM);
+}
+
 async function readFloats(device, buffer, byteLength) {
   const readBuffer = device.createBuffer({
     size: align4(byteLength),
@@ -888,6 +1041,89 @@ function predictValue(features, model) {
     prediction += hidden[index] * model.outputWeights[index];
   }
   return prediction * (model.scale ?? 1);
+}
+
+async function predictValues(samples, model) {
+  if (!samples.length) {
+    return [];
+  }
+  try {
+    if (!globalThis.navigator?.gpu || !modelArchitectureMatches(model)) {
+      throw new Error("GPU batch prediction unavailable.");
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      throw new Error("No WebGPU adapter is available.");
+    }
+    const device = await adapter.requestDevice();
+    return Array.from(await predictValuesOnGpu(device, samples, model));
+  } catch {
+    return samples.map((sample) => predictValue(sample.features, model));
+  }
+}
+
+async function predictValuesOnGpu(device, samples, model) {
+  const sampleCount = samples.length;
+  const featureBuffer = await projectSamplesToBuffer(
+    device,
+    samples,
+    model.projectionSize,
+    model.projectionSeed
+  );
+  const hiddenLayers = model.hiddenLayers;
+  const layerWeights = splitHiddenWeights(model.hiddenWeights, model.projectionSize, hiddenLayers);
+  const weightBuffers = layerWeights.map((weights) => storageBuffer(device, weights, GPUBufferUsage.STORAGE));
+  const outputWeightBuffer = storageBuffer(device, model.outputWeights, GPUBufferUsage.STORAGE);
+  const activationBuffers = hiddenLayers.map((layerSize) => device.createBuffer({
+    size: align4(sampleCount * layerSize * Float32Array.BYTES_PER_ELEMENT),
+    usage: GPUBufferUsage.STORAGE
+  }));
+  const predictionBuffer = device.createBuffer({
+    size: align4(sampleCount * Float32Array.BYTES_PER_ELEMENT),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+  });
+  const forwardLayerParams = hiddenLayers.map((layerSize, layerIndex) =>
+    layerParamsBuffer(
+      device,
+      sampleCount,
+      layerIndex === 0 ? model.projectionSize : hiddenLayers[layerIndex - 1],
+      layerSize,
+      0
+    )
+  );
+  const forwardOutputParams = outputParamsBuffer(device, sampleCount, hiddenLayers.at(-1), 0);
+  const forwardLayerPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: device.createShaderModule({ code: FORWARD_LAYER_SHADER }), entryPoint: "forward_layer" }
+  });
+  const forwardOutputPipeline = device.createComputePipeline({
+    layout: "auto",
+    compute: { module: device.createShaderModule({ code: FORWARD_OUTPUT_SHADER }), entryPoint: "forward_output" }
+  });
+  const encoder = device.createCommandEncoder();
+  for (let layerIndex = 0; layerIndex < hiddenLayers.length; layerIndex += 1) {
+    const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1];
+    encodePipeline(device, encoder, forwardLayerPipeline, [
+      inputBuffer,
+      weightBuffers[layerIndex],
+      activationBuffers[layerIndex],
+      forwardLayerParams[layerIndex]
+    ], Math.ceil(sampleCount / 16), Math.ceil(hiddenLayers[layerIndex] / 16));
+  }
+  encodePipeline(device, encoder, forwardOutputPipeline, [
+    activationBuffers.at(-1),
+    outputWeightBuffer,
+    predictionBuffer,
+    forwardOutputParams
+  ], Math.ceil(sampleCount / 64));
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  const predictions = await readFloats(device, predictionBuffer, sampleCount * Float32Array.BYTES_PER_ELEMENT);
+  const scale = model.scale ?? 1;
+  for (let index = 0; index < predictions.length; index += 1) {
+    predictions[index] *= scale;
+  }
+  return predictions;
 }
 
 function modelArchitectureMatches(model) {
@@ -1021,7 +1257,11 @@ function appendReplaySamples(buffer, samples, maxBuffer) {
 
 async function fetchActiveModel() {
   try {
-    const response = await fetch("/api/training/model");
+    const response = await withTimeout(
+      fetch("/api/training/model"),
+      TRAINING_IO_TIMEOUT_MS,
+      "Timed out loading active model."
+    );
     return response.ok ? decodeCompactModel(await response.arrayBuffer()) : null;
   } catch {
     return null;
@@ -1088,8 +1328,8 @@ function decodeCompactModel(buffer) {
 
 async function loadReplayBuffer() {
   try {
-    const db = await openReplayDb();
-    return (await idbGet(db, BUFFER_KEY)) ?? [];
+    const db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
+    return (await withTimeout(idbGet(db, BUFFER_KEY), TRAINING_IO_TIMEOUT_MS, "Timed out reading replay buffer.")) ?? [];
   } catch {
     return [];
   }
@@ -1097,8 +1337,8 @@ async function loadReplayBuffer() {
 
 async function saveReplayBuffer(samples) {
   try {
-    const db = await openReplayDb();
-    await idbPut(db, BUFFER_KEY, samples);
+    const db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
+    await withTimeout(idbPut(db, BUFFER_KEY, samples), TRAINING_IO_TIMEOUT_MS, "Timed out saving replay buffer.");
   } catch {
     // IndexedDB is an optimization; an in-memory run still works without it.
   }

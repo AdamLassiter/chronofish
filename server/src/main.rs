@@ -13,8 +13,10 @@ use std::{
 };
 
 use axum::{
+    body::Body,
     extract::{Path as AxumPath, State},
-    http::{header, HeaderValue, Method, StatusCode},
+    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse,

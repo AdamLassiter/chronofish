@@ -148,9 +148,7 @@ impl Game {
     }
 
     fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
-        if self.terminal_score(color) == Some(CHECKMATE_SCORE)
-            || self.is_checkmate(color.opposite())
-        {
+        if self.terminal_score(color) == Some(CHECKMATE_SCORE) {
             notation.push('#');
         } else if self.is_in_check(color.opposite()) {
             notation.push('+');

@@ -9,45 +9,22 @@ impl Game {
     }
 
     fn checked_royal_positions(&self) -> Vec<Position> {
-        let mut positions = [Color::White, Color::Black]
+        let Some(present_time) = self.present_time() else {
+            return Vec::new();
+        };
+
+        [Color::White, Color::Black]
             .into_iter()
             .flat_map(|color| {
                 self.royal_piece_positions(color)
                     .into_iter()
+                    .filter(move |position| position.time == present_time)
                     .filter(move |position| self.is_square_attacked(*position, color.opposite()))
             })
-            .collect::<Vec<_>>();
-
-        for position in self.royal_capture_origin_targets() {
-            if !positions.contains(&position) {
-                positions.push(position);
-            }
-        }
-
-        positions
+            .collect::<Vec<_>>()
     }
 
-    fn royal_capture_origin_targets(&self) -> Vec<Position> {
-        let mut positions = Vec::new();
-        for timeline in &self.timelines {
-            for board in &timeline.boards {
-                let Origin::Move { to, move_type, .. } = board.origin else {
-                    continue;
-                };
-                if move_type == "source-advance" {
-                    continue;
-                }
-                if self
-                    .piece_at(to)
-                    .is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
-                {
-                    positions.push(to);
-                }
-            }
-        }
-        positions
-    }
-
+    #[allow(dead_code)]
     fn is_checkmate(&self, color: Color) -> bool {
         if !self.is_in_check(color) {
             return false;
@@ -97,6 +74,7 @@ impl Game {
         false
     }
 
+    #[allow(dead_code)]
     fn has_legal_turn_completion(&self, color: Color) -> bool {
         // Escaping check may require a whole-turn sequence, not just one move, so
         // mate search follows staged moves until the present line changes color.
@@ -109,6 +87,7 @@ impl Game {
         self.has_legal_turn_completion_at_depth(color, 0, max_depth)
     }
 
+    #[allow(dead_code)]
     fn has_legal_turn_completion_at_depth(
         &self,
         color: Color,
@@ -266,25 +245,25 @@ impl Game {
 
         let delta = self.movement_delta(from, target);
         let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
-        let non_zero: Vec<i32> = distances
-            .iter()
-            .copied()
-            .filter(|distance| *distance > 0)
-            .collect();
+        let (non_zero, non_zero_len) = Self::non_zero_distances(distances);
 
-        self.piece_attacks(piece, from, target, delta, distances, &non_zero)
+        self.piece_attacks(
+            piece,
+            from,
+            target,
+            delta,
+            distances,
+            &non_zero[..non_zero_len],
+        )
     }
 
     fn move_kind_for(&self, piece: Piece, from: Position, to: Position) -> Option<MoveKind> {
         let delta = self.movement_delta(from, to);
         let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
-        let non_zero: Vec<i32> = distances
-            .iter()
-            .copied()
-            .filter(|distance| *distance > 0)
-            .collect();
+        let (non_zero, non_zero_len) = Self::non_zero_distances(distances);
+        let non_zero = &non_zero[..non_zero_len];
 
-        if non_zero.is_empty() {
+        if non_zero_len == 0 {
             return None;
         }
 
@@ -299,7 +278,7 @@ impl Game {
         let legal = match piece.piece_type {
             PieceType::Pawn => return self.pawn_move_kind(piece, from, to, delta),
             PieceType::Brawn => return self.brawn_move_kind(piece, from, to, delta),
-            _ => self.piece_attacks(piece, from, to, delta, distances, &non_zero),
+            _ => self.piece_attacks(piece, from, to, delta, distances, non_zero),
         };
 
         if !legal {
@@ -523,6 +502,18 @@ impl Game {
         non_zero
             .first()
             .is_some_and(|distance| non_zero.iter().all(|other| other == distance))
+    }
+
+    fn non_zero_distances(distances: [i32; 4]) -> ([i32; 4], usize) {
+        let mut non_zero = [0; 4];
+        let mut len = 0;
+        for distance in distances {
+            if distance > 0 {
+                non_zero[len] = distance;
+                len += 1;
+            }
+        }
+        (non_zero, len)
     }
 
     fn castle_kind(

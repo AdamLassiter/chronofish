@@ -408,14 +408,14 @@ fn play_match_until(
         game = plan.game;
         let eval = game.evaluate(color, &weights);
         score += eval / 20 + eval.signum() * (config.plies - ply) as i32;
-        if game.royal_capture_available(color) || game.is_checkmate(color.opposite()) {
+        if game.terminal_score(color) == Some(CHECKMATE_SCORE) {
             return MatchReport {
                 score: score + CHECKMATE_SCORE / 10,
                 result: MatchResult::Win,
                 blunder: false,
             };
         }
-        if game.royal_capture_available(color.opposite()) || game.is_checkmate(color) {
+        if game.terminal_score(color) == Some(-CHECKMATE_SCORE) {
             return MatchReport {
                 score: score - CHECKMATE_SCORE / 10,
                 result: MatchResult::Loss,

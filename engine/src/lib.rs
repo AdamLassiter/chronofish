@@ -5,6 +5,7 @@ use std::cell::RefCell;
 // helpers; include! keeps those helpers private without turning them into a wide
 // pub(crate) API.
 include!("model.rs");
+include!("gpu_snapshot.rs");
 include!("wasm_api.rs");
 include!("game.rs");
 include!("movegen.rs");

@@ -4,7 +4,7 @@ let engine = null;
 let activeModelLoaded = false;
 
 self.addEventListener("message", async (event) => {
-  const { id, type, notation, depth, nodes, encodeOnly, seed, plies, maxTurns, outcomeScale } = event.data;
+  const { id, type, notation, depth, nodes, encodeOnly, seed, plies, maxTurns, outcomeScale, timeMs } = event.data;
   try {
     await loadEngine();
     if (type === "selfPlay") {
@@ -12,10 +12,10 @@ self.addEventListener("message", async (event) => {
     }
     replayNotation(notation ?? "");
     const sample = type === "selfPlay"
-      ? selfPlayGame(depth, nodes, maxTurns, outcomeScale, seed)
+      ? selfPlayGame(depth, nodes, maxTurns, outcomeScale, seed, timeMs)
       : encodeOnly
         ? neuralPosition(seed, plies)
-        : neuralSample(depth, nodes, seed, plies);
+        : neuralSample(depth, nodes, seed, plies, timeMs);
     self.postMessage({ id, ok: true, sample });
   } catch (error) {
     self.postMessage({ id, ok: false, error: error.message });
@@ -87,11 +87,15 @@ function replayNotation(notation) {
   }
 }
 
-function neuralSample(depth, nodes, seed, plies) {
-  const fn = engine.chronofish_training_sample_json ?? engine.chronofish_neural_sample_json;
-  const pointer = engine.chronofish_training_sample_json
-    ? fn(depth, nodes, seed ?? 0, plies ?? 0)
-    : fn(depth, nodes);
+function neuralSample(depth, nodes, seed, plies, timeMs) {
+  let pointer;
+  if (engine.chronofish_training_sample_timed_json) {
+    pointer = engine.chronofish_training_sample_timed_json(depth, nodes, seed ?? 0, plies ?? 0, timeMs ?? 1000);
+  } else if (engine.chronofish_training_sample_json) {
+    pointer = engine.chronofish_training_sample_json(depth, nodes, seed ?? 0, plies ?? 0);
+  } else {
+    pointer = engine.chronofish_neural_sample_json(depth, nodes);
+  }
   return JSON.parse(readWasmString(pointer));
 }
 
@@ -103,14 +107,14 @@ function neuralPosition(seed, plies) {
   return JSON.parse(readWasmString(pointer));
 }
 
-function selfPlayGame(depth, nodes, maxTurns, outcomeScale, seed) {
+function selfPlayGame(depth, nodes, maxTurns, outcomeScale, seed, timeMs) {
   const positions = [];
   const turnLimit = Math.max(1, maxTurns ?? 48);
   const scale = Math.max(1, outcomeScale ?? 90000);
   const jitter = seededOffset(seed ?? 0);
   for (let turn = 0; turn < turnLimit; turn += 1) {
     const position = neuralPosition((seed ?? 0) + turn, 0);
-    const result = aiTurn(depth, nodes + jitter + turn);
+    const result = aiTurn(depth, nodes + jitter + turn, timeMs);
     if (result.status !== "ok" || !result.moves?.length) {
       return labelOutcomeSamples(positions, oppositeColor(position.sideToMove), scale);
     }
@@ -144,8 +148,12 @@ function selfPlayGame(depth, nodes, maxTurns, outcomeScale, seed) {
   return [];
 }
 
-function aiTurn(depth, nodes) {
-  const pointer = engine.chronofish_ai_turn_json(Math.max(1, depth ?? 1), Math.max(1, nodes ?? 1000));
+function aiTurn(depth, nodes, timeMs) {
+  const maxDepth = Math.max(1, depth ?? 1);
+  const maxNodes = Math.max(1, nodes ?? 1000);
+  const pointer = engine.chronofish_ai_turn_timed_json
+    ? engine.chronofish_ai_turn_timed_json(maxDepth, maxNodes, Math.max(1, timeMs ?? 1000))
+    : engine.chronofish_ai_turn_json(maxDepth, maxNodes);
   return JSON.parse(readWasmString(pointer));
 }
 

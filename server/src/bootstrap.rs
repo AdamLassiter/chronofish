@@ -18,7 +18,7 @@ async fn main() {
 
     // Axum 0.8 uses `{name}` and `{*name}` route captures; the old `:name`
     // syntax now fails at router construction.
-    let app = training_routes(Router::new())
+    let api = training_routes(Router::new())
         .route("/api/version", get(server_version))
         .route("/api/rooms/{room_id}", get(get_room))
         .route("/api/rooms/{room_id}/events", get(room_events))
@@ -27,6 +27,10 @@ async fn main() {
         .route("/api/rooms/{room_id}/reset", post(reset_room))
         .route("/api/logs/{room_id}", post(log_match_event))
         .route("/api/{*path}", any(unknown_api_route))
+        .layer(middleware::from_fn(no_store_middleware));
+
+    let app = Router::new()
+        .merge(api)
         .fallback(static_file)
         .with_state(state);
 
@@ -42,6 +46,22 @@ async fn main() {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .expect("server failed");
+}
+
+async fn no_store_middleware(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    apply_no_store_headers(&mut response);
+    response
+}
+
+fn apply_no_store_headers(response: &mut Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    headers.insert(header::PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(header::EXPIRES, HeaderValue::from_static("0"));
 }
 
 #[cfg(feature = "frontend-training")]

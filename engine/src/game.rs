@@ -172,7 +172,8 @@ impl Game {
         let piece = self.piece_at(from)?;
         let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
 
-        if !self.is_latest_board(from.timeline_id, from.time)
+        if !self.is_present_source_board(from)
+            || !self.is_latest_board(from.timeline_id, from.time)
             || source_board.side_to_move != self.turn
             || piece.color != self.turn
         {
@@ -217,6 +218,10 @@ impl Game {
         }
 
         format!("[{}]", targets.join(","))
+    }
+
+    fn is_present_source_board(&self, from: Position) -> bool {
+        self.present_time() == Some(from.time)
     }
 
     fn apply_move(&mut self, from: Position, to: Position) -> i32 {
@@ -312,7 +317,7 @@ impl Game {
             self.staged_turn.clear();
             self.staged_notation.clear();
             self.staged_royal_capture_by = None;
-            self.last_message = format!("{} wins by checkmate.", winner.capitalized());
+            self.last_message = format!("{} wins by royal capture.", winner.capitalized());
             return 1;
         }
 
@@ -321,17 +326,7 @@ impl Game {
         self.staged_notation.clear();
         self.staged_royal_capture_by = None;
 
-        if self.royal_capture_available(self.turn) {
-            self.last_message = format!(
-                "{} wins by checkmate.",
-                self.turn.capitalized()
-            );
-            return 1;
-        }
-
-        let suffix = if self.is_checkmate(self.turn) {
-            " Checkmate."
-        } else if self.is_in_check(self.turn) {
+        let suffix = if self.is_in_check(self.turn) {
             " Check."
         } else {
             ""

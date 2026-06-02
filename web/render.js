@@ -190,18 +190,36 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
   return boardEl;
 }
 
-function squareCenter(grid, position) {
-  const square = grid.querySelector(`[data-position-key="${highlightKey(position)}"]`);
-  if (!square) {
-    return null;
+function measureSquareCenters(grid) {
+  const gridRect = grid.getBoundingClientRect();
+  const centers = new Map();
+
+  for (const square of grid.querySelectorAll("[data-position-key]")) {
+    const squareRect = square.getBoundingClientRect();
+    centers.set(square.dataset.positionKey, {
+      x: squareRect.left - gridRect.left + squareRect.width / 2,
+      y: squareRect.top - gridRect.top + squareRect.height / 2
+    });
   }
 
-  const gridRect = grid.getBoundingClientRect();
-  const squareRect = square.getBoundingClientRect();
-  return {
-    x: squareRect.left - gridRect.left + squareRect.width / 2,
-    y: squareRect.top - gridRect.top + squareRect.height / 2
-  };
+  return centers;
+}
+
+function squareCenter(centers, position) {
+  return centers.get(highlightKey(position)) ?? null;
+}
+
+function appendArrowPath(svg, from, to, className) {
+  const pathData = arrowPath(from, to);
+  if (!pathData) {
+    return;
+  }
+
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("class", className);
+  path.setAttribute("d", pathData);
+  path.setAttribute("marker-end", "url(#move-arrow-head)");
+  svg.append(path);
 }
 
 function arrowPath(from, to) {
@@ -226,23 +244,11 @@ function arrowPath(from, to) {
   return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
 }
 
-function appendArrowPath(svg, from, to, className) {
-  const pathData = arrowPath(from, to);
-  if (!pathData) {
-    return;
-  }
-
-  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-  path.setAttribute("class", className);
-  path.setAttribute("d", pathData);
-  path.setAttribute("marker-end", "url(#move-arrow-head)");
-  svg.append(path);
-}
-
 function renderMoveArrows(grid, arrows) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   const width = grid.scrollWidth;
   const height = grid.scrollHeight;
+  const centers = measureSquareCenters(grid);
   svg.setAttribute("class", "move-arrows");
   svg.setAttribute("width", String(width));
   svg.setAttribute("height", String(height));
@@ -258,8 +264,8 @@ function renderMoveArrows(grid, arrows) {
   grid.append(svg);
 
   for (const arrow of arrows) {
-    const from = squareCenter(grid, arrow.from);
-    const to = squareCenter(grid, arrow.to);
+    const from = squareCenter(centers, arrow.from);
+    const to = squareCenter(centers, arrow.to);
     if (!from || !to) {
       continue;
     }

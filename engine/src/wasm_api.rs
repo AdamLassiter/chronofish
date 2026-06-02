@@ -47,6 +47,12 @@ pub extern "C" fn chronofish_snapshot_json() -> *const u8 {
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_gpu_snapshot_bytes() -> *const u8 {
+    let bytes = with_game(Game::gpu_snapshot_bytes);
+    set_output_bytes(bytes)
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_staged_turn_notation() -> *const u8 {
     let notation = with_game(Game::staged_turn_notation);
     set_output(notation)
@@ -299,10 +305,31 @@ pub extern "C" fn chronofish_training_sample_json(
     seed: u32,
     plies: i32,
 ) -> *const u8 {
+    training_sample_json(max_depth, max_nodes, seed, plies, None)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_training_sample_timed_json(
+    max_depth: i32,
+    max_nodes: i32,
+    seed: u32,
+    plies: i32,
+    millis: i32,
+) -> *const u8 {
+    training_sample_json(max_depth, max_nodes, seed, plies, search_deadline(millis))
+}
+
+fn training_sample_json(
+    max_depth: i32,
+    max_nodes: i32,
+    seed: u32,
+    plies: i32,
+    deadline: Option<SearchInstant>,
+) -> *const u8 {
     let json = with_game(|game| {
         let mut sample_game = game.clone_for_search();
         apply_training_playout(&mut sample_game, seed, plies.max(0) as usize);
-        let result = sample_game.best_ai_turn(max_depth.max(1), max_nodes.max(1), None);
+        let result = sample_game.best_ai_turn(max_depth.max(1), max_nodes.max(1), deadline);
         let encoded = sample_game.encode_neural_position(sample_game.turn);
         serde_json::json!({
             "label": result.score,
@@ -354,9 +381,15 @@ pub extern "C" fn chronofish_output_len() -> usize {
 fn set_output(value: String) -> *const u8 {
     // Pointers returned by exports remain valid only until the next exported
     // string call rewrites OUTPUT.
+    set_output_bytes(value.into_bytes())
+}
+
+fn set_output_bytes(value: Vec<u8>) -> *const u8 {
+    // Pointers returned by exports remain valid only until the next exported
+    // output call rewrites OUTPUT.
     OUTPUT.with(|output| {
         let mut output = output.borrow_mut();
-        *output = value.into_bytes();
+        *output = value;
         output.as_ptr()
     })
 }
