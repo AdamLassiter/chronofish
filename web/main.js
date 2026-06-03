@@ -1,13 +1,46 @@
 import { elements } from "./dom.js";
-import { capitalize, getBoard, hasUnplayedBoards, isLatestBoard, presentTime, samePosition } from "./board.js";
+import { capitalize, presentTime, samePosition } from "./board.js";
 import { renderGame } from "./render.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { appendNotationLine, postMatchLog } from "./match-log.js";
-import { readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import { readWasmString } from "./engine-io.js";
 
 const LOCAL_GAME_STORAGE_KEY = "chronofish.localGameState.v1";
+const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
 const initialSearchParams = new URLSearchParams(window.location.search);
 const initialUrlHasRoom = initialSearchParams.has("room");
+
+function initialGame() {
+  const board = Array.from({ length: 8 }, () => Array(8).fill(null));
+  const backRank = ["rook", "knight", "bishop", "queen", "king", "bishop", "knight", "rook"];
+  for (let x = 0; x < 8; x += 1) {
+    board[0][x] = { color: "white", type: backRank[x] };
+    board[1][x] = { color: "white", type: "pawn" };
+    board[6][x] = { color: "black", type: "pawn" };
+    board[7][x] = { color: "black", type: backRank[x] };
+  }
+
+  return {
+    turn: "white",
+    nextTimelineId: 1,
+    nextBlackTimelineId: -1,
+    checkedRoyals: [],
+    timelines: [{
+      id: 0,
+      row: 0,
+      label: "Sacred T0",
+      owner: "neutral",
+      boards: [{
+        time: 0,
+        sideToMove: "white",
+        castling: 15,
+        enPassant: null,
+        origin: null,
+        board
+      }]
+    }]
+  };
+}
 
 let engine = null;
 let aiParameters = null;
@@ -34,7 +67,7 @@ let aiEffortConfigs = {
     timeMs: 250_000
   }
 };
-let game = { turn: "white", timelines: [], nextTimelineId: 1 };
+let game = initialGame();
 // Last submitted snapshot. While a turn is staged, rendering compares against
 // this so the present line and board status labels do not jump before Submit.
 let committedGame = game;
@@ -47,6 +80,7 @@ let submittedNotation = "";
 let stagedMoves = [];
 let aiWorkers = [];
 let aiRequestId = 0;
+let legalTargetRequestId = 0;
 let trainingWorker = null;
 let trainingRequestId = 0;
 let trainingEnabled = false;
@@ -233,6 +267,8 @@ function persistLocalGameState() {
     assignments,
     notation: submittedNotation,
     turns: submittedTurns,
+    snapshot: game,
+    committedSnapshot: committedGame,
     stagedMoves,
     message: elements.message.textContent,
     savedAt: Date.now()
@@ -243,7 +279,7 @@ function clearLocalGameState() {
   localStorage.removeItem(LOCAL_GAME_STORAGE_KEY);
 }
 
-function restoreLocalGameState() {
+async function restoreLocalGameState() {
   if (!engine || multiplayer.connected || initialUrlHasRoom) {
     return false;
   }
@@ -262,18 +298,24 @@ function restoreLocalGameState() {
 
     writeAssignments(state.assignments ?? assignments);
     phase = state.phase;
-    if (typeof state.notation === "string" && state.notation.trim()) {
-      replayNotation(state.notation);
-    } else if (Array.isArray(state.turns) && state.turns.length > 0) {
-      replayTurns(state.turns);
+    const restoredSnapshot = Boolean(state.snapshot?.timelines);
+    if (state.snapshot?.timelines) {
+      game = state.snapshot;
+      committedGame = state.committedSnapshot?.timelines ? state.committedSnapshot : state.snapshot;
+      submittedNotation = state.notation ?? "";
+      submittedTurns = Array.isArray(state.turns) ? state.turns.map((turn) => turn.map(cloneMove)) : [];
+      stagedMoves = (state.stagedMoves ?? []).map(cloneMove);
     } else {
+      clearLocalGameState();
       resetEngine();
     }
 
-    committedGame = game;
-    for (const move of state.stagedMoves ?? []) {
-      if (!move?.from || !move?.to || !applyEngineMove(move.from, move.to)) {
-        break;
+    if (!restoredSnapshot) {
+      committedGame = game;
+      for (const move of state.stagedMoves ?? []) {
+        if (!move?.from || !move?.to || !(await applyEngineMove(move.from, move.to))) {
+          break;
+        }
       }
     }
     selected = null;
@@ -298,43 +340,14 @@ function lobbyPayload() {
   };
 }
 
-function engineSnapshot() {
-  return JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json()));
+function clientTurnNotation(moves = stagedMoves) {
+  return moves
+    .map((move) => `${positionNotation(move.from)}-${positionNotation(move.to)}`)
+    .join(" ");
 }
 
-function engineLastMessage() {
-  return readWasmString(engine, engine.chronofish_last_message());
-}
-
-function engineDisplayMessage() {
-  return displayGameMessage(engineLastMessage());
-}
-
-function stagedTurnNotation() {
-  return readWasmString(engine, engine.chronofish_staged_turn_notation());
-}
-
-async function loadActiveModelIntoEngine() {
-  if (!engine?.chronofish_set_neural_model_bytes) {
-    return false;
-  }
-  try {
-    const response = await fetch("/api/training/model");
-    if (!response.ok) {
-      engine.chronofish_clear_neural_model?.();
-      return false;
-    }
-    const model = new Uint8Array(await response.arrayBuffer());
-    const { ptr, len } = writeWasmBytes(engine, model);
-    try {
-      return Boolean(engine.chronofish_set_neural_model_bytes(ptr, len));
-    } finally {
-      engine.chronofish_dealloc(ptr, len);
-    }
-  } catch {
-    engine.chronofish_clear_neural_model?.();
-    return false;
-  }
+function positionNotation(position) {
+  return `T${position.time}L${position.timelineId}${String.fromCharCode(97 + position.x)}${position.y + 1}`;
 }
 
 function isMatchOverMessage(message) {
@@ -343,8 +356,7 @@ function isMatchOverMessage(message) {
 
 function resetEngine() {
   // Engine reset clears both visible and committed state plus all local history.
-  engine.chronofish_reset();
-  game = engineSnapshot();
+  game = initialGame();
   committedGame = game;
   selected = null;
   legalTargets = [];
@@ -352,61 +364,6 @@ function resetEngine() {
   submittedNotation = "";
   stagedMoves = [];
   lastMatchAlertMessage = "";
-}
-
-function replayTurns(turns) {
-  // Multiplayer sync stores submitted turns. Replaying them through Rust rebuilds
-  // authoritative engine state instead of trusting an arbitrary remote snapshot.
-  engine.chronofish_reset();
-  const notationLines = [];
-
-  for (const turn of turns) {
-    for (const move of turn) {
-      engine.chronofish_apply_move(
-        move.from.timelineId,
-        move.from.time,
-        move.from.x,
-        move.from.y,
-        move.to.timelineId,
-        move.to.time,
-        move.to.x,
-        move.to.y
-      );
-    }
-    const turnNotation = stagedTurnNotation();
-    engine.chronofish_submit_turn();
-    if (turnNotation) {
-      notationLines.push(`${notationLines.length + 1}. ${turnNotation}`);
-    }
-  }
-
-  submittedTurns = turns.map((turn) => turn.map(cloneMove));
-  submittedNotation = notationLines.join("\n");
-  stagedMoves = [];
-  game = engineSnapshot();
-  committedGame = game;
-  selected = null;
-  legalTargets = [];
-}
-
-function replayNotation(notation) {
-  const text = notation ?? "";
-  const { ptr, len } = writeWasmString(engine, text);
-  try {
-    if (!engine.chronofish_load_notation(ptr, len)) {
-      throw new Error(engineDisplayMessage());
-    }
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-
-  submittedNotation = text;
-  submittedTurns = [];
-  stagedMoves = [];
-  game = engineSnapshot();
-  committedGame = game;
-  selected = null;
-  legalTargets = [];
 }
 
 function appendSubmittedNotation(turnNotation, actor = game.turn) {
@@ -508,44 +465,133 @@ function turnSignature() {
   return `${game.turn}:${submittedNotation}`;
 }
 
-function pieceAt(position) {
-  return getBoard(game, position.timelineId, position.time)?.board[position.y]?.[position.x] ?? null;
-}
-
 function targetFor(position) {
   return legalTargets.find((target) => samePosition(target, position));
 }
 
 function legalTargetsFor(position) {
   if (!engine) {
-    return [];
+    return Promise.resolve([]);
   }
 
-  // Target highlighting is delegated to Rust so previews and final application
-  // use the same legality code.
-  return JSON.parse(readWasmString(engine, engine.chronofish_legal_targets_json(
-    position.timelineId,
-    position.time,
-    position.x,
-    position.y
-  )));
+  const requestId = ++legalTargetRequestId;
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("./ai-worker.js", { type: "module" });
+    const cleanup = () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.removeEventListener("messageerror", handleError);
+      worker.terminate();
+    };
+    const handleMessage = (event) => {
+      if (event.data.id !== requestId) {
+        return;
+      }
+      cleanup();
+      if (event.data.ok) {
+        resolve(event.data.selection ?? { source: null, targets: [] });
+      } else {
+        reject(new Error(event.data.error ?? "GPU legal target calculation failed."));
+      }
+    };
+    const handleError = (event) => {
+      cleanup();
+      reject(new Error(event.message || "GPU legal target worker failed."));
+    };
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+    worker.addEventListener("messageerror", handleError);
+    worker.postMessage({
+      id: requestId,
+      type: "legalTargets",
+      game,
+      position
+    });
+  });
 }
 
-function applyEngineMove(from, to) {
-  const ok = engine.chronofish_apply_move(
-    from.timelineId,
-    from.time,
-    from.x,
-    from.y,
-    to.timelineId,
-    to.time,
-    to.x,
-    to.y
-  );
-  const message = engineDisplayMessage();
+function applyMoveOnGpu(from, to) {
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("./ai-worker.js", { type: "module" });
+    const cleanup = () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.removeEventListener("messageerror", handleError);
+      worker.terminate();
+    };
+    const handleMessage = (event) => {
+      if (event.data.id !== requestId) {
+        return;
+      }
+      cleanup();
+      if (event.data.ok) {
+        resolve(event.data.game);
+      } else {
+        reject(new Error(event.data.error ?? "GPU move application failed."));
+      }
+    };
+    const handleError = (event) => {
+      cleanup();
+      reject(new Error(event.message || "GPU move application worker failed."));
+    };
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+    worker.addEventListener("messageerror", handleError);
+    worker.postMessage({
+      id: requestId,
+      type: "applyMove",
+      game,
+      move: {
+        from,
+        to
+      }
+    });
+  });
+}
 
-  if (!ok) {
-    elements.message.textContent = message;
+function submitTurnOnGpu() {
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("./ai-worker.js", { type: "module" });
+    const cleanup = () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.removeEventListener("messageerror", handleError);
+      worker.terminate();
+    };
+    const handleMessage = (event) => {
+      if (event.data.id !== requestId) {
+        return;
+      }
+      cleanup();
+      if (event.data.ok) {
+        resolve(event.data.status);
+      } else {
+        reject(new Error(event.data.error ?? "GPU turn submission failed."));
+      }
+    };
+    const handleError = (event) => {
+      cleanup();
+      reject(new Error(event.message || "GPU turn submission worker failed."));
+    };
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+    worker.addEventListener("messageerror", handleError);
+    worker.postMessage({
+      id: requestId,
+      type: "submitTurn",
+      game
+    });
+  });
+}
+
+async function applyEngineMove(from, to) {
+  let nextGame;
+  try {
+    nextGame = await applyMoveOnGpu(from, to);
+  } catch (error) {
+    elements.message.textContent = error.message;
     return null;
   }
 
@@ -555,15 +601,71 @@ function applyEngineMove(from, to) {
     from: { ...from },
     to: { ...to }
   });
-  game = engineSnapshot();
+  game = nextGame;
   selected = null;
   legalTargets = [];
+  elements.message.textContent = "Move staged on GPU.";
+  persistLocalGameState();
+  return elements.message.textContent;
+}
+
+async function submitVisibleTurn(actor) {
+  if (stagedMoves.length === 0) {
+    elements.message.textContent = "Make at least one move before submitting.";
+    return null;
+  }
+
+  let status;
+  try {
+    status = await submitTurnOnGpu();
+  } catch (error) {
+    elements.message.textContent = error.message;
+    return null;
+  }
+  if (!status?.complete) {
+    elements.message.textContent = "Make moves until the present line reaches the opponent's turn.";
+    return null;
+  }
+
+  const turnNotation = clientTurnNotation();
+  const submitted = stagedMoves.map(cloneMove);
+  const nextTurn = status.nextTurn ?? game.turn;
+  game = {
+    ...game,
+    turn: nextTurn
+  };
+  committedGame = game;
+  submittedTurns.push(submitted);
+  appendSubmittedNotation(turnNotation, actor);
+  stagedMoves = [];
+  selected = null;
+  legalTargets = [];
+
+  const message = `${capitalize(game.turn)} to move.`;
   elements.message.textContent = message;
   persistLocalGameState();
   return message;
 }
 
-function handleSquareClick(position) {
+function resetStagedClientState() {
+  const committed = committedGame;
+  game = committed;
+  committedGame = committed;
+  stagedMoves = [];
+  selected = null;
+  legalTargets = [];
+}
+
+async function rebuildStagedClientState(moves) {
+  resetStagedClientState();
+  for (const move of moves) {
+    if (!(await applyEngineMove(move.from, move.to))) {
+      break;
+    }
+  }
+}
+
+async function handleSquareClick(position) {
   if (!engine) {
     elements.message.textContent = "Build the WASM engine first with `cargo build --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown`.";
     return;
@@ -578,36 +680,48 @@ function handleSquareClick(position) {
     return;
   }
 
-  const piece = pieceAt(position);
   const existingTarget = targetFor(position);
 
-  // Click a highlighted target to move; click a latest own piece to select and
-  // request legal targets from the engine.
+  // Click a highlighted target to move; otherwise ask the GPU worker whether the
+  // clicked square is a selectable source and what it can legally target.
   if (selected && existingTarget) {
-    const moveMessage = applyEngineMove(selected, position);
+    const moveMessage = await applyEngineMove(selected, position);
     render({ preserveScroll: true });
     return;
   }
 
-  if (piece?.color === game.turn && isLatestBoard(game, position.timelineId, position.time)) {
-    const board = getBoard(game, position.timelineId, position.time);
-
-    if (board.sideToMove !== game.turn) {
-      elements.message.textContent = `That board is waiting for ${board.sideToMove}.`;
+  selected = position;
+  legalTargets = [];
+  const requestId = legalTargetRequestId + 1;
+  elements.message.textContent = "Checking selection on GPU.";
+  render({ preserveScroll: true });
+  try {
+    const selection = await legalTargetsFor(position);
+    if (requestId !== legalTargetRequestId || !selected || !samePosition(selected, position)) {
       return;
     }
-
-    selected = position;
-    legalTargets = legalTargetsFor(position);
+    if (!selection.source) {
+      legalTargetRequestId += 1;
+      selected = null;
+      legalTargets = [];
+      elements.message.textContent = `Select a ${game.turn} piece on a playable board.`;
+      render({ preserveScroll: true });
+      return;
+    }
+    const piece = selection.source.piece;
+    legalTargets = selection.targets ?? [];
     elements.message.textContent = `${capitalize(piece.color)} ${piece.type} selected. ${legalTargets.length} legal target${legalTargets.length === 1 ? "" : "s"}.`;
+    render({ preserveScroll: true });
+  } catch (error) {
+    if (requestId !== legalTargetRequestId || !selected || !samePosition(selected, position)) {
+      return;
+    }
+    selected = null;
+    legalTargets = [];
+    elements.message.textContent = error.message;
     render({ preserveScroll: true });
     return;
   }
-
-  selected = null;
-  legalTargets = [];
-  elements.message.textContent = `Select a ${game.turn} piece on a latest board.`;
-  render({ preserveScroll: true });
 }
 
 function render(options = {}) {
@@ -622,7 +736,7 @@ function render(options = {}) {
   elements.blackPlayerSelect.disabled = inGame || multiplayer.color === "spectator";
   elements.resetButton.disabled = !canActNow() || !hasStagedMoves();
   elements.undoMoveButton.disabled = !canActNow() || !hasStagedMoves();
-  elements.submitTurnButton.disabled = !canActNow() || !hasStagedMoves() || hasUnplayedBoards(game);
+  elements.submitTurnButton.disabled = !canActNow() || !hasStagedMoves();
   elements.concedeButton.disabled = !canActNow();
   renderTrainingButtons();
 
@@ -668,28 +782,7 @@ function renderEvaluationBar() {
   if (!elements.evaluationBar || !elements.evaluationWhite || !elements.evaluationScore) {
     return;
   }
-  if (!engine?.chronofish_evaluation_json || phase !== "game") {
-    elements.evaluationBar.hidden = true;
-    return;
-  }
-
-  try {
-    const evaluation = JSON.parse(readWasmString(engine, engine.chronofish_evaluation_json()));
-    const score = Number(evaluation.score);
-    if (!Number.isFinite(score)) {
-      elements.evaluationBar.hidden = true;
-      return;
-    }
-    const whiteShare = 0.5 + 0.5 * normalizedEvaluation(score);
-    const whitePercent = Math.max(3, Math.min(97, whiteShare * 100));
-    elements.evaluationWhite.style.height = `${whitePercent}%`;
-    elements.evaluationScore.textContent = formatEvaluation(score);
-    elements.evaluationBar.dataset.leader = score >= 0 ? "white" : "black";
-    elements.evaluationBar.title = `White ${formatSignedPawns(score)}. Source: ${evaluation.source ?? "evaluation"}.`;
-    elements.evaluationBar.hidden = false;
-  } catch {
-    elements.evaluationBar.hidden = true;
-  }
+  elements.evaluationBar.hidden = true;
 }
 
 function formatEvaluation(score) {
@@ -778,11 +871,7 @@ function applyRemoteRoom(room, message = "") {
     writeAssignments(room.game.assignments);
   }
 
-  if (room?.game?.notation && engine) {
-    replayNotation(room.game.notation);
-  } else if (room?.game?.turns && engine) {
-    replayTurns(room.game.turns);
-  } else if (room?.game?.snapshot) {
+  if (room?.game?.snapshot) {
     game = room.game.snapshot;
     committedGame = game;
     submittedTurns = room.game.turns ?? [];
@@ -1039,10 +1128,11 @@ function maybeStartBotTurn() {
     try {
       createAiWorker().postMessage({
         id,
-        notation: submittedNotation,
+        game,
         depth: effort.depth,
         nodes: effort.nodes,
         timeMs: workerTimeMs,
+        gpuMode: botGpuMode(),
         partitionIndex,
         partitionCount: workerCount
       });
@@ -1054,31 +1144,27 @@ function maybeStartBotTurn() {
   }
   if (bot.pendingSearch.expected === 0) {
     bot.pendingSearch.expected = 1;
-    setTimeout(() => runBotSearchOnMainThread(id, effort.depth, effort.nodes, workerTimeMs), 0);
+    setTimeout(() => {
+      handleAiWorkerMessage({
+        data: {
+          id,
+          ok: false,
+          error: "GPU worker search is unavailable.",
+          partitionIndex: 0
+        }
+      });
+    }, 0);
   }
   updateBotCountdownMessage(id);
-}
-
-function runBotSearchOnMainThread(id, depth, nodes, timeMs) {
-  if (id !== aiRequestId || !bot.thinking) {
-    return;
-  }
-  try {
-    const searchTimeMs = Math.max(1, timeMs ?? 10_000);
-    const fn = engine.chronofish_ai_turn_timed_json ?? engine.chronofish_ai_turn_json;
-    const pointer = engine.chronofish_ai_turn_timed_json
-      ? fn(depth, nodes, searchTimeMs)
-      : fn(depth, nodes);
-    const result = JSON.parse(readWasmString(engine, pointer));
-    handleAiWorkerMessage({ data: { id, ok: true, result, partitionIndex: 0 } });
-  } catch (error) {
-    handleAiWorkerMessage({ data: { id, ok: false, error: error.message, partitionIndex: 0 } });
-  }
 }
 
 function botWorkerSearchTimeMs(timeMs) {
   const margin = Math.min(1000, Math.max(100, Math.floor(timeMs * 0.05)));
   return Math.max(1, timeMs - margin);
+}
+
+function botGpuMode() {
+  return localStorage.getItem(GPU_MODE_STORAGE_KEY) === "full" ? "full" : "hybrid";
 }
 
 function handleBotTimeout(id, botColor, timeMs) {
@@ -1094,12 +1180,12 @@ function handleBotTimeout(id, botColor, timeMs) {
   terminateAiWorkers();
   if (bestResult) {
     elements.message.textContent = `${botDisplayName(botColor)} used the best move found in ${formatBotTimeLimit(timeMs)}.`;
-    completeBotTurn(botColor, bestResult);
+    void completeBotTurn(botColor, bestResult);
     return;
   }
 
   elements.message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
-  completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
+  void completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
 }
 
 function handleAiWorkerMessage(event) {
@@ -1129,12 +1215,12 @@ function handleAiWorkerMessage(event) {
 
   const bestResult = selectBestAiResult(pending.results.map((entry) => entry.result));
   if (!bestResult && pending.errors.length > 0) {
-    elements.message.textContent = pending.errors[0];
-    concede(pending.botColor, botMoveCredentials(pending.botColor));
+    elements.message.textContent = `${botDisplayName(pending.botColor)} search failed: ${pending.errors[0]}`;
+    render();
     return;
   }
 
-  completeBotTurn(pending.botColor, bestResult ?? { status: "noLegalTurn", moves: [] });
+  void completeBotTurn(pending.botColor, bestResult ?? { status: "noLegalTurn", moves: [] });
 }
 
 function selectBestAiResult(results) {
@@ -1153,7 +1239,7 @@ function selectBestAiResult(results) {
     })[0] ?? null;
 }
 
-function completeBotTurn(botColor, result) {
+async function completeBotTurn(botColor, result) {
   if (!isBotAssignment(assignments[botColor]) || stagedMoves.length > 0) {
     return;
   }
@@ -1166,7 +1252,7 @@ function completeBotTurn(botColor, result) {
 
   const before = turnSignature();
   for (const move of result.moves) {
-    if (!applyEngineMove(move.from, move.to)) {
+    if (!(await applyEngineMove(move.from, move.to))) {
       concede(botColor, botMoveCredentials(botColor));
       return;
     }
@@ -1176,21 +1262,12 @@ function completeBotTurn(botColor, result) {
     return;
   }
 
-  const turnNotation = stagedTurnNotation();
-  if (!engine.chronofish_submit_turn()) {
-    elements.message.textContent = engineDisplayMessage();
+  const message = await submitVisibleTurn(botColor);
+  if (!message) {
     concede(botColor, botMoveCredentials(botColor));
     return;
   }
 
-  const message = engineDisplayMessage();
-  game = engineSnapshot();
-  submittedTurns.push(stagedMoves.map(cloneMove));
-  appendSubmittedNotation(turnNotation, botColor);
-  stagedMoves = [];
-  committedGame = game;
-  selected = null;
-  legalTargets = [];
   const botMessage = `${botDisplayName(botColor)} moved. ${message}`;
   elements.message.textContent = botMessage;
   persistLocalGameState();
@@ -1209,8 +1286,7 @@ async function loadWasmStatus() {
     const instance = await instantiateChronofishWasm(wasmPath);
     engine = instance.exports;
     resetEngine();
-    await loadActiveModelIntoEngine();
-    const restored = restoreLocalGameState();
+    const restored = await restoreLocalGameState();
     elements.wasmStatus.textContent = `Engine v${readWasmString(engine, engine.chronofish_version())}`;
     elements.wasmStatus.dataset.state = "ready";
     if (!restored) {
@@ -1314,10 +1390,6 @@ async function startFrontendTraining() {
   if (!trainingEnabled || trainingRunning) {
     return;
   }
-  if (!engine?.chronofish_neural_sample_json) {
-    elements.trainingStatus.textContent = "Rebuild WASM for neural sampling.";
-    return;
-  }
   trainingRunning = true;
   trainingCycle = 0;
   renderTrainingButtons();
@@ -1336,7 +1408,7 @@ function runFrontendTrainingCycle() {
     ensureTrainingWorker().postMessage({
       id,
       type: "train",
-      notation: submittedNotation,
+      game,
       config
     });
   } catch (error) {
@@ -1368,7 +1440,6 @@ async function replaceActiveModel(model) {
   if (!response.ok) {
     throw new Error(payload?.error ?? `Failed to replace model (${response.status})`);
   }
-  await loadActiveModelIntoEngine();
   resetAiWorker();
   await loadTrainingStatus();
 }
@@ -1405,10 +1476,6 @@ async function handleTrainingWorkerMessage(event) {
     labelWorkers,
     bufferSize,
     pseudoCount,
-    selfPlayCount,
-    selfPlayCompleted,
-    selfPlayGames,
-    selfPlaySamples,
     gpuPhase
   } = event.data;
   if (id !== trainingRequestId) {
@@ -1421,7 +1488,7 @@ async function handleTrainingWorkerMessage(event) {
     return;
   }
   if (labelWorkers !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: labeling with ${labelWorkers} workers.`;
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: encoding positions with ${labelWorkers} workers.`;
     return;
   }
   if (model) {
@@ -1444,15 +1511,11 @@ async function handleTrainingWorkerMessage(event) {
     return;
   }
   if (collected !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: collected ${collected}/${sampleCount}.`;
-    return;
-  }
-  if (selfPlayCompleted !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: self-play ${selfPlayCompleted}/${selfPlayGames} games, ${selfPlaySamples} outcome samples.`;
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: encoded ${collected}/${sampleCount}.`;
     return;
   }
   if (gpuPhase) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} pseudo, ${selfPlayCount ?? 0} self-play).`;
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} model-labeled).`;
     return;
   }
   if (epoch !== undefined) {
@@ -1474,22 +1537,14 @@ elements.resetButton.addEventListener("click", () => {
     return;
   }
 
-  let undone = 0;
-  while (stagedMoves.length > 0 && engine.chronofish_undo_staged_move()) {
-    stagedMoves.pop();
-    undone += 1;
-  }
-
-  game = engineSnapshot();
-  committedGame = game;
-  selected = null;
-  legalTargets = [];
+  const undone = stagedMoves.length;
+  resetStagedClientState();
   elements.message.textContent = undone > 0 ? "Reset staged moves." : "No staged moves to reset.";
   persistLocalGameState();
   render();
 });
 
-elements.undoMoveButton.addEventListener("click", () => {
+elements.undoMoveButton.addEventListener("click", async () => {
   if (!engine) {
     elements.message.textContent = "WASM engine is not loaded yet.";
     return;
@@ -1499,24 +1554,21 @@ elements.undoMoveButton.addEventListener("click", () => {
     return;
   }
 
-  if (!engine.chronofish_undo_staged_move()) {
-    elements.message.textContent = engineDisplayMessage();
+  if (stagedMoves.length === 0) {
+    elements.message.textContent = "No staged move to undo.";
     return;
   }
 
-  stagedMoves.pop();
-  game = engineSnapshot();
-  if (stagedMoves.length === 0) {
-    committedGame = game;
-  }
-  selected = null;
-  legalTargets = [];
-  elements.message.textContent = engineDisplayMessage();
+  const remaining = stagedMoves.slice(0, -1).map(cloneMove);
+  await rebuildStagedClientState(remaining);
+  elements.message.textContent = remaining.length === 0
+    ? "Select a piece on a latest board."
+    : "Undid staged move.";
   persistLocalGameState();
   render();
 });
 
-elements.submitTurnButton.addEventListener("click", () => {
+elements.submitTurnButton.addEventListener("click", async () => {
   if (!engine) {
     elements.message.textContent = "WASM engine is not loaded yet.";
     return;
@@ -1527,24 +1579,11 @@ elements.submitTurnButton.addEventListener("click", () => {
   }
 
   const actor = game.turn;
-  const turnNotation = stagedTurnNotation();
-  if (!engine.chronofish_submit_turn()) {
-    elements.message.textContent = engineDisplayMessage();
+  const message = await submitVisibleTurn(actor);
+  if (!message) {
     return;
   }
 
-  const message = engineDisplayMessage();
-  game = engineSnapshot();
-  if (stagedMoves.length > 0) {
-    submittedTurns.push(stagedMoves.map(cloneMove));
-    appendSubmittedNotation(turnNotation, actor);
-    stagedMoves = [];
-  }
-  committedGame = game;
-  selected = null;
-  legalTargets = [];
-  elements.message.textContent = message;
-  persistLocalGameState();
   render();
   if (isMatchOverMessage(message)) {
     enterPostMatchReview(message);

@@ -102,6 +102,7 @@ impl Game {
         self.legal_move_kind(from, to).is_some()
     }
 
+    #[allow(dead_code)]
     fn pruned_for_evaluation(&self) -> Self {
         let active_timeline_ids: Vec<i32> = self
             .timelines
@@ -195,6 +196,7 @@ impl Game {
             .map(|kind| (piece, kind))
     }
 
+    #[allow(dead_code)]
     fn legal_targets_json(&self, from: Position) -> String {
         let mut targets = Vec::new();
 
@@ -224,6 +226,7 @@ impl Game {
         self.present_time() == Some(from.time)
     }
 
+    #[allow(dead_code)]
     fn apply_move(&mut self, from: Position, to: Position) -> i32 {
         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
             self.last_message = "Illegal move.".to_string();
@@ -255,6 +258,7 @@ impl Game {
     }
 
     // Capture enough state to undo one staged move.
+    #[allow(dead_code)]
     fn checkpoint(&self) -> GameCheckpoint {
         GameCheckpoint {
             turn: self.turn,
@@ -267,6 +271,7 @@ impl Game {
         }
     }
 
+    #[allow(dead_code)]
     fn restore(&mut self, checkpoint: GameCheckpoint) {
         self.turn = checkpoint.turn;
         self.timelines = checkpoint.timelines;
@@ -277,6 +282,7 @@ impl Game {
         self.last_message = checkpoint.last_message;
     }
 
+    #[allow(dead_code)]
     fn undo_staged_move(&mut self) -> i32 {
         let Some(checkpoint) = self.staged_turn.pop() else {
             self.last_message = "No staged move to undo.".to_string();
@@ -292,6 +298,7 @@ impl Game {
         1
     }
 
+    #[allow(dead_code)]
     fn submit_turn(&mut self) -> i32 {
         if self.staged_turn.is_empty() {
             self.last_message = "Make at least one move before submitting.".to_string();
@@ -326,6 +333,16 @@ impl Game {
         self.staged_notation.clear();
         self.staged_royal_capture_by = None;
 
+        if self.has_threefold_repetition() {
+            self.last_message = "Stalemate by threefold repetition.".to_string();
+            return 1;
+        }
+
+        if self.is_classic_stalemate(self.turn) {
+            self.last_message = "Stalemate.".to_string();
+            return 1;
+        }
+
         let suffix = if self.is_in_check(self.turn) {
             " Check."
         } else {
@@ -337,6 +354,77 @@ impl Game {
             suffix
         );
         1
+    }
+
+    fn has_threefold_repetition(&self) -> bool {
+        self.timelines.iter().any(|timeline| {
+            let mut counts = std::collections::HashMap::new();
+            timeline.boards.iter().any(|board| {
+                let count = counts.entry(Self::board_repetition_key(board)).or_insert(0);
+                *count += 1;
+                *count >= 3
+            })
+        })
+    }
+
+    fn board_repetition_key(board: &BoardSnapshot) -> Vec<i32> {
+        let mut key = Vec::with_capacity(70);
+        key.push(Self::repetition_color_code(board.side_to_move));
+        key.push(Self::repetition_castling_code(board.castling));
+        if let Some(en_passant) = board.en_passant {
+            key.extend([
+                en_passant.x,
+                en_passant.y,
+                en_passant.captured_x,
+                en_passant.captured_y,
+            ]);
+        } else {
+            key.extend([-1, -1, -1, -1]);
+        }
+        for row in board.board.iter() {
+            for square in row.iter() {
+                key.push(Self::repetition_piece_code(*square));
+            }
+        }
+        key
+    }
+
+    fn repetition_color_code(color: Color) -> i32 {
+        match color {
+            Color::White => 0,
+            Color::Black => 1,
+        }
+    }
+
+    fn repetition_piece_type_code(piece_type: PieceType) -> i32 {
+        match piece_type {
+            PieceType::King => 1,
+            PieceType::CommonKing => 2,
+            PieceType::Queen => 3,
+            PieceType::RoyalQueen => 4,
+            PieceType::Princess => 5,
+            PieceType::Rook => 6,
+            PieceType::Bishop => 7,
+            PieceType::Unicorn => 8,
+            PieceType::Dragon => 9,
+            PieceType::Knight => 10,
+            PieceType::Pawn => 11,
+            PieceType::Brawn => 12,
+        }
+    }
+
+    fn repetition_piece_code(piece: Option<Piece>) -> i32 {
+        piece.map_or(0, |piece| {
+            Self::repetition_piece_type_code(piece.piece_type)
+                | (Self::repetition_color_code(piece.color) << 8)
+        })
+    }
+
+    fn repetition_castling_code(castling: CastlingRights) -> i32 {
+        castling.white_kingside as i32
+            | ((castling.white_queenside as i32) << 1)
+            | ((castling.black_kingside as i32) << 2)
+            | ((castling.black_queenside as i32) << 3)
     }
 
     fn record_staged_capture(&mut self, color: Color, captured: Option<Piece>) {

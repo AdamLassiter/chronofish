@@ -1,191 +1,156 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Chronofish</title>
-    <link rel="stylesheet" href="./styles.css">
-  </head>
-  <body>
-    <main class="app">
-      <section class="hud" id="hud">
-        <!-- The compact row remains visible when the larger HUD body collapses. -->
-        <div class="hud-compact">
-          <strong>Chronofish</strong>
-          <span id="wasm-status">Loading WASM</span>
-          <span id="server-status">Loading server</span>
-          <span id="message">Configure the lobby, then start the game.</span>
-          <button id="toggle-hud" type="button" aria-controls="hud-panel" aria-expanded="true">Hide</button>
-        </div>
 
-        <div class="hud-panel" id="hud-panel">
-          <header class="topbar">
-            <div>
-              <p class="eyebrow">5D Chess Prototype</p>
-            </div>
-          </header>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chronofish</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
 
-          <section class="multiplayer" aria-label="Multiplayer controls">
-            <label>
-              Room
-              <input id="room-id" type="text" autocomplete="off" spellcheck="false">
-            </label>
-            <label>
-              White
-              <select id="white-player">
-                <option value="local">Local</option>
-                <option value="human">Online</option>
-                <option value="bot-fast">Bot: Fast</option>
-                <option value="bot-balanced">Bot: Balanced</option>
-                <option value="bot-expert">Bot: Expert</option>
-                <option value="open">Open</option>
-              </select>
-            </label>
-            <label>
-              Black
-              <select id="black-player">
-                <option value="local">Local</option>
-                <option value="human">Online</option>
-                <option value="bot-fast">Bot: Fast</option>
-                <option value="bot-balanced">Bot: Balanced</option>
-                <option value="bot-expert">Bot: Expert</option>
-                <option value="open">Open</option>
-              </select>
-            </label>
-            <button id="start-game" type="button">Start Game</button>
-            <button id="join-white" type="button">Join White</button>
-            <button id="join-black" type="button">Join Black</button>
-            <button id="join-spectator" type="button">Spectate</button>
-            <span id="multiplayer-status">Local game</span>
-            <span id="share-link"></span>
-          </section>
+<body>
+  <main class="app">
+    <section class="hud" id="hud">
+      <!-- The compact row remains visible when the larger HUD body collapses. -->
+      <div class="hud-compact">
+        <strong>Chronofish</strong>
+        <span id="wasm-status">Loading WASM</span>
+        <span id="server-status">Loading server</span>
+        <span id="message">Configure the lobby, then start the game.</span>
+        <button id="toggle-hud" type="button" aria-controls="hud-panel" aria-expanded="true">Hide</button>
+      </div>
 
-          <section class="training" id="training-panel" aria-label="Neural training controls" hidden>
+      <div class="hud-panel" id="hud-panel">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">5D Chess Prototype</p>
+          </div>
+        </header>
+
+        <section class="multiplayer" aria-label="Multiplayer controls">
+          <label>
+            Room
+            <input id="room-id" type="text" autocomplete="off" spellcheck="false">
+          </label>
+          <label>
+            White
+            <select id="white-player">
+              <option value="local">Local</option>
+              <option value="human">Online</option>
+              <option value="bot-fast">Bot: Fast</option>
+              <option value="bot-balanced">Bot: Balanced</option>
+              <option value="bot-expert">Bot: Expert</option>
+              <option value="open">Open</option>
+            </select>
+          </label>
+          <label>
+            Black
+            <select id="black-player">
+              <option value="local">Local</option>
+              <option value="human">Online</option>
+              <option value="bot-fast">Bot: Fast</option>
+              <option value="bot-balanced">Bot: Balanced</option>
+              <option value="bot-expert">Bot: Expert</option>
+              <option value="open">Open</option>
+            </select>
+          </label>
+          <button id="start-game" type="button">Start Game</button>
+          <button id="join-white" type="button">Join White</button>
+          <button id="join-black" type="button">Join Black</button>
+          <button id="join-spectator" type="button">Spectate</button>
+          <span id="multiplayer-status">Local game</span>
+          <span id="share-link"></span>
+        </section>
+
+        <section class="training" id="training-panel" aria-label="Neural training controls" hidden>
+          <div>
             <label>
               Labels
-              <input
-                id="training-samples"
-                type="number"
-                min="1"
-                max="64"
-                step="1"
-                value="8"
-                title="Expert CPU labels collected per cycle. Higher values improve label coverage but increase CPU search time before GPU training starts."
-                aria-describedby="training-samples-help"
-              >
-              <span id="training-samples-help" class="field-help">CPU labels</span>
+              <input id="training-samples" type="number" min="1" max="64" step="1" value="8"
+                title="Model-labeled positions collected per cycle. Higher values improve coverage and increase GPU prediction/training work."
+                aria-describedby="training-samples-help">
+              <span id="training-samples-help" class="field-help">GPU labels</span>
             </label>
             <label>
               Depth
-              <input
-                id="training-depth"
-                type="number"
-                min="1"
-                max="8"
-                step="1"
-                value="5"
-                title="CPU search depth for expert labels. Higher depth gives stronger targets but grows CPU cost sharply."
-                aria-describedby="training-depth-help"
-              >
-              <span id="training-depth-help" class="field-help">CPU quality</span>
+              <input id="training-depth" type="number" min="1" max="8" step="1" value="5"
+                title="Reserved search depth for GPU search experiments. Training label generation no longer runs CPU search."
+                aria-describedby="training-depth-help">
+              <span id="training-depth-help" class="field-help">GPU depth</span>
             </label>
             <label>
               Nodes
-              <input
-                id="training-nodes"
-                type="number"
-                min="1"
-                max="16384"
-                step="1000"
-                value="4096"
-                title="CPU node budget per expert label. Higher values improve tactical label quality but directly increase CPU labeling time."
-                aria-describedby="training-nodes-help"
-              >
-              <span id="training-nodes-help" class="field-help">CPU budget</span>
+              <input id="training-nodes" type="number" min="1" max="16384" step="1000" value="4096"
+                title="Reserved node budget for GPU search experiments. Training label generation no longer runs CPU search."
+                aria-describedby="training-nodes-help">
+              <span id="training-nodes-help" class="field-help">GPU budget</span>
             </label>
             <label>
               Rate
-              <input
-                id="training-rate"
-                type="number"
-                min="0.0001"
-                max="0.1"
-                step="0.0001"
-                value="0.01"
+              <input id="training-rate" type="number" min="0.0001" max="0.1" step="0.0001" value="0.01"
                 title="GPU learning rate. Higher values adapt faster but can destabilize training; lower values are steadier but need more GPU steps."
-                aria-describedby="training-rate-help"
-              >
+                aria-describedby="training-rate-help">
               <span id="training-rate-help" class="field-help">GPU step size</span>
             </label>
             <label>
               Steps
-              <input
-                id="training-epochs"
-                type="number"
-                min="1"
-                max="16384"
-                step="50"
-                value="2048"
-                title="GPU optimization steps per cycle. Higher values use more GPU time and squeeze more value from each CPU-labeled batch, but may overfit stale labels."
-                aria-describedby="training-epochs-help"
-              >
+              <input id="training-epochs" type="number" min="1" max="16384" step="50" value="2048"
+                title="GPU optimization steps per cycle. Higher values use more GPU time and squeeze more value from each model-labeled batch, but may overfit stale labels."
+                aria-describedby="training-epochs-help">
               <span id="training-epochs-help" class="field-help">GPU work</span>
             </label>
             <label>
               Buffer
-              <input
-                id="training-buffer"
-                type="number"
-                min="16"
-                max="65536"
-                step="16"
-                value="16384"
+              <input id="training-buffer" type="number" min="16" max="65536" step="16" value="16384"
                 title="Replay buffer size used for GPU training. Larger buffers improve variety and reduce forgetting but increase GPU memory and per-step work."
-                aria-describedby="training-buffer-help"
-              >
+                aria-describedby="training-buffer-help">
               <span id="training-buffer-help" class="field-help">GPU memory</span>
             </label>
+          </div>
+          <div>
             <button id="start-training" type="button">Train</button>
             <button id="stop-training" type="button" disabled>Stop</button>
             <span id="training-status">Training disabled</span>
-          </section>
-
-          <section class="legend" aria-label="Timeline legend">
-            <span><i class="swatch selected"></i>Selected piece</span>
-            <span><i class="swatch target"></i>Legal target</span>
-            <span><i class="swatch present-line-swatch"></i>Present line</span>
-            <span><i class="swatch move-source"></i>Move source</span>
-            <span><i class="swatch move-target"></i>Move target</span>
-            <span><i class="swatch arrived"></i>Piece arrived</span>
-            <span><i class="swatch check"></i>Royal in check</span>
-          </section>
-        </div>
-
-        <!-- Core turn controls sit outside hud-panel so CSS can keep them visible
-             when the panel is collapsed. -->
-        <section class="controls" aria-label="Game controls">
-          <button id="reset-game" type="button">Reset</button>
-          <button id="undo-move" type="button">Undo</button>
-          <button id="submit-turn" type="button">Submit</button>
-          <button id="concede-game" type="button">Concede</button>
+          </div>
         </section>
+
+        <section class="legend" aria-label="Timeline legend">
+          <span><i class="swatch selected"></i>Selected piece</span>
+          <span><i class="swatch target"></i>Legal target</span>
+          <span><i class="swatch present-line-swatch"></i>Present line</span>
+          <span><i class="swatch move-source"></i>Move source</span>
+          <span><i class="swatch move-target"></i>Move target</span>
+          <span><i class="swatch arrived"></i>Piece arrived</span>
+          <span><i class="swatch check"></i>Royal in check</span>
+        </section>
+      </div>
+
+      <!-- Core turn controls sit outside hud-panel so CSS can keep them visible
+             when the panel is collapsed. -->
+      <section class="controls" aria-label="Game controls">
+        <button id="reset-game" type="button">Reset</button>
+        <button id="undo-move" type="button">Undo</button>
+        <button id="submit-turn" type="button">Submit</button>
+        <button id="concede-game" type="button">Concede</button>
       </section>
+    </section>
 
-      <aside class="evaluation-bar" id="evaluation-bar" aria-label="Position evaluation">
-        <span class="evaluation-label evaluation-label-black">Black</span>
-        <div class="evaluation-track">
-          <div class="evaluation-white" id="evaluation-white"></div>
-          <span class="evaluation-score" id="evaluation-score">0.0</span>
-        </div>
-        <span class="evaluation-label evaluation-label-white">White</span>
-      </aside>
+    <aside class="evaluation-bar" id="evaluation-bar" aria-label="Position evaluation">
+      <span class="evaluation-label evaluation-label-black">Black</span>
+      <div class="evaluation-track">
+        <div class="evaluation-white" id="evaluation-white"></div>
+        <span class="evaluation-score" id="evaluation-score">0.0</span>
+      </div>
+      <span class="evaluation-label evaluation-label-white">White</span>
+    </aside>
 
-      <section id="multiverse" class="multiverse" aria-label="5D chess multiverse">
-        <!-- JavaScript renders timeline rows and board snapshots into this grid. -->
-        <div id="timeline-grid" class="timeline-grid"></div>
-      </section>
-    </main>
+    <section id="multiverse" class="multiverse" aria-label="5D chess multiverse">
+      <!-- JavaScript renders timeline rows and board snapshots into this grid. -->
+      <div id="timeline-grid" class="timeline-grid"></div>
+    </section>
+  </main>
 
-    <script type="module" src="./main.js"></script>
-  </body>
+  <script type="module" src="./main.js"></script>
+</body>
+
 </html>

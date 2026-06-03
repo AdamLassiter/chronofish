@@ -51,6 +51,7 @@ struct BoardSnapshot {
 #[derive(Clone)]
 enum Origin {
     None,
+    #[allow(dead_code)]
     Move {
         from: Position,
         to: Position,
@@ -65,6 +66,7 @@ enum Origin {
 struct Timeline {
     id: i32,
     row: i32,
+    #[allow(dead_code)]
     label: String,
     owner: TimelineOwner,
     boards: Vec<BoardSnapshot>,
@@ -107,6 +109,7 @@ struct Game {
 // Whole-state checkpoints are simpler and safer than trying to reverse 5D moves.
 // Turns are short enough that copying the visible game state is acceptable.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct GameCheckpoint {
     turn: Color,
     timelines: Vec<Timeline>,

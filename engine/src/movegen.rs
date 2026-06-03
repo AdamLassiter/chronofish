@@ -8,6 +8,7 @@ impl Game {
             .any(|position| self.is_square_attacked(*position, color.opposite()))
     }
 
+    #[allow(dead_code)]
     fn checked_royal_positions(&self) -> Vec<Position> {
         let Some(present_time) = self.present_time() else {
             return Vec::new();
@@ -35,6 +36,17 @@ impl Game {
         !search.has_legal_turn_completion(color)
     }
 
+    fn is_classic_stalemate(&self, color: Color) -> bool {
+        if self.royal_piece_positions(color).is_empty() || self.is_in_check(color) {
+            return false;
+        }
+
+        let mut search = self.clone_for_search();
+        search.turn = color;
+        !search.has_legal_turn_completion(color)
+    }
+
+    #[allow(dead_code)]
     fn royal_capture_available(&self, color: Color) -> bool {
         let mut search = self.clone_for_search();
         search.turn = color;

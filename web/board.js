@@ -49,21 +49,6 @@ export function presentTime(game) {
   return activeLatestTimes.length ? Math.min(...activeLatestTimes) : 0;
 }
 
-export function hasUnplayedBoards(game) {
-  const activeLatestBoards = game.timelines
-    .filter((timeline) => isActiveTimeline(game, timeline))
-    .map((timeline) => getLatestBoard(game, timeline.id))
-    .filter(Boolean);
-  const present = activeLatestBoards.reduce(
-    (earliest, board) => (!earliest || board.time < earliest.time ? board : earliest),
-    null
-  );
-
-  return activeLatestBoards.some(
-    (board) => board.time === present?.time && board.sideToMove === game.turn
-  );
-}
-
 export function samePosition(a, b) {
   return a.timelineId === b.timelineId && a.time === b.time && a.x === b.x && a.y === b.y;
 }

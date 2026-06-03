@@ -2,8 +2,6 @@ const NEURAL_MAX_BOARDS: usize = 16;
 const NEURAL_BOARD_PLANES: usize = 32;
 const NEURAL_BOARD_SQUARES: usize = 64;
 const NEURAL_INPUT_SIZE: usize = NEURAL_MAX_BOARDS * NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
-const DEFAULT_PROJECTION_SEED: u32 = 2_166_136_261;
-const COMPACT_MODEL_MAGIC: &[u8; 4] = b"CFNN";
 
 #[derive(Clone)]
 struct HeuristicEvaluator;
@@ -29,22 +27,6 @@ enum ValueEvaluator {
     Hybrid(HybridEvaluator),
 }
 
-#[derive(Clone, serde::Deserialize, serde::Serialize)]
-struct NeuralLinearModel {
-    bias: f32,
-    scale: f32,
-    #[serde(default)]
-    feature_weights: Vec<f32>,
-    #[serde(default)]
-    projection_size: usize,
-    #[serde(default = "default_projection_seed")]
-    projection_seed: u32,
-    #[serde(default)]
-    hidden_layers: Vec<usize>,
-    #[serde(default)]
-    hidden_weights: Vec<f32>,
-}
-
 struct NeuralEncodedPosition {
     values: Vec<f32>,
     board_count: usize,
@@ -61,6 +43,7 @@ impl NeuralEvaluator {
         Self { model_path: path, model: None }
     }
 
+    #[allow(dead_code)]
     fn from_model(model: NeuralLinearModel) -> Self {
         Self {
             model_path: None,
@@ -158,6 +141,7 @@ impl ValueEvaluator {
         Self::Neural(NeuralEvaluator::missing_model(model_path))
     }
 
+    #[allow(dead_code)]
     fn hybrid_from_model(model: NeuralLinearModel, heuristic_weight: i32, neural_weight: i32) -> Self {
         Self::Hybrid(HybridEvaluator {
             heuristic_weight,
@@ -330,10 +314,6 @@ fn neural_piece_plane(piece: Piece) -> usize {
         }
 }
 
-fn default_projection_seed() -> u32 {
-    DEFAULT_PROJECTION_SEED
-}
-
 fn project_neural_features(values: &[f32], projection_size: usize, seed: u32) -> Vec<f32> {
     let active: Vec<(usize, f32)> = values
         .iter()
@@ -393,54 +373,4 @@ fn evaluate_hidden_layers(
         values = next;
     }
     Some(values)
-}
-
-fn parse_compact_neural_model(bytes: &[u8]) -> Option<NeuralLinearModel> {
-    if bytes.len() < 32 || &bytes[0..4] != COMPACT_MODEL_MAGIC {
-        return None;
-    }
-    let mut cursor = 4;
-    let version = read_u32(bytes, &mut cursor)?;
-    if version != 1 {
-        return None;
-    }
-    let projection_size = read_u32(bytes, &mut cursor)? as usize;
-    let projection_seed = read_u32(bytes, &mut cursor)?;
-    let layer_count = read_u32(bytes, &mut cursor)? as usize;
-    let output_size = read_u32(bytes, &mut cursor)? as usize;
-    let scale = read_f32(bytes, &mut cursor)?;
-    let bias = read_f32(bytes, &mut cursor)?;
-    let mut hidden_layers = Vec::with_capacity(layer_count);
-    for _ in 0..layer_count {
-        hidden_layers.push(read_u32(bytes, &mut cursor)? as usize);
-    }
-    let hidden_weight_count = read_u32(bytes, &mut cursor)? as usize;
-    let mut hidden_weights = Vec::with_capacity(hidden_weight_count);
-    for _ in 0..hidden_weight_count {
-        hidden_weights.push(read_f32(bytes, &mut cursor)?);
-    }
-    let mut feature_weights = Vec::with_capacity(output_size);
-    for _ in 0..output_size {
-        feature_weights.push(read_f32(bytes, &mut cursor)?);
-    }
-    Some(NeuralLinearModel {
-        bias,
-        scale,
-        feature_weights,
-        projection_size,
-        projection_seed,
-        hidden_layers,
-        hidden_weights,
-    })
-}
-
-fn read_u32(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
-    let end = cursor.checked_add(4)?;
-    let value = u32::from_le_bytes(bytes.get(*cursor..end)?.try_into().ok()?);
-    *cursor = end;
-    Some(value)
-}
-
-fn read_f32(bytes: &[u8], cursor: &mut usize) -> Option<f32> {
-    Some(f32::from_bits(read_u32(bytes, cursor)?))
 }

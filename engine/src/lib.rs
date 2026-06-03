@@ -4,19 +4,33 @@ use std::cell::RefCell;
 // files. wasm exports, move generation, notation, AI, and tests all share many
 // helpers; include! keeps those helpers private without turning them into a wide
 // pub(crate) API.
-include!("model.rs");
-include!("gpu_snapshot.rs");
 include!("wasm_api.rs");
-include!("game.rs");
-include!("movegen.rs");
-include!("ai.rs");
-include!("notation.rs");
-include!("notation_parser.rs");
 
-// Training is native-only. It uses files, subprocesses, and git, none of which
-// should be pulled into the browser/WASM artifact.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(test)]
+include!("ai.rs");
+#[cfg(test)]
+include!("model.rs");
+#[cfg(test)]
+include!("game.rs");
+#[cfg(test)]
+include!("movegen.rs");
+#[cfg(test)]
+include!("notation.rs");
+#[cfg(test)]
+include!("gpu_snapshot.rs");
+#[cfg(test)]
+include!("notation_parser.rs");
+#[cfg(test)]
+include!("notation_replay.rs");
+
+#[cfg(all(not(target_arch = "wasm32"), test))]
 include!("training.rs");
+
+#[cfg(all(not(target_arch = "wasm32"), not(test)))]
+pub fn run_training_cli() {
+    eprintln!("Native CPU training is disabled; use the browser WebGPU training path.");
+    std::process::exit(1);
+}
 
 #[cfg(test)]
 include!("tests.rs");

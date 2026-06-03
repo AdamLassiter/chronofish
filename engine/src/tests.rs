@@ -2061,4 +2061,143 @@ mod tests {
         assert_eq!(game.turn, Color::White);
         assert_eq!(game.present_time(), Some(2));
     }
+
+    #[test]
+    fn detects_threefold_repetition_on_same_timeline() {
+        let board = empty_board_with_kings();
+        let mut game = Game::new();
+        game.timelines = vec![Timeline {
+            id: 0,
+            row: 0,
+            label: "Sacred T0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![
+                snapshot(0, Color::White, board),
+                snapshot(1, Color::Black, board),
+                snapshot(2, Color::White, board),
+                snapshot(3, Color::White, board),
+            ],
+        }];
+
+        assert!(game.has_threefold_repetition());
+        assert_eq!(game.terminal_score(Color::White), Some(0));
+        assert_eq!(game.terminal_score(Color::Black), Some(0));
+    }
+
+    #[test]
+    fn submit_marks_threefold_repetition_as_stalemate() {
+        let mut game = Game::new();
+        game.load_notation(
+            "1. T0L0g1Nf3\n\
+             2. T1L0g8nf6\n\
+             3. T2L0f3Ng1\n\
+             4. T3L0f6ng8\n\
+             5. T4L0g1Nf3\n\
+             6. T5L0g8nf6\n\
+             7. T6L0f3Ng1",
+        )
+        .unwrap();
+
+        assert!(!game.has_threefold_repetition());
+        assert_eq!(
+            game.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 7,
+                    x: 5,
+                    y: 5,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 7,
+                    x: 6,
+                    y: 7,
+                },
+            ),
+            1
+        );
+        assert_eq!(game.submit_turn(), 1);
+        assert_eq!(game.last_message, "Stalemate by threefold repetition.");
+        assert_eq!(game.terminal_score(Color::White), Some(0));
+        assert_eq!(game.terminal_score(Color::Black), Some(0));
+    }
+
+    #[test]
+    fn detects_classic_stalemate_on_present_board() {
+        let mut board = [[None; 8]; 8];
+        board[7][7] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        board[6][5] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        board[5][6] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Queen,
+        });
+        let mut game = Game::new();
+        game.turn = Color::Black;
+        game.timelines = vec![Timeline {
+            id: 0,
+            row: 0,
+            label: "Sacred T0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(0, Color::Black, board)],
+        }];
+
+        assert!(!game.is_in_check(Color::Black));
+        assert!(game.is_classic_stalemate(Color::Black));
+        assert_eq!(game.terminal_score(Color::White), Some(0));
+        assert_eq!(game.terminal_score(Color::Black), Some(0));
+    }
+
+    #[test]
+    fn submit_marks_classic_stalemate() {
+        let mut board = [[None; 8]; 8];
+        board[7][7] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        board[6][5] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        board[4][6] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Queen,
+        });
+        let mut game = Game::new();
+        game.timelines = vec![Timeline {
+            id: 0,
+            row: 0,
+            label: "Sacred T0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(0, Color::White, board)],
+        }];
+
+        assert_eq!(
+            game.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 6,
+                    y: 4,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 6,
+                    y: 5,
+                },
+            ),
+            1
+        );
+        assert_eq!(game.submit_turn(), 1);
+        assert_eq!(game.turn, Color::Black);
+        assert_eq!(game.last_message, "Stalemate.");
+        assert_eq!(game.terminal_score(Color::White), Some(0));
+        assert_eq!(game.terminal_score(Color::Black), Some(0));
+    }
 }

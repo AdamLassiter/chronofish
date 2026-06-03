@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 struct ParsedMove {
     from: Position,
     to: Position,
@@ -6,6 +7,7 @@ struct ParsedMove {
     branch_timeline_id: Option<i32>,
 }
 
+#[allow(dead_code)]
 impl ParsedMove {
     fn parse(text: &str) -> Result<Self, String> {
         let chars: Vec<char> = text.trim().chars().collect();
@@ -78,6 +80,7 @@ impl ParsedMove {
     }
 }
 
+#[allow(dead_code)]
 fn strip_notation_comments(line: &str) -> String {
     let mut output = String::new();
     let mut in_comment = false;
@@ -92,6 +95,7 @@ fn strip_notation_comments(line: &str) -> String {
     output
 }
 
+#[allow(dead_code)]
 fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result<i32, String> {
     if chars.get(*index) != Some(&prefix) {
         return Err(format!("Expected `{prefix}`"));
@@ -114,6 +118,7 @@ fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result
         .map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String> {
     let file = *chars.get(*index).ok_or_else(|| "Missing file".to_string())?;
     *index += 1;
@@ -138,6 +143,7 @@ fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String>
     Ok((x, y))
 }
 
+#[allow(dead_code)]
 fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
     match symbol.to_ascii_uppercase() {
         'K' => Some(PieceType::King),

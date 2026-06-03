@@ -1,6 +1,7 @@
+#[allow(dead_code)]
 impl Game {
     fn evaluate(&self, color: Color, weights: &EvalWeights) -> i32 {
-        HeuristicEvaluator.evaluate(self, color, weights)
+        self.evaluate_heuristic(color, weights)
     }
 
     fn evaluate_heuristic(&self, color: Color, weights: &EvalWeights) -> i32 {
@@ -81,6 +82,8 @@ impl Game {
             Some(CHECKMATE_SCORE)
         } else if self.staged_royal_capture_by == Some(color.opposite()) {
             Some(-CHECKMATE_SCORE)
+        } else if self.has_threefold_repetition() || self.is_classic_stalemate(self.turn) {
+            Some(0)
         } else {
             None
         }

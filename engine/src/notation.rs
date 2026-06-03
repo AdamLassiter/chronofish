@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 impl Game {
     // Short human-readable status messages for the frontend HUD.
     fn move_message(
@@ -22,6 +23,7 @@ impl Game {
         }
     }
 
+    #[allow(dead_code)]
     fn to_json(&self) -> String {
         // Keep JSON ordering stable for deterministic frontend rendering,
         // multiplayer snapshots, and tests.
@@ -45,78 +47,9 @@ impl Game {
         )
     }
 
+    #[allow(dead_code)]
     fn staged_turn_notation(&self) -> String {
         self.staged_notation.join("/")
-    }
-
-    fn load_notation(&mut self, notation: &str) -> Result<(), String> {
-        let mut game = Game::new();
-        for line in notation.lines() {
-            let line = strip_notation_comments(line);
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let (_, turn_text) = line
-                .split_once('.')
-                .ok_or_else(|| format!("Missing turn prefix in `{line}`"))?;
-            for move_text in turn_text.split('/') {
-                let move_text = move_text.trim();
-                if move_text.is_empty() {
-                    continue;
-                }
-                game.apply_notation_move(move_text)?;
-            }
-            if game.submit_turn() == 0 {
-                return Err(game.last_message.clone());
-            }
-        }
-
-        *self = game;
-        Ok(())
-    }
-
-    fn apply_notation_move(&mut self, move_text: &str) -> Result<(), String> {
-        let parsed = ParsedMove::parse(move_text)?;
-        let piece = self
-            .piece_at(parsed.from)
-            .ok_or_else(|| format!("No piece at source in `{move_text}`"))?;
-        if piece.notation_symbol() != parsed.piece {
-            return Err(format!(
-                "Piece mismatch in `{move_text}`: source has {}",
-                piece.notation_symbol()
-            ));
-        }
-
-        let Some((_, move_kind)) = self.legal_move_kind(parsed.from, parsed.to) else {
-            return Err(format!("Illegal move `{move_text}`"));
-        };
-
-        if let Some(captured) = parsed.captured {
-            let actual = self
-                .captured_piece(parsed.to, move_kind)
-                .ok_or_else(|| format!("Capture marker without captured piece in `{move_text}`"))?;
-            if actual.notation_symbol() != captured {
-                return Err(format!(
-                    "Capture mismatch in `{move_text}`: target has {}",
-                    actual.notation_symbol()
-                ));
-            }
-        }
-
-        if let Some(actual_branch_timeline_id) = parsed.branch_timeline_id {
-            let expected = next_branch_timeline_id(piece.color, self);
-            if actual_branch_timeline_id != expected {
-                return Err(format!(
-                    "Branch timeline mismatch in `{move_text}`: expected L{expected}"
-                ));
-            }
-        }
-
-        if self.apply_move(parsed.from, parsed.to) == 0 {
-            return Err(self.last_message.clone());
-        }
-        Ok(())
     }
 
     fn move_notation(
@@ -148,7 +81,7 @@ impl Game {
     }
 
     fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
-        if self.terminal_score(color) == Some(CHECKMATE_SCORE) {
+        if self.staged_royal_capture_by == Some(color) {
             notation.push('#');
         } else if self.is_in_check(color.opposite()) {
             notation.push('+');
@@ -174,6 +107,7 @@ impl Game {
 }
 
 impl Timeline {
+    #[allow(dead_code)]
     fn to_json(&self) -> String {
         let mut boards = self.boards.clone();
         boards.sort_by_key(|board| board.time);
@@ -194,6 +128,7 @@ impl Timeline {
 }
 
 impl BoardSnapshot {
+    #[allow(dead_code)]
     fn to_json(&self, timeline_id: i32) -> String {
         let ranks = self
             .board
@@ -220,6 +155,7 @@ impl BoardSnapshot {
 }
 
 impl Origin {
+    #[allow(dead_code)]
     fn to_json(&self) -> String {
         match self {
             Origin::None => "null".to_string(),
@@ -245,6 +181,7 @@ impl Color {
         }
     }
 
+    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             Color::White => "white",
@@ -260,8 +197,10 @@ impl Color {
     }
 }
 
+#[allow(dead_code)]
 impl PieceType {
     // These strings are part of the frontend JSON contract.
+    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             PieceType::King => "king",
@@ -297,6 +236,7 @@ impl PieceType {
     }
 }
 
+#[allow(dead_code)]
 impl Piece {
     fn notation_symbol(self) -> char {
         let symbol = self.piece_type.notation_letter();
@@ -315,6 +255,7 @@ impl TimelineOwner {
         }
     }
 
+    #[allow(dead_code)]
     fn as_str(self) -> &'static str {
         match self {
             TimelineOwner::Neutral => "neutral",
@@ -440,6 +381,7 @@ fn promote_if_needed(piece: Piece, y: i32) -> Piece {
     }
 }
 
+#[allow(dead_code)]
 fn piece_json(piece: &Option<Piece>) -> String {
     match piece {
         Some(piece) => format!(
@@ -458,10 +400,12 @@ fn position_json(position: Position) -> String {
     )
 }
 
+#[allow(dead_code)]
 fn position_prefix(position: Position) -> String {
     format!("T{}L{}", position.time, position.timeline_id)
 }
 
+#[allow(dead_code)]
 fn target_prefix(from: Position, to: Position) -> String {
     if from.timeline_id == to.timeline_id && from.time == to.time {
         String::new()
@@ -470,10 +414,12 @@ fn target_prefix(from: Position, to: Position) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn square_name(position: Position) -> String {
     format!("{}{}", file_name(position.x), position.y + 1)
 }
 
+#[allow(dead_code)]
 fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
     match color {
         Color::White => game.next_timeline_id,
@@ -481,6 +427,7 @@ fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
     }
 }
 
+#[allow(dead_code)]
 fn file_name(x: i32) -> &'static str {
     match x {
         0 => "a",
@@ -495,6 +442,7 @@ fn file_name(x: i32) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }

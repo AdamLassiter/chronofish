@@ -7,6 +7,7 @@ struct TurnPlanBuildContext<'a> {
 }
 
 impl Game {
+    #[allow(dead_code)]
     fn ai_turn_json(&self, max_depth: i32, max_nodes: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, None).to_json()
     }
@@ -143,6 +144,7 @@ impl Game {
         (best, sample)
     }
 
+    #[allow(dead_code)]
     fn best_ai_turn_partitioned(
         &self,
         max_depth: i32,
@@ -161,6 +163,7 @@ impl Game {
         )
     }
 
+    #[allow(dead_code)]
     fn best_ai_turn_partitioned_with_value_evaluator(
         &self,
         max_depth: i32,
@@ -517,6 +520,7 @@ impl Game {
         }
     }
 
+    #[allow(dead_code)]
     fn legal_single_moves(&self, weights: &EvalWeights) -> Vec<MoveStep> {
         self.legal_single_moves_until(weights, None)
     }
