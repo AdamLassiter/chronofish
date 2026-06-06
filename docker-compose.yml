@@ -10,6 +10,7 @@ services:
       HOST: 0.0.0.0
       PORT: 5173
     volumes:
+      # Match logs are written under /app/logs in the container.
       - chronofish-logs:/app/logs
 
   chronofish-training:
@@ -25,9 +26,12 @@ services:
       HOST: 0.0.0.0
       PORT: 5173
     volumes:
+      # Training loss replay logs are stored at /app/logs/training-losses.
       - chronofish-logs:/app/logs
       - chronofish-models:/app/engine/models/value-v1
 
 volumes:
+  # Contains regular match logs plus frontend-training loss logs in
+  # logs/training-losses inside the container.
   chronofish-logs:
   chronofish-models:

@@ -53,10 +53,6 @@ fn apply_static_headers(response: &mut Response, path: &Path, etag: &str) {
         HeaderValue::from_static(STATIC_CONTENT_SECURITY_POLICY),
     );
     headers.insert(
-        HeaderName::from_static("content-security-policy-report-only"),
-        HeaderValue::from_static(STATIC_CONTENT_SECURITY_POLICY),
-    );
-    headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(STATIC_CACHE_CONTROL),
     );

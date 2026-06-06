@@ -111,12 +111,15 @@ async fn log_match_event(
 #[cfg(feature = "frontend-training")]
 async fn training_status(State(state): State<AppState>) -> impl IntoResponse {
     let path = active_training_model_path(&state);
+    let existing = std::fs::read(&path).ok();
     let metadata = std::fs::metadata(&path).ok();
     Json(json!({
         "enabled": true,
         "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "resolvedModelPath": path.display().to_string(),
         "modelPresent": metadata.is_some(),
         "modelBytes": metadata.as_ref().map(|metadata| metadata.len()),
+        "modelHash": existing.as_deref().map(training_model_hash),
         "updatedAt": metadata
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
@@ -167,6 +170,24 @@ async fn put_training_model(
     }
 
     let path = active_training_model_path(&state);
+    let existing = std::fs::read(&path).ok();
+    let old_hash = existing.as_deref().map(training_model_hash);
+    let new_hash = training_model_hash(&body);
+    if existing.as_deref() == Some(body.as_ref()) {
+        return Json(json!({
+            "ok": true,
+            "changed": false,
+            "modelPath": "engine/models/value-v1/value-model.cfnn",
+            "resolvedModelPath": path.display().to_string(),
+            "modelBytes": body.len(),
+            "oldHash": old_hash,
+            "newHash": new_hash,
+            "reason": "uploaded model bytes match the active model on disk",
+            "updatedAt": now_millis()
+        }))
+        .into_response();
+    }
+
     if let Some(parent) = path.parent() {
         if let Err(error) = std::fs::create_dir_all(parent) {
             return (
@@ -205,13 +226,107 @@ async fn put_training_model(
         )
             .into_response();
     }
+    let disk_hash = std::fs::read(&path)
+        .ok()
+        .as_deref()
+        .map(training_model_hash);
 
     Json(json!({
         "ok": true,
+        "changed": true,
         "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "resolvedModelPath": path.display().to_string(),
+        "modelBytes": body.len(),
+        "oldHash": old_hash,
+        "newHash": new_hash,
+        "diskHash": disk_hash,
         "updatedAt": now_millis()
     }))
     .into_response()
+}
+
+#[cfg(feature = "frontend-training")]
+async fn post_training_loss_log(
+    State(state): State<AppState>,
+    AxumPath(room_id): AxumPath<String>,
+    Json(body): Json<Value>,
+) -> Response {
+    let room_id = sanitize_room_id(&room_id);
+    let dir = training_loss_log_dir(&state);
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to create loss-log directory: {error}"),
+                room: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let path = dir.join(format!("{}-{}.json", now_millis(), room_id));
+    let bytes = match serde_json::to_vec_pretty(&body) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("Invalid loss log: {error}"),
+                    room: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+    match std::fs::write(&path, bytes) {
+        Ok(()) => Json(json!({
+            "ok": true,
+            "path": path.display().to_string()
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to write loss log: {error}"),
+                room: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "frontend-training")]
+async fn list_training_loss_logs(State(state): State<AppState>) -> impl IntoResponse {
+    let dir = training_loss_log_dir(&state);
+    let mut entries = Vec::new();
+    if let Ok(read_dir) = std::fs::read_dir(&dir) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "logPath".to_string(),
+                    Value::String(path.display().to_string()),
+                );
+            }
+            entries.push(value);
+        }
+    }
+    entries.sort_by(|left, right| {
+        right
+            .get("recordedAt")
+            .and_then(Value::as_u64)
+            .cmp(&left.get("recordedAt").and_then(Value::as_u64))
+    });
+    Json(json!({ "ok": true, "logs": entries }))
 }
 
 async fn unknown_api_route() -> impl IntoResponse {
@@ -272,6 +387,11 @@ fn active_training_model_path(state: &AppState) -> PathBuf {
 }
 
 #[cfg(feature = "frontend-training")]
+fn training_loss_log_dir(state: &AppState) -> PathBuf {
+    state.root.join("logs/training-losses")
+}
+
+#[cfg(feature = "frontend-training")]
 fn validate_training_model(model: &[u8]) -> Result<(), String> {
     if model.len() < 40 || &model[0..4] != b"CFNN" {
         return Err("Model must use the compact CFNN binary format.".to_string());
@@ -284,6 +404,16 @@ fn validate_training_model(model: &[u8]) -> Result<(), String> {
         return Err("Model is too large.".to_string());
     }
     Ok(())
+}
+
+#[cfg(feature = "frontend-training")]
+fn training_model_hash(model: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in model {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 #[cfg(feature = "frontend-training")]

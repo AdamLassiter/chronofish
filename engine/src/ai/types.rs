@@ -1,7 +1,6 @@
 // Runtime AI search. Training-only mutation/scoring/promotion code lives in
 // training.rs so wasm gets a deterministic search surface without file or git
 // automation.
-#[cfg(test)]
 const CHECKMATE_SCORE: i32 = 1_000_000;
 #[cfg(test)]
 const MAX_TURN_PLANS: usize = 32;

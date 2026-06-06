@@ -31,7 +31,7 @@ impl Game {
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
 
         format!(
-            "{{\"turn\":\"{}\",\"timelines\":[{}],\"nextTimelineId\":{},\"checkedRoyals\":[{}]}}",
+            "{{\"turn\":\"{}\",\"timelines\":[{}],\"nextTimelineId\":{},\"nextBlackTimelineId\":{},\"checkedRoyals\":[{}]}}",
             self.turn.as_str(),
             timelines
                 .iter()
@@ -39,6 +39,7 @@ impl Game {
                 .collect::<Vec<_>>()
                 .join(","),
             self.next_timeline_id,
+            self.next_black_timeline_id,
             self.checked_royal_positions()
                 .iter()
                 .map(|position| position_json(*position))
@@ -143,12 +144,14 @@ impl BoardSnapshot {
             .join(",");
 
         format!(
-            "{{\"id\":\"{}:{}\",\"time\":{},\"sideToMove\":\"{}\",\"board\":[{}],\"origin\":{}}}",
+            "{{\"id\":\"{}:{}\",\"time\":{},\"sideToMove\":\"{}\",\"board\":[{}],\"castling\":{},\"enPassant\":{},\"origin\":{}}}",
             timeline_id,
             self.time,
             self.time,
             self.side_to_move.as_str(),
             ranks,
+            self.castling.to_json_bits(),
+            en_passant_json(self.en_passant),
             self.origin.to_json()
         )
     }
@@ -275,6 +278,13 @@ impl CastlingRights {
             black_queenside: true,
         }
     }
+
+    fn to_json_bits(self) -> i32 {
+        self.white_kingside as i32
+            | ((self.white_queenside as i32) << 1)
+            | ((self.black_kingside as i32) << 2)
+            | ((self.black_queenside as i32) << 3)
+    }
 }
 
 impl MoveKind {
@@ -391,6 +401,18 @@ fn piece_json(piece: &Option<Piece>) -> String {
         ),
         None => "null".to_string(),
     }
+}
+
+fn en_passant_json(en_passant: Option<EnPassant>) -> String {
+    en_passant.map_or_else(
+        || "null".to_string(),
+        |target| {
+            format!(
+                "{{\"x\":{},\"y\":{},\"capturedX\":{},\"capturedY\":{}}}",
+                target.x, target.y, target.captured_x, target.captured_y
+            )
+        },
+    )
 }
 
 fn position_json(position: Position) -> String {

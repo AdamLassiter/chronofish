@@ -69,6 +69,8 @@ fn training_routes(router: Router<AppState>) -> Router<AppState> {
     router
         .route("/api/training/status", get(training_status))
         .route("/api/training/model", get(get_training_model).put(put_training_model))
+        .route("/api/training/loss-logs", get(list_training_loss_logs))
+        .route("/api/training/loss-logs/{room_id}", post(post_training_loss_log))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
 }
 

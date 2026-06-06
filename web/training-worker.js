@@ -4,12 +4,20 @@ const PROJECTION_SIZE = 2048;
 const PROJECTION_SEED = 2166136261;
 const MAX_PLAYOUT_PLIES = 10;
 const HIDDEN_LAYERS = [1024, 512, 256];
-const VALUE_EPOCHS_PER_SUBMIT = 8;
+const VALUE_EPOCHS_PER_SUBMIT = 64;
 const POLICY_STEPS_PER_SUBMIT = 64;
+const DEFAULT_BATCH_SIZE = 1024;
+const DEFAULT_VALIDATION_SPLIT = 0.1;
+const DEFAULT_PATIENCE = 12;
+const DEFAULT_WEIGHT_DECAY = 0.00001;
+const PROJECTION_CHUNK_SIZE = 256;
 const LABEL_REQUEST_MIN_TIMEOUT_MS = 30000;
 const LABEL_REQUEST_MAX_TIMEOUT_MS = 120000;
 const LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS = 3;
 const TRAINING_IO_TIMEOUT_MS = 15000;
+let cachedGpuAdapter = null;
+let cachedGpuDevice = null;
+const pipelineCache = new Map();
 
 const PROJECT_FEATURES_SHADER = `
 struct Params {
@@ -42,8 +50,8 @@ fn project_features(@builtin(global_invocation_id) id: vec3<u32>) {
 
   let raw_base = sample * params.input_size;
   var active_count = 0u;
-  for (var input = 0u; input < params.input_size; input = input + 1u) {
-    if (raw_features[raw_base + input] != 0.0) {
+  for (var feature_index = 0u; feature_index < params.input_size; feature_index = feature_index + 1u) {
+    if (raw_features[raw_base + feature_index] != 0.0) {
       active_count = active_count + 1u;
     }
   }
@@ -51,10 +59,10 @@ fn project_features(@builtin(global_invocation_id) id: vec3<u32>) {
   var sum = 0.0;
   if (active_count > 0u) {
     let scale = sqrt(f32(active_count));
-    for (var input = 0u; input < params.input_size; input = input + 1u) {
-      let value = raw_features[raw_base + input];
+    for (var feature_index = 0u; feature_index < params.input_size; feature_index = feature_index + 1u) {
+      let value = raw_features[raw_base + feature_index];
       if (value != 0.0) {
-        let sign = select(-1.0, 1.0, (projection_hash(input, projection, params.seed) & 1u) == 0u);
+        let sign = select(-1.0, 1.0, (projection_hash(feature_index, projection, params.seed) & 1u) == 0u);
         sum = sum + value * sign / scale;
       }
     }
@@ -80,18 +88,51 @@ struct Params {
 @compute @workgroup_size(16, 16)
 fn forward_layer(@builtin(global_invocation_id) id: vec3<u32>) {
   let sample = id.x;
-  let output = id.y;
-  if (sample >= params.sample_count || output >= params.output_size) {
+  let unit = id.y;
+  if (sample >= params.sample_count || unit >= params.output_size) {
     return;
   }
 
-  let row = output * (params.input_size + 1u);
+  let row = unit * (params.input_size + 1u);
   var sum = weights[row + params.input_size];
   let input_base = sample * params.input_size;
-  for (var input = 0u; input < params.input_size; input = input + 1u) {
-    sum = sum + input_values[input_base + input] * weights[row + input];
+  for (var input_index = 0u; input_index < params.input_size; input_index = input_index + 1u) {
+    sum = sum + input_values[input_base + input_index] * weights[row + input_index];
   }
-  output_values[sample * params.output_size + output] = max(sum, 0.0);
+  output_values[sample * params.output_size + unit] = max(sum, 0.0);
+}
+`;
+
+const FORWARD_INDEXED_LAYER_SHADER = `
+struct Params {
+  batch_count: u32,
+  input_size: u32,
+  output_size: u32,
+  _pad: u32,
+};
+
+@group(0) @binding(0) var<storage, read> input_values: array<f32>;
+@group(0) @binding(1) var<storage, read> weights: array<f32>;
+@group(0) @binding(2) var<storage, read_write> output_values: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> batch_indices: array<u32>;
+
+@compute @workgroup_size(16, 16)
+fn forward_layer(@builtin(global_invocation_id) id: vec3<u32>) {
+  let batch_sample = id.x;
+  let unit = id.y;
+  if (batch_sample >= params.batch_count || unit >= params.output_size) {
+    return;
+  }
+
+  let dataset_sample = batch_indices[batch_sample];
+  let row = unit * (params.input_size + 1u);
+  var sum = weights[row + params.input_size];
+  let input_base = dataset_sample * params.input_size;
+  for (var input_index = 0u; input_index < params.input_size; input_index = input_index + 1u) {
+    sum = sum + input_values[input_base + input_index] * weights[row + input_index];
+  }
+  output_values[batch_sample * params.output_size + unit] = max(sum, 0.0);
 }
 `;
 
@@ -117,8 +158,8 @@ fn forward_output(@builtin(global_invocation_id) id: vec3<u32>) {
 
   var sum = weights[params.input_size];
   let input_base = sample * params.input_size;
-  for (var input = 0u; input < params.input_size; input = input + 1u) {
-    sum = sum + input_values[input_base + input] * weights[input];
+  for (var input_index = 0u; input_index < params.input_size; input_index = input_index + 1u) {
+    sum = sum + input_values[input_base + input_index] * weights[input_index];
   }
   predictions[sample] = sum;
 }
@@ -126,7 +167,7 @@ fn forward_output(@builtin(global_invocation_id) id: vec3<u32>) {
 
 const OUTPUT_DELTA_SHADER = `
 struct Params {
-  sample_count: u32,
+  batch_count: u32,
   _pad0: u32,
   _pad1: u32,
   _pad2: u32,
@@ -136,14 +177,17 @@ struct Params {
 @group(0) @binding(1) var<storage, read> labels: array<f32>;
 @group(0) @binding(2) var<storage, read_write> deltas: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> batch_indices: array<u32>;
+@group(0) @binding(5) var<storage, read> label_weights: array<f32>;
 
 @compute @workgroup_size(64)
 fn output_delta(@builtin(global_invocation_id) id: vec3<u32>) {
   let sample = id.x;
-  if (sample >= params.sample_count) {
+  if (sample >= params.batch_count) {
     return;
   }
-  deltas[sample] = predictions[sample] - labels[sample];
+  let dataset_sample = batch_indices[sample];
+  deltas[sample] = (predictions[sample] - labels[dataset_sample]) * label_weights[dataset_sample];
 }
 `;
 
@@ -219,6 +263,10 @@ struct Params {
   input_size: u32,
   output_size: u32,
   learning_rate: f32,
+  weight_decay: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
 };
 
 @group(0) @binding(0) var<storage, read> features: array<f32>;
@@ -228,25 +276,70 @@ struct Params {
 
 @compute @workgroup_size(16, 16)
 fn apply_layer(@builtin(global_invocation_id) id: vec3<u32>) {
-  let input = id.x;
-  let output = id.y;
-  if (input > params.input_size || output >= params.output_size) {
+  let input_index = id.x;
+  let output_index = id.y;
+  if (input_index > params.input_size || output_index >= params.output_size) {
     return;
   }
 
   var gradient = 0.0;
   for (var sample = 0u; sample < params.sample_count; sample = sample + 1u) {
-    let delta = deltas[sample * params.output_size + output];
-    if (input == params.input_size) {
+    let delta = deltas[sample * params.output_size + output_index];
+    if (input_index == params.input_size) {
       gradient = gradient + delta;
     } else {
-      gradient = gradient + delta * features[sample * params.input_size + input];
+      gradient = gradient + delta * features[sample * params.input_size + input_index];
     }
   }
 
-  let weight_index = output * (params.input_size + 1u) + input;
+  let weight_index = output_index * (params.input_size + 1u) + input_index;
+  let decay = select(params.weight_decay * weights[weight_index], 0.0, input_index == params.input_size);
   weights[weight_index] = weights[weight_index]
-    - params.learning_rate * (2.0 * gradient / f32(params.sample_count));
+    - params.learning_rate * ((2.0 * gradient / f32(params.sample_count)) + decay);
+}
+`;
+
+const APPLY_INDEXED_LAYER_SHADER = `
+struct Params {
+  sample_count: u32,
+  input_size: u32,
+  output_size: u32,
+  learning_rate: f32,
+  weight_decay: f32,
+  _pad0: u32,
+  _pad1: u32,
+  _pad2: u32,
+};
+
+@group(0) @binding(0) var<storage, read> features: array<f32>;
+@group(0) @binding(1) var<storage, read> deltas: array<f32>;
+@group(0) @binding(2) var<storage, read_write> weights: array<f32>;
+@group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> batch_indices: array<u32>;
+
+@compute @workgroup_size(16, 16)
+fn apply_layer(@builtin(global_invocation_id) id: vec3<u32>) {
+  let input_index = id.x;
+  let output_index = id.y;
+  if (input_index > params.input_size || output_index >= params.output_size) {
+    return;
+  }
+
+  var gradient = 0.0;
+  for (var sample = 0u; sample < params.sample_count; sample = sample + 1u) {
+    let delta = deltas[sample * params.output_size + output_index];
+    if (input_index == params.input_size) {
+      gradient = gradient + delta;
+    } else {
+      let dataset_sample = batch_indices[sample];
+      gradient = gradient + delta * features[dataset_sample * params.input_size + input_index];
+    }
+  }
+
+  let weight_index = output_index * (params.input_size + 1u) + input_index;
+  let decay = select(params.weight_decay * weights[weight_index], 0.0, input_index == params.input_size);
+  weights[weight_index] = weights[weight_index]
+    - params.learning_rate * ((2.0 * gradient / f32(params.sample_count)) + decay);
 }
 `;
 
@@ -256,6 +349,10 @@ struct Params {
   input_size: u32,
   _pad0: u32,
   learning_rate: f32,
+  weight_decay: f32,
+  _pad1: u32,
+  _pad2: u32,
+  _pad3: u32,
 };
 
 @group(0) @binding(0) var<storage, read> features: array<f32>;
@@ -277,7 +374,8 @@ fn apply_output(@builtin(global_invocation_id) id: vec3<u32>) {
       gradient = gradient + deltas[sample] * features[sample * params.input_size + index];
     }
   }
-  weights[index] = weights[index] - params.learning_rate * (2.0 * gradient / f32(params.sample_count));
+  let decay = select(params.weight_decay * weights[index], 0.0, index == params.input_size);
+  weights[index] = weights[index] - params.learning_rate * ((2.0 * gradient / f32(params.sample_count)) + decay);
 }
 `;
 
@@ -324,47 +422,541 @@ fn train_policy(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 
 self.addEventListener("message", async (event) => {
-  const { id, game, config } = event.data;
+  const { id, type = "train", game, config } = event.data;
   try {
-    const [activeModel, loadedBuffer] = await Promise.all([
+    const metrics = createTrainingMetrics();
+    const normalizedConfig = normalizeTrainingConfig(config);
+    normalizedConfig.metrics = metrics;
+    if (type === "validateLossLogs") {
+      const validation = await timed(metrics, "lossLogValidation", () =>
+        validateLossLogs(normalizedConfig, (message) => {
+          self.postMessage({ id, ok: true, ...message });
+        })
+      );
+      metrics.lossLogValidation = validation;
+      self.postMessage({
+        id,
+        ok: true,
+        type: "lossLogValidation",
+        validation,
+        metrics: metricsSummary(metrics)
+      });
+      return;
+    }
+    const [activeModel, loadedBuffer] = await timed(metrics, "load", () => Promise.all([
       fetchActiveModel(),
       loadReplayBuffer()
-    ]);
+    ]));
     let buffer = loadedBuffer;
-    const pseudoTarget = Math.max(0, config.maxBuffer - buffer.length);
-    const pseudoSamples = await collectPseudoSamples(game, config, activeModel, pseudoTarget);
-    buffer = appendReplaySamples(buffer, pseudoSamples, config.maxBuffer);
-    await saveReplayBuffer(buffer);
+    const samples = await timed(metrics, "collect", () => collectTrainingSamples(game, normalizedConfig, activeModel, (message) => {
+      self.postMessage({ id, ok: true, ...message });
+    }, metrics));
+    metrics.sampleCounts = labelSourceCounts(samples);
+    buffer = appendReplaySamples(buffer, samples, normalizedConfig.maxBuffer);
+    await timed(metrics, "saveReplay", () => saveReplayBuffer(buffer));
+    const labelCounts = labelSourceCounts(buffer);
     self.postMessage({
       id,
       ok: true,
       gpuPhase: true,
       bufferSize: buffer.length,
-      pseudoCount: buffer.filter((sample) => sample.pseudo).length
+      labelCounts,
+      batchSize: normalizedConfig.batchSize,
+      selfPlayWorkers: normalizedConfig.selfPlayWorkers,
+      searchWorkers: normalizedConfig.searchWorkers,
+      metrics: metricsSummary(metrics)
     });
-    const model = await train(buffer, config, activeModel, (epoch, loss) => {
-      self.postMessage({ id, ok: true, epoch, loss });
+    const model = await timed(metrics, "train", () => train(buffer, normalizedConfig, activeModel, (progressMetrics) => {
+      self.postMessage({ id, ok: true, ...progressMetrics, metrics: metricsSummary(metrics) });
+    }));
+    model.metrics = metricsSummary(metrics);
+    self.postMessage({
+      id,
+      ok: true,
+      model,
+      loss: model.trainingLoss,
+      validationLoss: model.validationLoss,
+      bestValidationLoss: model.bestValidationLoss,
+      earlyStopReason: model.earlyStopReason,
+      labelCounts: model.labelCounts,
+      replaySize: model.replayBufferSize,
+      nonZeroWeights: model.nonZeroWeights,
+      metrics: model.metrics
     });
-    self.postMessage({ id, ok: true, model, loss: model.trainingLoss });
   } catch (error) {
     self.postMessage({ id, ok: false, error: error.message });
   }
 });
 
-async function collectPseudoSamples(game, config, activeModel, targetCount) {
-  if (!activeModel?.outputWeights?.length) {
-    throw new Error("GPU/model labeling requires an active model.");
+function normalizeTrainingConfig(config = {}) {
+  return {
+    ...config,
+    labelMode: ["mixed", "search", "selfPlay", "distill"].includes(config.labelMode) ? config.labelMode : "mixed",
+    runSeed: randomRunSeed(),
+    samples: clampInteger(config.samples, 1, 1024, 64),
+    selfPlayWorkers: clampInteger(config.selfPlayWorkers, 1, 8, 2),
+    searchWorkers: clampInteger(config.searchWorkers, 1, 16, 2),
+    explorationTemperature: clampNumber(config.explorationTemperature, 0, 2, 0.25),
+    depth: clampInteger(config.depth, 1, 8, 5),
+    nodes: clampInteger(config.nodes, 1, 131072, 16384),
+    epochs: clampInteger(config.epochs, 1, 65536, 8192),
+    maxBuffer: clampInteger(config.maxBuffer, 16, 16384, 4096),
+    batchSize: clampInteger(config.batchSize, 16, 8192, DEFAULT_BATCH_SIZE),
+    validationSplit: clampNumber(config.validationSplit, 0, 0.3, DEFAULT_VALIDATION_SPLIT),
+    validationInterval: clampInteger(config.validationInterval, 16, 4096, 256),
+    patience: clampInteger(config.patience, 1, 64, DEFAULT_PATIENCE),
+    weightDecay: clampNumber(config.weightDecay, 0, 0.01, DEFAULT_WEIGHT_DECAY),
+    lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4)
+  };
+}
+
+function createTrainingMetrics() {
+  return {
+    startedAt: performance.now(),
+    phases: Object.create(null)
+  };
+}
+
+async function timed(metrics, name, fn) {
+  if (!metrics) {
+    return fn();
   }
-  const samples = Math.min(config.maxBuffer, Math.max(targetCount, config.samples * 8));
-  const pseudoConfig = { ...config, samples };
-  const positions = await collectSamples(game, pseudoConfig, true, () => {});
+  const startedAt = performance.now();
+  try {
+    return await fn();
+  } finally {
+    const elapsed = performance.now() - startedAt;
+    metrics.phases[name] = (metrics.phases[name] ?? 0) + elapsed;
+  }
+}
+
+function metricsSummary(metrics) {
+  if (!metrics) {
+    return null;
+  }
+  const phases = {};
+  for (const [name, ms] of Object.entries(metrics.phases)) {
+    phases[name] = Math.round(ms);
+  }
+  const sampleRates = {};
+  for (const [kind, count] of Object.entries(metrics.sampleCounts ?? {})) {
+    const phaseName = `${kind}Labels`;
+    const phaseMs = metrics.phases[phaseName] ?? metrics.phases.collect;
+    if (phaseMs > 0) {
+      sampleRates[kind] = Number((count / (phaseMs / 1000)).toFixed(2));
+    }
+  }
+  if (metrics.searchPositionCount && metrics.phases.searchPositions > 0) {
+    sampleRates.searchPositions = Number((metrics.searchPositionCount / (metrics.phases.searchPositions / 1000)).toFixed(2));
+  }
+  if (metrics.searchLabelCount && metrics.phases.searchLabels > 0) {
+    sampleRates.searchLabels = Number((metrics.searchLabelCount / (metrics.phases.searchLabels / 1000)).toFixed(2));
+  }
+  return {
+    totalMs: Math.round(performance.now() - metrics.startedAt),
+    phases,
+    sampleRates,
+    lossLogValidation: metrics.lossLogValidation ?? null
+  };
+}
+
+async function collectTrainingSamples(game, config, activeModel, progress, metrics = null) {
+  const collectors = [];
+  if (config.labelMode === "mixed" || config.labelMode === "search") {
+    collectors.push(() => collectSearchSamples(game, config, progress));
+  }
+  if (config.labelMode === "mixed" || config.labelMode === "selfPlay") {
+    collectors.push(() => timed(metrics, "outcomeLabels", () => collectOutcomeSamples(game, config, progress)));
+  }
+  if (config.labelMode === "mixed" || config.labelMode === "distill") {
+    collectors.push(() => timed(metrics, "distillLabels", () => collectDistilledSamples(game, config, activeModel, progress)));
+  }
+
+  const collected = await Promise.allSettled(collectors.map((collector) => collector()));
+  const results = collected
+    .filter((result) => result.status === "fulfilled")
+    .flatMap((result) => result.value);
+  if (results.length > 0) {
+    return results;
+  }
+  if (activeModel?.outputWeights?.length && config.labelMode !== "distill") {
+    return collectDistilledSamples(game, config, activeModel, progress);
+  }
+  throw new Error("No GPU training labels were collected.");
+}
+
+async function collectSearchSamples(game, config, progress) {
+  const target = config.labelMode === "mixed" ? Math.ceil(config.samples * 0.6) : config.samples;
+  const positions = await timed(config.metrics, "searchPositions", () => collectGpuPositions(game, config, target, progress, "search"));
+  if (config.metrics) {
+    config.metrics.searchPositionCount = positions.length;
+  }
+  const workerCount = Math.min(positions.length, config.searchWorkers ?? 1);
+  const samples = new Array(positions.length);
+  let nextPosition = 0;
+  let collected = 0;
+  progress({ sampleCount: positions.length, labelWorkers: workerCount, labelKind: "search", labelPhase: "labels" });
+  await timed(config.metrics, "searchLabels", () =>
+    Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runSearchWorker(workerIndex)))
+  );
+  const filtered = samples.filter(Boolean);
+  if (config.metrics) {
+    config.metrics.searchLabelCount = filtered.length;
+  }
+  return filtered;
+
+  async function runSearchWorker(workerIndex) {
+    const ai = new Worker("./ai-worker.js", { type: "module" });
+    try {
+      while (nextPosition < positions.length) {
+        const index = nextPosition;
+        nextPosition += 1;
+        const position = positions[index];
+        samples[index] = await searchLabelSample(ai, position, index, workerIndex);
+        collected += samples[index] ? 1 : 0;
+        progress({ collected, sampleCount: positions.length, labelWorkers: workerCount, labelKind: "search", labelPhase: "labels" });
+      }
+    } finally {
+      ai.terminate();
+    }
+  }
+
+  async function searchLabelSample(ai, position, index, workerIndex) {
+    try {
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: position.game,
+        depth: config.depth,
+        nodes: config.nodes,
+        timeMs: workerSearchTimeMs(config),
+        gpuMode: "full",
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed("search", index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ 0x51a7_0001))
+      }, workerRequestTimeout(config));
+      const result = response.result;
+      if (!result?.moves?.length) {
+        return null;
+      }
+      return {
+        ...position.sample,
+        label: normalizeSearchScore(result.score ?? 0),
+        policy: policyBucket(result.moves[0]),
+        labelKind: "search",
+        labelWeight: 1.0,
+        pseudo: false
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function collectOutcomeSamples(game, config, progress) {
+  const target = config.labelMode === "mixed" ? Math.floor(config.samples * 0.4) : config.samples;
+  if (target <= 0) {
+    return [];
+  }
+  const workerCount = Math.min(target, config.selfPlayWorkers ?? 1);
+  const targets = splitWork(target, workerCount);
+  let collected = 0;
+  const report = (count) => {
+    collected += count;
+    progress({
+      collected,
+      sampleCount: target,
+      labelWorkers: workerCount,
+      labelKind: "outcome"
+    });
+  };
+  progress({
+    sampleCount: target,
+    labelWorkers: workerCount,
+    labelKind: "outcome"
+  });
+  const results = await Promise.all(targets.map((count, workerIndex) =>
+    collectOutcomeRollout(game, config, count, workerIndex, report)
+  ));
+  return results.flat().slice(0, target);
+}
+
+async function collectOutcomeRollout(game, config, target, workerIndex, progress) {
+  const ai = new Worker("./ai-worker.js", { type: "module" });
+  const encoder = new Worker("./training-label-worker.js", { type: "module" });
+  const samples = [];
+  try {
+    let current = cloneGame(game);
+    current = await warmupSelfPlayPosition(ai, current, config, workerIndex);
+    const maxPlies = Math.max(MAX_PLAYOUT_PLIES, target + workerIndex);
+    for (let ply = 0; ply < maxPlies && samples.length < target; ply += 1) {
+      const beforeTurn = current.turn;
+      const encoded = await encodePosition(encoder, current);
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: current,
+        depth: config.depth,
+        nodes: config.nodes,
+        timeMs: workerSearchTimeMs(config),
+        gpuMode: "full",
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed("outcome", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0x0c70_0001))
+      }, workerRequestTimeout(config));
+      const result = response.result;
+      const move = result?.moves?.[0];
+      if (!move) {
+        break;
+      }
+      samples.push({
+        ...encoded,
+        label: normalizeSearchScore(result.score ?? 0),
+        policy: policyBucket(move),
+        labelKind: "outcome",
+        labelWeight: 1.25,
+        outcomeTurn: beforeTurn,
+        ply: ply + workerIndex * MAX_PLAYOUT_PLIES
+      });
+      progress(1);
+      const previous = current;
+      const applied = await requestWorker(ai, {
+        type: "applyMove",
+        game: current,
+        move
+      }, workerRequestTimeout(config));
+      current = applied.game;
+      const winner = royalCaptureWinner(previous, current, beforeTurn);
+      if (winner) {
+        return backfillOutcomeLabels(samples, winner);
+      }
+      const status = await requestWorker(ai, {
+        type: "submitTurn",
+        game: current
+      }, workerRequestTimeout(config));
+      if (status.status?.terminal && status.status.winner) {
+        return backfillOutcomeLabels(samples, status.status.winner);
+      }
+      if (status.status?.complete) {
+        current = { ...current, turn: status.status.nextTurn };
+      }
+    }
+    return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+  } catch {
+    return samplesFromPartialOutcome(samples);
+  } finally {
+    ai.terminate();
+    encoder.terminate();
+  }
+}
+
+function splitWork(total, workers) {
+  return Array.from({ length: workers }, (_, index) =>
+    Math.floor(total / workers) + (index < total % workers ? 1 : 0)
+  ).filter((count) => count > 0);
+}
+
+async function warmupSelfPlayPosition(ai, game, config, workerIndex) {
+  let current = cloneGame(game);
+  const warmupPlies = workerIndex === 0 ? 0 : 1 + (workerIndex % Math.max(1, MAX_PLAYOUT_PLIES - 1));
+  for (let ply = 0; ply < warmupPlies; ply += 1) {
+    try {
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: current,
+        depth: Math.max(1, Math.min(2, config.depth)),
+        nodes: Math.max(1, Math.min(1024, config.nodes)),
+        timeMs: Math.min(5000, workerSearchTimeMs(config)),
+        gpuMode: "full",
+        partitionIndex: workerIndex,
+        partitionCount: config.selfPlayWorkers ?? 1,
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed("warmup", ply, config.runSeed ^ workerIndex ^ 0x0aa5_0001)
+      }, workerRequestTimeout({ ...config, nodes: 1024 }));
+      const move = response.result?.moves?.[0];
+      if (!move) {
+        break;
+      }
+      const applied = await requestWorker(ai, {
+        type: "applyMove",
+        game: current,
+        move
+      }, workerRequestTimeout(config));
+      current = applied.game;
+      const status = await requestWorker(ai, {
+        type: "submitTurn",
+        game: current
+      }, workerRequestTimeout(config));
+      if (status.status?.terminal) {
+        break;
+      }
+      if (status.status?.complete) {
+        current = { ...current, turn: status.status.nextTurn };
+      }
+    } catch {
+      break;
+    }
+  }
+  return current;
+}
+
+async function collectDistilledSamples(game, config, activeModel, progress) {
+  if (!activeModel?.outputWeights?.length) {
+    return [];
+  }
+  const positions = await collectSamples(game, config, true, (collected, sampleCount, labelWorkers) => {
+    progress({ collected, sampleCount, labelWorkers, labelKind: "distilled" });
+  });
   const labels = await predictValues(positions, activeModel);
   return positions.map((sample, index) => ({
     ...sample,
     label: labels[index],
-    policy: 0,
+    policy: null,
+    labelKind: "distilled",
+    labelWeight: 0.25,
     pseudo: true
   }));
+}
+
+async function collectGpuPositions(game, config, target, progress, labelKind) {
+  if (target <= 0) {
+    return [];
+  }
+  const workerCount = Math.min(target, Math.max(1, config.searchWorkers ?? 1));
+  const positions = new Array(target);
+  let nextJob = 0;
+  let generated = 0;
+  progress({ sampleCount: target, labelWorkers: workerCount, labelKind, labelPhase: "positions" });
+  await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runPositionWorker(workerIndex)));
+  return positions.filter((position) => position?.sample?.features?.length);
+
+  async function runPositionWorker(workerIndex) {
+    const ai = new Worker("./ai-worker.js", { type: "module" });
+    const encoder = new Worker("./training-label-worker.js", { type: "module" });
+    const local = [];
+    try {
+      while (nextJob < target) {
+        const index = nextJob;
+        nextJob += 1;
+        const positionGame = await generatePositionGame(ai, game, config, index, workerIndex);
+        local.push({ index, game: positionGame });
+        generated += 1;
+        progress({ collected: generated, sampleCount: target, labelWorkers: workerCount, labelKind, labelPhase: "positions" });
+      }
+      let samples = [];
+      try {
+        samples = await encodePositions(encoder, local.map((entry) => entry.game));
+      } catch {
+        samples = [];
+      }
+      for (let index = 0; index < local.length; index += 1) {
+        const entry = local[index];
+        if (!samples[index]?.features?.length) {
+          continue;
+        }
+        positions[entry.index] = {
+          game: entry.game,
+          sample: samples[index]
+        };
+      }
+    } finally {
+      ai.terminate();
+      encoder.terminate();
+    }
+  }
+}
+
+async function generatePositionGame(ai, game, config, index, workerIndex) {
+  let current = cloneGame(game);
+  const plies = samplePlies(index, false);
+  for (let ply = 0; ply < plies; ply += 1) {
+    try {
+      const shallowConfig = { ...config, nodes: Math.max(1, Math.min(512, config.nodes)) };
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: current,
+        depth: Math.max(1, Math.min(2, config.depth)),
+        nodes: shallowConfig.nodes,
+        timeMs: 3000,
+        gpuMode: "full",
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed("position", index * MAX_PLAYOUT_PLIES + ply, config.runSeed ^ workerIndex ^ 0x9051_0001)
+      }, workerRequestTimeout(shallowConfig));
+      const move = response.result?.moves?.[0];
+      if (!move) {
+        break;
+      }
+      const applied = await requestWorker(ai, { type: "applyMove", game: current, move }, workerRequestTimeout(config));
+      current = applied.game;
+      const status = await requestWorker(ai, { type: "submitTurn", game: current }, workerRequestTimeout(config));
+      if (status.status?.terminal) {
+        break;
+      }
+      if (status.status?.complete) {
+        current = { ...current, turn: status.status.nextTurn };
+      }
+    } catch {
+      break;
+    }
+  }
+  return current;
+}
+
+function samplesFromPartialOutcome(samples) {
+  return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+}
+
+function backfillOutcomeLabels(samples, winner) {
+  const maxPly = samples.at(-1)?.ply ?? 0;
+  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
+    ...sample,
+    label: (outcomeTurn === winner ? 1 : -1) * Math.pow(0.96, maxPly - ply),
+    labelKind: "outcome",
+    labelWeight: 1.25
+  }));
+}
+
+function royalCaptureWinner(before, after, mover) {
+  const opponent = mover === "white" ? "black" : "white";
+  return royalCount(after, opponent) < royalCount(before, opponent) ? mover : null;
+}
+
+function royalCount(game, color) {
+  let count = 0;
+  for (const timeline of game.timelines ?? []) {
+    const board = latestBoard(timeline);
+    for (const row of board?.board ?? []) {
+      for (const piece of row ?? []) {
+        if (piece?.color === color && ["king", "royalQueen"].includes(piece.type)) {
+          count += 1;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function latestBoard(timeline) {
+  return (timeline.boards ?? []).reduce(
+    (latest, board) => !latest || board.time > latest.time ? board : latest,
+    null
+  );
+}
+
+async function encodePosition(worker, game) {
+  const response = await requestWorker(worker, {
+    type: "sample",
+    game,
+    encodeOnly: true
+  }, workerRequestTimeout({ nodes: 1 }));
+  return response.sample;
+}
+
+async function encodePositions(worker, games) {
+  if (!games.length) {
+    return [];
+  }
+  const response = await requestWorker(worker, {
+    type: "batchSample",
+    games
+  }, workerRequestTimeout({ nodes: games.length }));
+  return response.samples ?? [];
 }
 
 async function collectSamples(game, config, encodeOnly, progress) {
@@ -413,26 +1005,26 @@ function labelSample(worker, job, config, encodeOnly) {
     seed: job.seed,
     plies: job.plies
   };
-  return workerRequest(worker, {
+  return requestWorker(worker, {
     ...payload,
     timeMs: workerSearchTimeMs(payload)
-  });
+  }).then((response) => response.sample);
 }
 
-function workerRequest(worker, payload) {
+function requestWorker(worker, payload, timeoutMs = workerRequestTimeout(payload)) {
   return new Promise((resolve, reject) => {
     const messageId = crypto.randomUUID();
     const timeout = setTimeout(() => {
       cleanup();
       reject(new Error("Position worker timed out."));
-    }, workerRequestTimeout(payload));
+    }, timeoutMs);
     const handleMessage = (event) => {
       if (event.data.id !== messageId) {
         return;
       }
       cleanup();
       if (event.data.ok) {
-        resolve(event.data.sample);
+        resolve(event.data);
       } else {
         reject(new Error(event.data.error));
       }
@@ -455,6 +1047,62 @@ function workerRequest(worker, payload) {
       ...payload
     });
   });
+}
+
+function normalizeSearchScore(score) {
+  return Math.max(-1, Math.min(1, score / 20000));
+}
+
+function policyBucket(move) {
+  if (!move) {
+    return null;
+  }
+  const values = [
+    move.from?.timelineId ?? 0,
+    move.from?.time ?? 0,
+    move.from?.x ?? 0,
+    move.from?.y ?? 0,
+    move.to?.timelineId ?? 0,
+    move.to?.time ?? 0,
+    move.to?.x ?? 0,
+    move.to?.y ?? 0
+  ];
+  let hash = 2166136261;
+  for (const value of values) {
+    hash ^= value & 0xff;
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash % POLICY_BUCKETS;
+}
+
+function cloneGame(game) {
+  return JSON.parse(JSON.stringify(game));
+}
+
+function labelSourceCounts(samples) {
+  return samples.reduce((counts, sample) => {
+    const key = sample.labelKind ?? (sample.pseudo ? "distilled" : "unknown");
+    counts[key] = (counts[key] ?? 0) + 1;
+    return counts;
+  }, {});
+}
+
+function clampInteger(value, min, max, fallback) {
+  return Math.round(clampNumber(value, min, max, fallback));
+}
+
+function clampNumber(value, min, max, fallback) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, number));
+}
+
+function randomRunSeed() {
+  const values = new Uint32Array(1);
+  crypto.getRandomValues(values);
+  return values[0] >>> 0;
 }
 
 function workerRequestTimeout(payload) {
@@ -505,6 +1153,16 @@ function sampleSeed(prefix, index, salt) {
   return hash >>> 0;
 }
 
+function searchSeed(value, salt) {
+  let hash = salt >>> 0;
+  const text = JSON.stringify(value ?? null);
+  for (let offset = 0; offset < text.length; offset += 1) {
+    hash ^= text.charCodeAt(offset);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
 async function train(samples, config, activeModel, progress) {
   if (!globalThis.navigator?.gpu) {
     throw new Error("WebGPU is unavailable in this browser.");
@@ -513,14 +1171,13 @@ async function train(samples, config, activeModel, progress) {
     throw new Error("No samples were collected.");
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   const value = await trainValue(device, samples, config, activeModel, progress);
   const policy = await trainPolicy(device, samples, config, activeModel);
-  const model = encodeCompactModel({
+  let model = encodeCompactModel({
     projectionSize: PROJECTION_SIZE,
     projectionSeed: PROJECTION_SEED,
     hiddenLayers: HIDDEN_LAYERS,
@@ -530,7 +1187,29 @@ async function train(samples, config, activeModel, progress) {
     scale: 1,
     bias: 0
   });
+  if (activeModel?.bytes && byteArraysEqual(model, activeModel.bytes) && value.finalHiddenWeights && value.finalWeights) {
+    const finalModel = encodeCompactModel({
+      projectionSize: PROJECTION_SIZE,
+      projectionSeed: PROJECTION_SEED,
+      hiddenLayers: HIDDEN_LAYERS,
+      hiddenWeights: value.finalHiddenWeights,
+      outputWeights: value.finalWeights,
+      policyLogits: policy,
+      scale: 1,
+      bias: 0
+    });
+    if (!byteArraysEqual(finalModel, activeModel.bytes)) {
+      model = finalModel;
+      value.earlyStopReason = value.earlyStopReason
+        ? `${value.earlyStopReason}; exported final changed checkpoint`
+        : "exported final changed checkpoint";
+    }
+  }
   model.trainingLoss = value.loss;
+  model.validationLoss = value.validationLoss;
+  model.bestValidationLoss = value.bestValidationLoss;
+  model.earlyStopReason = value.earlyStopReason;
+  model.labelCounts = labelSourceCounts(samples);
   model.nonZeroWeights = countNonZero(value.weights) + countNonZero(value.hiddenWeights);
   model.replayBufferSize = samples.length;
   return model;
@@ -543,9 +1222,15 @@ async function trainValue(device, samples, config, activeModel, progress) {
 
   const sampleCount = samples.length;
   const labels = new Float32Array(sampleCount);
+  const labelWeights = new Float32Array(sampleCount);
   for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
     labels[sampleIndex] = samples[sampleIndex].label;
+    labelWeights[sampleIndex] = samples[sampleIndex].labelWeight ?? 1;
   }
+  const split = splitValidationSamples(samples, config.validationSplit);
+  const trainIndices = split.trainIndices.length ? split.trainIndices : split.validationIndices;
+  const validationIndices = split.validationIndices;
+  const batchSize = Math.min(config.batchSize, Math.max(1, trainIndices.length));
 
   const initialHidden = modelArchitectureMatches(activeModel)
     ? activeModel.hiddenWeights
@@ -559,8 +1244,11 @@ async function trainValue(device, samples, config, activeModel, progress) {
     outputWeights[outputSize] = labels.reduce((sum, value) => sum + value, 0) / labels.length;
   }
 
-  const featureBuffer = await projectSamplesToBuffer(device, samples, PROJECTION_SIZE, PROJECTION_SEED);
+  const featureBuffer = await timed(config.metrics, "projection", () =>
+    projectSamplesToBuffer(device, samples, PROJECTION_SIZE, PROJECTION_SEED)
+  );
   const labelBuffer = storageBuffer(device, labels, GPUBufferUsage.STORAGE);
+  const labelWeightBuffer = storageBuffer(device, labelWeights, GPUBufferUsage.STORAGE);
   const weightBuffers = layerWeights.map((weights) =>
     storageBuffer(device, weights, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC)
   );
@@ -570,25 +1258,31 @@ async function trainValue(device, samples, config, activeModel, progress) {
     GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
   );
   const activationBuffers = HIDDEN_LAYERS.map((layerSize) => device.createBuffer({
-    size: align4(sampleCount * layerSize * Float32Array.BYTES_PER_ELEMENT),
+    size: align4(batchSize * layerSize * Float32Array.BYTES_PER_ELEMENT),
     usage: GPUBufferUsage.STORAGE
   }));
   const deltaBuffers = HIDDEN_LAYERS.map((layerSize) => device.createBuffer({
-    size: align4(sampleCount * layerSize * Float32Array.BYTES_PER_ELEMENT),
+    size: align4(batchSize * layerSize * Float32Array.BYTES_PER_ELEMENT),
     usage: GPUBufferUsage.STORAGE
   }));
   const predictionBuffer = device.createBuffer({
-    size: align4(sampleCount * Float32Array.BYTES_PER_ELEMENT),
+    size: align4(batchSize * Float32Array.BYTES_PER_ELEMENT),
     usage: GPUBufferUsage.STORAGE
   });
   const outputDeltaBuffer = device.createBuffer({
-    size: align4(sampleCount * Float32Array.BYTES_PER_ELEMENT),
+    size: align4(batchSize * Float32Array.BYTES_PER_ELEMENT),
     usage: GPUBufferUsage.STORAGE
   });
+  const batchesPerSubmit = Math.min(VALUE_EPOCHS_PER_SUBMIT, Math.max(1, config.epochs));
+  const validationInterval = Math.max(batchesPerSubmit, config.validationInterval ?? 256);
+  const batchIndexBuffers = Array.from({ length: batchesPerSubmit }, () => device.createBuffer({
+    size: align4(batchSize * Uint32Array.BYTES_PER_ELEMENT),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+  }));
   const forwardLayerParams = HIDDEN_LAYERS.map((layerSize, layerIndex) =>
     layerParamsBuffer(
       device,
-      sampleCount,
+      batchSize,
       layerIndex === 0 ? PROJECTION_SIZE : HIDDEN_LAYERS[layerIndex - 1],
       layerSize,
       0
@@ -597,68 +1291,70 @@ async function trainValue(device, samples, config, activeModel, progress) {
   const applyLayerParams = HIDDEN_LAYERS.map((layerSize, layerIndex) =>
     layerParamsBuffer(
       device,
-      sampleCount,
+      batchSize,
       layerIndex === 0 ? PROJECTION_SIZE : HIDDEN_LAYERS[layerIndex - 1],
       layerSize,
-      config.learningRate
+      config.learningRate,
+      config.weightDecay
     )
   );
-  const forwardOutputParams = outputParamsBuffer(device, sampleCount, outputSize, 0);
-  const applyOutputParams = outputParamsBuffer(device, sampleCount, outputSize, config.learningRate);
-  const outputDeltaParams = outputDeltaParamsBuffer(device, sampleCount);
+  const forwardOutputParams = outputParamsBuffer(device, batchSize, outputSize, 0);
+  const applyOutputParams = outputParamsBuffer(device, batchSize, outputSize, config.learningRate, config.weightDecay);
+  const outputDeltaParams = outputDeltaParamsBuffer(device, batchSize);
   const lastHiddenDeltaParams = hiddenDeltaParamsBuffer(
     device,
-    sampleCount,
+    batchSize,
     HIDDEN_LAYERS.at(-1),
     0
   );
   const hiddenDeltaParams = HIDDEN_LAYERS.slice(0, -1).map((layerSize, layerIndex) =>
-    hiddenDeltaParamsBuffer(device, sampleCount, layerSize, HIDDEN_LAYERS[layerIndex + 1])
+    hiddenDeltaParamsBuffer(device, batchSize, layerSize, HIDDEN_LAYERS[layerIndex + 1])
   );
 
-  const forwardLayerPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: FORWARD_LAYER_SHADER }), entryPoint: "forward_layer" }
-  });
-  const forwardOutputPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: FORWARD_OUTPUT_SHADER }), entryPoint: "forward_output" }
-  });
-  const outputDeltaPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: OUTPUT_DELTA_SHADER }), entryPoint: "output_delta" }
-  });
-  const lastHiddenDeltaPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: HIDDEN3_DELTA_SHADER }), entryPoint: "hidden3_delta" }
-  });
-  const hiddenDeltaPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: HIDDEN_DELTA_SHADER }), entryPoint: "hidden_delta" }
-  });
-  const applyLayerPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: APPLY_LAYER_SHADER }), entryPoint: "apply_layer" }
-  });
-  const applyOutputPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: APPLY_OUTPUT_SHADER }), entryPoint: "apply_output" }
-  });
+  const forwardIndexedLayerPipeline = await createComputePipelineChecked(device, "forward_indexed_layer", FORWARD_INDEXED_LAYER_SHADER, "forward_layer");
+  const forwardLayerPipeline = await createComputePipelineChecked(device, "forward_layer", FORWARD_LAYER_SHADER, "forward_layer");
+  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
+  const outputDeltaPipeline = await createComputePipelineChecked(device, "output_delta", OUTPUT_DELTA_SHADER, "output_delta");
+  const lastHiddenDeltaPipeline = await createComputePipelineChecked(device, "hidden3_delta", HIDDEN3_DELTA_SHADER, "hidden3_delta");
+  const hiddenDeltaPipeline = await createComputePipelineChecked(device, "hidden_delta", HIDDEN_DELTA_SHADER, "hidden_delta");
+  const applyIndexedLayerPipeline = await createComputePipelineChecked(device, "apply_indexed_layer", APPLY_INDEXED_LAYER_SHADER, "apply_layer");
+  const applyLayerPipeline = await createComputePipelineChecked(device, "apply_layer", APPLY_LAYER_SHADER, "apply_layer");
+  const applyOutputPipeline = await createComputePipelineChecked(device, "apply_output", APPLY_OUTPUT_SHADER, "apply_output");
+
+  let bestValidationLoss = Number.POSITIVE_INFINITY;
+  let bestOutputWeights = new Float32Array(outputWeights);
+  let bestLayerWeights = layerWeights.map((weights) => new Float32Array(weights));
+  let latestOutputWeights = new Float32Array(outputWeights);
+  let latestLayerWeights = layerWeights.map((weights) => new Float32Array(weights));
+  let epochsWithoutImprovement = 0;
+  let lastTrainLoss = Number.NaN;
+  let lastValidationLoss = Number.NaN;
+  let earlyStopReason = "";
 
   for (let epoch = 1; epoch <= config.epochs;) {
-    const batchEnd = Math.min(config.epochs, epoch + VALUE_EPOCHS_PER_SUBMIT - 1);
+    const batchEnd = Math.min(config.epochs, epoch + batchesPerSubmit - 1);
     const encoder = device.createCommandEncoder();
     for (; epoch <= batchEnd; epoch += 1) {
+      const batchSlot = (epoch - 1) % batchesPerSubmit;
+      const batchIndexBuffer = batchIndexBuffers[batchSlot];
+      const epochOrder = shuffledIndices(trainIndices, epoch, split.seed);
+      const batchStart = ((epoch - 1) * batchSize) % epochOrder.length;
+      const batch = new Uint32Array(batchSize);
+      for (let index = 0; index < batchSize; index += 1) {
+        batch[index] = epochOrder[(batchStart + index) % epochOrder.length];
+      }
+      device.queue.writeBuffer(batchIndexBuffer, 0, batch);
       for (let layerIndex = 0; layerIndex < HIDDEN_LAYERS.length; layerIndex += 1) {
         const inputSize = layerIndex === 0 ? PROJECTION_SIZE : HIDDEN_LAYERS[layerIndex - 1];
         const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1];
         const outputSizeForLayer = HIDDEN_LAYERS[layerIndex];
-        encodePipeline(device, encoder, forwardLayerPipeline, [
+        encodePipeline(device, encoder, layerIndex === 0 ? forwardIndexedLayerPipeline : forwardLayerPipeline, [
           inputBuffer,
           weightBuffers[layerIndex],
           activationBuffers[layerIndex],
-          forwardLayerParams[layerIndex]
-        ], Math.ceil(sampleCount / 16), Math.ceil(outputSizeForLayer / 16));
+          forwardLayerParams[layerIndex],
+          ...(layerIndex === 0 ? [batchIndexBuffer] : [])
+        ], Math.ceil(batchSize / 16), Math.ceil(outputSizeForLayer / 16));
       }
 
       encodePipeline(device, encoder, forwardOutputPipeline, [
@@ -666,14 +1362,16 @@ async function trainValue(device, samples, config, activeModel, progress) {
         outputWeightBuffer,
         predictionBuffer,
         forwardOutputParams
-      ], Math.ceil(sampleCount / 64));
+      ], Math.ceil(batchSize / 64));
 
       encodePipeline(device, encoder, outputDeltaPipeline, [
         predictionBuffer,
         labelBuffer,
         outputDeltaBuffer,
-        outputDeltaParams
-      ], Math.ceil(sampleCount / 64));
+        outputDeltaParams,
+        batchIndexBuffer,
+        labelWeightBuffer
+      ], Math.ceil(batchSize / 64));
 
       const lastLayerIndex = HIDDEN_LAYERS.length - 1;
       encodePipeline(device, encoder, lastHiddenDeltaPipeline, [
@@ -682,7 +1380,7 @@ async function trainValue(device, samples, config, activeModel, progress) {
         outputWeightBuffer,
         deltaBuffers[lastLayerIndex],
         lastHiddenDeltaParams
-      ], Math.ceil(sampleCount / 16), Math.ceil(HIDDEN_LAYERS[lastLayerIndex] / 16));
+      ], Math.ceil(batchSize / 16), Math.ceil(HIDDEN_LAYERS[lastLayerIndex] / 16));
 
       for (let layerIndex = HIDDEN_LAYERS.length - 2; layerIndex >= 0; layerIndex -= 1) {
         encodePipeline(device, encoder, hiddenDeltaPipeline, [
@@ -691,7 +1389,7 @@ async function trainValue(device, samples, config, activeModel, progress) {
           weightBuffers[layerIndex + 1],
           deltaBuffers[layerIndex],
           hiddenDeltaParams[layerIndex]
-        ], Math.ceil(sampleCount / 16), Math.ceil(HIDDEN_LAYERS[layerIndex] / 16));
+        ], Math.ceil(batchSize / 16), Math.ceil(HIDDEN_LAYERS[layerIndex] / 16));
       }
 
       encodePipeline(device, encoder, applyOutputPipeline, [
@@ -705,47 +1403,105 @@ async function trainValue(device, samples, config, activeModel, progress) {
         const inputSize = layerIndex === 0 ? PROJECTION_SIZE : HIDDEN_LAYERS[layerIndex - 1];
         const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1];
         const outputSizeForLayer = HIDDEN_LAYERS[layerIndex];
-        encodePipeline(device, encoder, applyLayerPipeline, [
+        encodePipeline(device, encoder, layerIndex === 0 ? applyIndexedLayerPipeline : applyLayerPipeline, [
           inputBuffer,
           deltaBuffers[layerIndex],
           weightBuffers[layerIndex],
-          applyLayerParams[layerIndex]
+          applyLayerParams[layerIndex],
+          ...(layerIndex === 0 ? [batchIndexBuffer] : [])
         ], Math.ceil((inputSize + 1) / 16), Math.ceil(outputSizeForLayer / 16));
       }
     }
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
-    progress(batchEnd, 0);
+    if (batchEnd % validationInterval !== 0 && batchEnd < config.epochs) {
+      continue;
+    }
+    const { currentOutput, currentLayers, currentModel } = await timed(config.metrics, "weightReadback", async () => {
+      const readOutput = await readFloats(device, outputWeightBuffer, outputWeights.byteLength);
+      const readLayers = [];
+      for (let layerIndex = 0; layerIndex < weightBuffers.length; layerIndex += 1) {
+        readLayers.push(await readFloats(device, weightBuffers[layerIndex], layerWeights[layerIndex].byteLength));
+      }
+      return {
+        currentOutput: readOutput,
+        currentLayers: readLayers,
+        currentModel: {
+          projectionSize: PROJECTION_SIZE,
+          projectionSeed: PROJECTION_SEED,
+          hiddenLayers: HIDDEN_LAYERS,
+          hiddenWeights: concatFloat32(readLayers),
+          outputWeights: readOutput,
+          scale: 1
+        }
+      };
+    });
+    latestOutputWeights = currentOutput;
+    latestLayerWeights = currentLayers.map((weights) => new Float32Array(weights));
+    lastTrainLoss = await timed(config.metrics, "trainLoss", () =>
+      predictionLossOnGpu(device, indexSamples(samples, trainIndices), currentModel)
+    );
+    lastValidationLoss = validationIndices.length
+      ? await timed(config.metrics, "validationLoss", () =>
+        predictionLossOnGpu(device, indexSamples(samples, validationIndices), currentModel)
+      )
+      : lastTrainLoss;
+    if (lastValidationLoss + 1e-6 < bestValidationLoss) {
+      bestValidationLoss = lastValidationLoss;
+      bestOutputWeights = currentOutput;
+      bestLayerWeights = currentLayers.map((weights) => new Float32Array(weights));
+      epochsWithoutImprovement = 0;
+    } else {
+      epochsWithoutImprovement += 1;
+    }
+    progress({
+      epoch: batchEnd,
+      loss: lastTrainLoss,
+      validationLoss: lastValidationLoss,
+      bestValidationLoss,
+      epochsWithoutImprovement,
+      batchSize,
+      batchesPerSubmit,
+      validationInterval,
+      replaySize: sampleCount,
+      labelCounts: labelSourceCounts(samples)
+    });
+    if (epochsWithoutImprovement >= config.patience) {
+      earlyStopReason = `validation did not improve for ${config.patience} checks`;
+      break;
+    }
   }
 
-  const trainedOutput = await readFloats(device, outputWeightBuffer, outputWeights.byteLength);
-  const trainedLayers = [];
-  for (let layerIndex = 0; layerIndex < weightBuffers.length; layerIndex += 1) {
-    trainedLayers.push(await readFloats(device, weightBuffers[layerIndex], layerWeights[layerIndex].byteLength));
-  }
-  const trainedHidden = concatFloat32(trainedLayers);
+  const trainedOutput = bestOutputWeights;
+  const trainedHidden = concatFloat32(bestLayerWeights);
   return {
     featureCount: outputSize,
     weights: trainedOutput,
     hiddenWeights: trainedHidden,
-    loss: await predictionLossOnGpu(device, samples, {
-      projectionSize: PROJECTION_SIZE,
-      projectionSeed: PROJECTION_SEED,
-      hiddenLayers: HIDDEN_LAYERS,
-      hiddenWeights: trainedHidden,
-      outputWeights: trainedOutput,
-      scale: 1
-    })
+    finalWeights: latestOutputWeights,
+    finalHiddenWeights: concatFloat32(latestLayerWeights),
+    loss: lastTrainLoss,
+    validationLoss: lastValidationLoss,
+    bestValidationLoss,
+    earlyStopReason
   };
 }
 
 async function trainPolicy(device, samples, config, activeModel) {
-  const targets = new Uint32Array(samples.map((sample) => Math.min(POLICY_BUCKETS - 1, sample.policy ?? 0)));
+  const policySamples = samples.filter((sample) =>
+    sample.labelKind !== "distilled" && Number.isInteger(sample.policy) && sample.policy >= 0
+  );
+  if (!policySamples.length) {
+    return activeModel?.policy_logits?.length
+      ? new Float32Array(activeModel.policy_logits.slice(0, POLICY_BUCKETS))
+      : new Float32Array(POLICY_BUCKETS);
+  }
+  const targets = new Uint32Array(policySamples.map((sample) => Math.min(POLICY_BUCKETS - 1, sample.policy)));
   const logits = new Float32Array(POLICY_BUCKETS);
   if (activeModel?.policy_logits?.length) {
     logits.set(activeModel.policy_logits.slice(0, POLICY_BUCKETS));
   }
-  const params = paramsBuffer([samples.length, POLICY_BUCKETS], config.learningRate, 1);
+  const params = paramsBuffer([policySamples.length, POLICY_BUCKETS], config.learningRate, 1);
   const targetBuffer = storageBuffer(device, targets, GPUBufferUsage.STORAGE);
   let inputLogits = storageBuffer(device, logits, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC);
   let outputLogits = device.createBuffer({
@@ -753,10 +1509,7 @@ async function trainPolicy(device, samples, config, activeModel) {
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
   });
   const paramsGpuBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: POLICY_SHADER }), entryPoint: "train_policy" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "train_policy", POLICY_SHADER, "train_policy");
   const steps = Math.max(1, Math.ceil(config.epochs / 4));
   for (let step = 0; step < steps;) {
     const batchEnd = Math.min(steps, step + POLICY_STEPS_PER_SUBMIT);
@@ -805,22 +1558,24 @@ function paramsBuffer([first, second], learningRate, fourth) {
   return params;
 }
 
-function layerParamsBuffer(device, sampleCount, inputSize, outputSize, learningRate) {
-  const params = new ArrayBuffer(16);
+function layerParamsBuffer(device, sampleCount, inputSize, outputSize, learningRate, weightDecay = 0) {
+  const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
   view.setUint32(4, inputSize, true);
   view.setUint32(8, outputSize, true);
   view.setFloat32(12, learningRate, true);
+  view.setFloat32(16, weightDecay, true);
   return storageBuffer(device, params, GPUBufferUsage.UNIFORM);
 }
 
-function outputParamsBuffer(device, sampleCount, inputSize, learningRate) {
-  const params = new ArrayBuffer(16);
+function outputParamsBuffer(device, sampleCount, inputSize, learningRate, weightDecay = 0) {
+  const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
   view.setUint32(4, inputSize, true);
   view.setFloat32(12, learningRate, true);
+  view.setFloat32(16, weightDecay, true);
   return storageBuffer(device, params, GPUBufferUsage.UNIFORM);
 }
 
@@ -851,30 +1606,106 @@ function storageBuffer(device, data, usage) {
 
 async function projectSamplesToBuffer(device, samples, projectionSize, seed = PROJECTION_SEED) {
   const inputSize = featureLength(samples);
-  const rawFeatures = new Float32Array(samples.length * inputSize);
-  for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
-    rawFeatures.set(samples[sampleIndex].features, sampleIndex * inputSize);
+  const maxBindingSize = device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
+  const projectedBytes = samples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT;
+  if (projectedBytes > maxBindingSize) {
+    throw new Error(`Projected replay buffer exceeds this WebGPU device's storage binding limit (${formatBytes(projectedBytes)} > ${formatBytes(maxBindingSize)}). Reduce replay buffer or projection size.`);
   }
-
-  const rawBuffer = storageBuffer(device, rawFeatures, GPUBufferUsage.STORAGE);
   const projectedBuffer = device.createBuffer({
-    size: align4(samples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT),
-    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    size: align4(projectedBytes),
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST
   });
-  const paramsBuffer = projectionParamsBuffer(device, samples.length, inputSize, projectionSize, seed);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: PROJECT_FEATURES_SHADER }), entryPoint: "project_features" }
-  });
-  runPipeline(
-    device,
-    pipeline,
-    [rawBuffer, projectedBuffer, paramsBuffer],
-    Math.ceil(samples.length / 16),
-    Math.ceil(projectionSize / 16)
-  );
-  await device.queue.onSubmittedWorkDone();
+  const pipeline = await createComputePipelineChecked(device, "project_features", PROJECT_FEATURES_SHADER, "project_features");
+  for (let offset = 0; offset < samples.length; offset += PROJECTION_CHUNK_SIZE) {
+    const chunkSamples = samples.slice(offset, offset + PROJECTION_CHUNK_SIZE);
+    const rawFeatures = new Float32Array(chunkSamples.length * inputSize);
+    for (let sampleIndex = 0; sampleIndex < chunkSamples.length; sampleIndex += 1) {
+      rawFeatures.set(chunkSamples[sampleIndex].features, sampleIndex * inputSize);
+    }
+    if (rawFeatures.byteLength > maxBindingSize) {
+      throw new Error(`Projection chunk exceeds this WebGPU device's storage binding limit (${formatBytes(rawFeatures.byteLength)} > ${formatBytes(maxBindingSize)}). Reduce batch size or feature size.`);
+    }
+    const rawBuffer = storageBuffer(device, rawFeatures, GPUBufferUsage.STORAGE);
+    const chunkProjectedBuffer = device.createBuffer({
+      size: align4(chunkSamples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC
+    });
+    const paramsBuffer = projectionParamsBuffer(device, chunkSamples.length, inputSize, projectionSize, seed);
+    const encoder = device.createCommandEncoder();
+    encodePipeline(
+      device,
+      encoder,
+      pipeline,
+      [rawBuffer, chunkProjectedBuffer, paramsBuffer],
+      Math.ceil(chunkSamples.length / 16),
+      Math.ceil(projectionSize / 16)
+    );
+    encoder.copyBufferToBuffer(
+      chunkProjectedBuffer,
+      0,
+      projectedBuffer,
+      offset * projectionSize * Float32Array.BYTES_PER_ELEMENT,
+      chunkSamples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT
+    );
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+  }
   return projectedBuffer;
+}
+
+function splitValidationSamples(samples, validationSplit) {
+  const trainIndices = [];
+  const validationIndices = [];
+  const threshold = Math.floor(validationSplit * 10000);
+  const seed = samples.reduce((hash, sample, index) => {
+    hash ^= stableSampleHash(sample, index);
+    return Math.imul(hash, 16777619) >>> 0;
+  }, 2166136261);
+  for (let index = 0; index < samples.length; index += 1) {
+    const bucket = stableSampleHash(samples[index], index) % 10000;
+    if (threshold > 0 && bucket < threshold) {
+      validationIndices.push(index);
+    } else {
+      trainIndices.push(index);
+    }
+  }
+  if (!trainIndices.length && validationIndices.length > 1) {
+    trainIndices.push(validationIndices.pop());
+  }
+  return { trainIndices, validationIndices, seed };
+}
+
+function stableSampleHash(sample, index) {
+  let hash = 2166136261;
+  const text = `${sample.labelKind ?? ""}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}|${index}`;
+  for (let offset = 0; offset < text.length; offset += 1) {
+    hash ^= text.charCodeAt(offset);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function shuffledIndices(indices, epoch, seed) {
+  const result = indices.slice();
+  let state = (seed ^ Math.imul(epoch, 2654435761)) >>> 0;
+  for (let index = result.length - 1; index > 0; index -= 1) {
+    state = xorshift32(state);
+    const swapIndex = state % (index + 1);
+    [result[index], result[swapIndex]] = [result[swapIndex], result[index]];
+  }
+  return result;
+}
+
+function xorshift32(value) {
+  let state = value >>> 0;
+  state ^= state << 13;
+  state ^= state >>> 17;
+  state ^= state << 5;
+  return state >>> 0;
+}
+
+function indexSamples(samples, indices) {
+  return indices.map((index) => samples[index]);
 }
 
 function featureLength(samples) {
@@ -960,11 +1791,10 @@ async function predictValues(samples, model) {
   if (!globalThis.navigator?.gpu || !modelArchitectureMatches(model)) {
     throw new Error("GPU batch prediction unavailable.");
   }
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   return Array.from(await predictValuesOnGpu(device, samples, model));
 }
 
@@ -998,14 +1828,8 @@ async function predictValuesOnGpu(device, samples, model) {
     )
   );
   const forwardOutputParams = outputParamsBuffer(device, sampleCount, hiddenLayers.at(-1), 0);
-  const forwardLayerPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: FORWARD_LAYER_SHADER }), entryPoint: "forward_layer" }
-  });
-  const forwardOutputPipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: FORWARD_OUTPUT_SHADER }), entryPoint: "forward_output" }
-  });
+  const forwardLayerPipeline = await createComputePipelineChecked(device, "forward_layer", FORWARD_LAYER_SHADER, "forward_layer");
+  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
   const encoder = device.createCommandEncoder();
   for (let layerIndex = 0; layerIndex < hiddenLayers.length; layerIndex += 1) {
     const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1];
@@ -1121,6 +1945,114 @@ function appendReplaySamples(buffer, samples, maxBuffer) {
   return merged.slice(Math.max(0, merged.length - maxBuffer));
 }
 
+async function validateLossLogs(config, progress) {
+  const logs = await fetchLossLogs(config.lossLogReplay);
+  const validation = {
+    checked: 0,
+    changed: 0,
+    unchanged: 0,
+    skipped: 0,
+    failed: false,
+    examples: []
+  };
+  if (!logs.length || config.lossLogReplay <= 0) {
+    return validation;
+  }
+
+  const ai = new Worker("./ai-worker.js", { type: "module" });
+  try {
+    for (const log of logs) {
+      const decisions = Array.isArray(log.decisions) ? log.decisions : [];
+      let logChanged = false;
+      for (const decision of decisions) {
+        const previousKey = movesKey(decision.selectedMoves);
+        if (!decision.game || !previousKey) {
+          validation.skipped += 1;
+          continue;
+        }
+        validation.checked += 1;
+        progress?.({
+          lossLogValidation: {
+            checked: validation.checked,
+            changed: validation.changed,
+            logPath: log.logPath ?? null
+          }
+        });
+        try {
+          const response = await requestWorker(ai, {
+            type: "search",
+            game: decision.game,
+            depth: config.depth,
+            nodes: config.nodes,
+            timeMs: workerSearchTimeMs(config),
+            gpuMode: "full",
+            temperature: config.explorationTemperature,
+            randomSeed: sampleSeed("loss-log", validation.checked, config.runSeed ^ 0x1055_1000)
+          }, workerRequestTimeout(config));
+          const currentMoves = response.result?.moves ?? [];
+          const currentKey = movesKey(currentMoves);
+          if (!currentKey) {
+            validation.skipped += 1;
+            continue;
+          }
+          if (currentKey !== previousKey) {
+            validation.changed += 1;
+            logChanged = true;
+            validation.examples.push({
+              logPath: log.logPath ?? null,
+              ply: decision.ply ?? null,
+              botColor: decision.botColor ?? null,
+              previous: previousKey,
+              current: currentKey,
+              previousScore: decision.selectedScore ?? null,
+              currentScore: response.result?.score ?? null
+            });
+            break;
+          }
+          validation.unchanged += 1;
+        } catch {
+          validation.skipped += 1;
+        }
+      }
+      if (logChanged) {
+        continue;
+      }
+    }
+  } finally {
+    ai.terminate();
+  }
+  validation.failed = validation.checked > 0 && validation.changed === 0;
+  return validation;
+}
+
+async function fetchLossLogs(limit) {
+  if (limit <= 0) {
+    return [];
+  }
+  try {
+    const response = await withTimeout(
+      fetch("/api/training/loss-logs"),
+      TRAINING_IO_TIMEOUT_MS,
+      "Timed out loading loss logs."
+    );
+    if (!response.ok) {
+      return [];
+    }
+    const payload = await response.json();
+    return (payload.logs ?? [])
+      .filter((log) => Array.isArray(log.decisions) && log.decisions.length > 0)
+      .slice(0, limit);
+  } catch {
+    return [];
+  }
+}
+
+function movesKey(moves) {
+  return (moves ?? []).map((move) =>
+    `${move?.from?.timelineId}:${move?.from?.time}:${move?.from?.x}:${move?.from?.y}->${move?.to?.timelineId}:${move?.to?.time}:${move?.to?.x}:${move?.to?.y}`
+  ).join("|");
+}
+
 async function fetchActiveModel() {
   try {
     const response = await withTimeout(
@@ -1128,10 +2060,30 @@ async function fetchActiveModel() {
       TRAINING_IO_TIMEOUT_MS,
       "Timed out loading active model."
     );
-    return response.ok ? decodeCompactModel(await response.arrayBuffer()) : null;
+    if (!response.ok) {
+      return null;
+    }
+    const buffer = await response.arrayBuffer();
+    const model = decodeCompactModel(buffer);
+    if (model) {
+      model.bytes = new Uint8Array(buffer);
+    }
+    return model;
   } catch {
     return null;
   }
+}
+
+function byteArraysEqual(left, right) {
+  if (!left || !right || left.byteLength !== right.byteLength) {
+    return false;
+  }
+  for (let index = 0; index < left.byteLength; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function decodeCompactModel(buffer) {
@@ -1240,6 +2192,77 @@ function idbPut(db, key, value) {
 function autoLabelWorkers() {
   const cores = navigator.hardwareConcurrency ?? 4;
   return Math.max(1, Math.min(cores - 1, 16));
+}
+
+async function getGpuDevice() {
+  if (!navigator.gpu) {
+    return null;
+  }
+  if (cachedGpuDevice) {
+    return cachedGpuDevice;
+  }
+  cachedGpuAdapter = cachedGpuAdapter ?? await navigator.gpu.requestAdapter();
+  if (!cachedGpuAdapter) {
+    return null;
+  }
+  cachedGpuDevice = await requestHighLimitDevice(cachedGpuAdapter);
+  cachedGpuDevice.lost?.then(() => {
+    cachedGpuDevice = null;
+    pipelineCache.clear();
+  });
+  return cachedGpuDevice;
+}
+
+async function requestHighLimitDevice(adapter) {
+  const requiredLimits = {};
+  for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"]) {
+    const value = adapter.limits?.[key];
+    if (Number.isFinite(value) && value > 0) {
+      requiredLimits[key] = value;
+    }
+  }
+  if (Object.keys(requiredLimits).length === 0) {
+    return adapter.requestDevice();
+  }
+  try {
+    return await adapter.requestDevice({ requiredLimits });
+  } catch {
+    return adapter.requestDevice();
+  }
+}
+
+async function createComputePipelineChecked(device, label, code, entryPoint) {
+  const cacheKey = `${label}:${entryPoint}`;
+  const cached = pipelineCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const module = device.createShaderModule({ label: `${label}.module`, code });
+  if (module.compilationInfo) {
+    const info = await module.compilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length > 0) {
+      throw new Error(formatShaderErrors(label, errors));
+    }
+  }
+  const pipeline = device.createComputePipeline({
+    label,
+    layout: "auto",
+    compute: { module, entryPoint }
+  });
+  pipelineCache.set(cacheKey, pipeline);
+  return pipeline;
+}
+
+function formatShaderErrors(label, errors) {
+  return `${label} shader compilation failed: ${errors.map((error) =>
+    `line ${error.lineNum ?? "?"}, column ${error.linePos ?? "?"}: ${error.message}`
+  ).join("; ")}`;
+}
+
+function formatBytes(bytes) {
+  const mib = bytes / (1024 * 1024);
+  return `${mib.toFixed(mib >= 10 ? 0 : 1)} MiB`;
 }
 
 function align4(value) {

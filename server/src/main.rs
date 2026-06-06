@@ -15,7 +15,7 @@ use std::{
 use axum::{
     body::Body,
     extract::{Path as AxumPath, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},

@@ -4,22 +4,23 @@ use std::cell::RefCell;
 // files. wasm exports, move generation, notation, AI, and tests all share many
 // helpers; include! keeps those helpers private without turning them into a wide
 // pub(crate) API.
+include!("model.rs");
 include!("wasm_api.rs");
+include!("game.rs");
+include!("movegen.rs");
+include!("notation.rs");
+include!("notation_parser.rs");
+#[cfg(not(test))]
+include!("ai/types.rs");
+#[cfg(not(test))]
+include!("ai/weights.rs");
+#[cfg(not(test))]
+include!("ai/evaluation.rs");
 
 #[cfg(test)]
 include!("ai.rs");
 #[cfg(test)]
-include!("model.rs");
-#[cfg(test)]
-include!("game.rs");
-#[cfg(test)]
-include!("movegen.rs");
-#[cfg(test)]
-include!("notation.rs");
-#[cfg(test)]
 include!("gpu_snapshot.rs");
-#[cfg(test)]
-include!("notation_parser.rs");
 #[cfg(test)]
 include!("notation_replay.rs");
 

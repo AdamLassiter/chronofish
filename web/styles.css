@@ -18,6 +18,10 @@ button {
   font: inherit;
 }
 
+[hidden] {
+  display: none !important;
+}
+
 .app {
   min-height: 100vh;
   padding: 18px 18px 18px 72px;
@@ -65,7 +69,8 @@ button {
   text-align: right;
 }
 
-#toggle-hud {
+#toggle-hud,
+#open-training {
   min-height: 32px;
   border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 6px;
@@ -101,7 +106,6 @@ button {
 .topbar,
 .controls,
 .multiplayer,
-.training,
 .legend {
   margin: 0 0 12px;
 }
@@ -124,7 +128,6 @@ button {
 
 .controls,
 .multiplayer,
-.training,
 .legend {
   display: flex;
   align-items: center;
@@ -134,7 +137,6 @@ button {
 
 .controls,
 .multiplayer,
-.training,
 .legend {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
@@ -217,8 +219,49 @@ button {
 }
 
 .training {
-  padding: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 14px;
   color: #dce5df;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: grid;
+  place-items: start center;
+  padding: 72px 18px 18px;
+  background: rgba(5, 7, 9, 0.72);
+}
+
+.training-modal-panel {
+  width: calc(100vw - 48px);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(14, 17, 20, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.training-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-basis: 100%;
+  gap: 12px;
+  width: 100%;
+}
+
+.training > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  width: 100%;
 }
 
 .multiplayer label,
@@ -232,11 +275,15 @@ button {
 .training label {
   gap: 6px;
   min-width: 0;
+  flex-wrap: wrap;
+  width: min(100%, 380px);
+  align-items: flex-start;
 }
 
 .multiplayer input,
 .multiplayer select,
-.training input {
+.training input,
+.training select {
   width: 180px;
   min-height: 36px;
   border: 1px solid rgba(255, 255, 255, 0.18);
@@ -247,15 +294,24 @@ button {
   font: inherit;
 }
 
-.training input {
-  width: 92px;
+.training input,
+.training select {
+  width: 112px;
+  margin-left: auto;
 }
 
 .field-help {
   color: #9fcfbd;
+  flex-basis: 100%;
   font-size: 0.72rem;
   font-weight: 700;
-  white-space: nowrap;
+  line-height: 1.25;
+  max-width: 260px;
+}
+
+.field-help-wide {
+  flex-basis: 100%;
+  max-width: 360px;
 }
 
 #start-training {

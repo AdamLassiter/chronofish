@@ -3,6 +3,9 @@ const NEURAL_BOARD_PLANES = 32;
 const NEURAL_BOARD_SQUARES = 64;
 const NEURAL_INPUT_SIZE = NEURAL_MAX_BOARDS * NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
 const ENCODE_META_STRIDE = 6;
+let cachedGpuAdapter = null;
+let cachedGpuDevice = null;
+const pipelineCache = new Map();
 
 const ENCODE_NEURAL_POSITION_SHADER = `
 struct Params {
@@ -10,7 +13,7 @@ struct Params {
 };
 
 @group(0) @binding(0) var<storage, read> squares: array<i32>;
-@group(0) @binding(1) var<storage, read> meta: array<i32>;
+@group(0) @binding(1) var<storage, read> board_meta: array<i32>;
 @group(0) @binding(2) var<storage, read_write> features: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
 
@@ -71,50 +74,71 @@ fn encode(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 
   let meta_base = board * META_STRIDE;
-  var min_timeline = meta[0];
-  var max_timeline = meta[0];
+  var min_timeline = board_meta[0];
+  var max_timeline = board_meta[0];
   var present = 2147483647;
-  let perspective = meta[5u];
+  let perspective = board_meta[5u];
   for (var meta_board = 0u; meta_board < params.board_count; meta_board = meta_board + 1u) {
     let base = meta_board * META_STRIDE;
-    let timeline_id = meta[base];
+    let timeline_id = board_meta[base];
     min_timeline = min_i32(min_timeline, timeline_id);
     max_timeline = max_i32(max_timeline, timeline_id);
   }
   let active_distance = max_i32(0, min_i32(-min_timeline, max_timeline)) + 1;
   for (var meta_board = 0u; meta_board < params.board_count; meta_board = meta_board + 1u) {
     let base = meta_board * META_STRIDE;
-    let timeline_id = meta[base];
-    let owner = meta[base + 1u];
-    let time = meta[base + 2u];
+    let timeline_id = board_meta[base];
+    let owner = board_meta[base + 1u];
+    let time = board_meta[base + 2u];
     if (owner_active(owner, timeline_id, active_distance) && time < present) {
       present = time;
     }
   }
-  let timeline_id = meta[meta_base];
-  let owner = meta[meta_base + 1u];
-  let time = meta[meta_base + 2u];
-  let latest = meta[meta_base + 3u] != 0;
-  let side_to_move = meta[meta_base + 4u];
-  let active = owner_active(owner, timeline_id, active_distance);
+  let timeline_id = board_meta[meta_base];
+  let owner = board_meta[meta_base + 1u];
+  let time = board_meta[meta_base + 2u];
+  let latest = board_meta[meta_base + 3u] != 0;
+  let side_to_move = board_meta[meta_base + 4u];
+  let is_active = owner_active(owner, timeline_id, active_distance);
   let owner_sign = select(0.0, relative_color_value(owner - 1, perspective), owner != 0);
   let time_distance = f32(max_i32(-16, min_i32(16, time - present))) / 16.0;
-  switch plane {
-    case 24u: { features[index] = relative_color_value(side_to_move, perspective); }
-    case 25u: { features[index] = select(0.0, 1.0, active); }
-    case 26u: { features[index] = select(0.0, 1.0, latest); }
-    case 27u: { features[index] = select(0.0, 1.0, time == present); }
-    case 28u: { features[index] = owner_sign; }
-    case 29u: { features[index] = time_distance; }
-    case 30u: { features[index] = 1.0; }
-    default: { features[index] = 0.0; }
+  if (plane == 24u) {
+    features[index] = relative_color_value(side_to_move, perspective);
+  } else if (plane == 25u) {
+    features[index] = select(0.0, 1.0, is_active);
+  } else if (plane == 26u) {
+    features[index] = select(0.0, 1.0, latest);
+  } else if (plane == 27u) {
+    features[index] = select(0.0, 1.0, time == present);
+  } else if (plane == 28u) {
+    features[index] = owner_sign;
+  } else if (plane == 29u) {
+    features[index] = time_distance;
+  } else if (plane == 30u) {
+    features[index] = 1.0;
+  } else {
+    features[index] = 0.0;
   }
 }
 `;
 
 self.addEventListener("message", async (event) => {
-  const { id, type, game, encodeOnly } = event.data;
+  const { id, type, game, games, encodeOnly } = event.data;
   try {
+    if (type === "batchSample") {
+      if (!Array.isArray(games)) {
+        throw new Error("Batch training position encoding requires game snapshots.");
+      }
+      const samples = [];
+      for (const snapshot of games) {
+        if (!snapshot?.timelines?.length) {
+          throw new Error("Training position encoding requires a client game snapshot.");
+        }
+        samples.push(await neuralPosition(snapshot));
+      }
+      self.postMessage({ id, ok: true, samples });
+      return;
+    }
     if (type === "selfPlay" || !encodeOnly) {
       throw new Error("CPU search labels are disabled; training labels must come from GPU/model prediction.");
     }
@@ -163,11 +187,10 @@ async function encodeNeuralPositionOnGpu(game, color) {
     }
   });
 
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   const squareBuffer = storageBuffer(device, squares, GPUBufferUsage.STORAGE);
   const metaBuffer = storageBuffer(device, meta, GPUBufferUsage.STORAGE);
   const featureBuffer = device.createBuffer({
@@ -177,10 +200,7 @@ async function encodeNeuralPositionOnGpu(game, color) {
   const params = new ArrayBuffer(16);
   new DataView(params).setUint32(0, boardCount, true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: ENCODE_NEURAL_POSITION_SHADER }), entryPoint: "encode" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "encode_neural_position", ENCODE_NEURAL_POSITION_SHADER, "encode");
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [squareBuffer, metaBuffer, featureBuffer, paramsBuffer]
@@ -290,6 +310,72 @@ function storageBuffer(device, data, usage) {
   });
   device.queue.writeBuffer(buffer, 0, bytes);
   return buffer;
+}
+
+async function getGpuDevice() {
+  if (!navigator.gpu) {
+    return null;
+  }
+  if (cachedGpuDevice) {
+    return cachedGpuDevice;
+  }
+  cachedGpuAdapter = cachedGpuAdapter ?? await navigator.gpu.requestAdapter();
+  if (!cachedGpuAdapter) {
+    return null;
+  }
+  cachedGpuDevice = await requestHighLimitDevice(cachedGpuAdapter);
+  cachedGpuDevice.lost?.then(() => {
+    cachedGpuDevice = null;
+    pipelineCache.clear();
+  });
+  return cachedGpuDevice;
+}
+
+async function requestHighLimitDevice(adapter) {
+  const requiredLimits = {};
+  for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"]) {
+    const value = adapter.limits?.[key];
+    if (Number.isFinite(value) && value > 0) {
+      requiredLimits[key] = value;
+    }
+  }
+  if (Object.keys(requiredLimits).length === 0) {
+    return adapter.requestDevice();
+  }
+  try {
+    return await adapter.requestDevice({ requiredLimits });
+  } catch {
+    return adapter.requestDevice();
+  }
+}
+
+async function createComputePipelineChecked(device, label, code, entryPoint) {
+  const cacheKey = `${label}:${entryPoint}`;
+  const cached = pipelineCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const module = device.createShaderModule({ label: `${label}.module`, code });
+  if (module.compilationInfo) {
+    const info = await module.compilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length > 0) {
+      throw new Error(formatShaderErrors(label, errors));
+    }
+  }
+  const pipeline = device.createComputePipeline({
+    label,
+    layout: "auto",
+    compute: { module, entryPoint }
+  });
+  pipelineCache.set(cacheKey, pipeline);
+  return pipeline;
+}
+
+function formatShaderErrors(label, errors) {
+  return `${label} shader compilation failed: ${errors.map((error) =>
+    `line ${error.lineNum ?? "?"}, column ${error.linePos ?? "?"}: ${error.message}`
+  ).join("; ")}`;
 }
 
 async function readFloats(device, buffer, byteLength) {

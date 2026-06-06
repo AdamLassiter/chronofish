@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-engine"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "burn",
  "rayon",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "serde",

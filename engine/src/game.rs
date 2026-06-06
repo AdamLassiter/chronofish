@@ -313,12 +313,6 @@ impl Game {
             return 0;
         };
 
-        if self.has_pending_present_board(self.turn) {
-            self.last_message =
-                "Make moves until the present line reaches the opponent's turn.".to_string();
-            return 0;
-        }
-
         if let Some(winner) = self.staged_royal_capture_by {
             self.turn = present_side;
             self.staged_turn.clear();
@@ -326,6 +320,12 @@ impl Game {
             self.staged_royal_capture_by = None;
             self.last_message = format!("{} wins by royal capture.", winner.capitalized());
             return 1;
+        }
+
+        if self.has_pending_present_board(self.turn) {
+            self.last_message =
+                "Make moves until the present line reaches the opponent's turn.".to_string();
+            return 0;
         }
 
         self.turn = present_side;

@@ -22,3 +22,13 @@ export function postMatchLog(roomId, notation = "") {
     // The frontend should remain fully playable without the Rust server.
   });
 }
+
+export function postBotLossLog(roomId, payload) {
+  fetch(`/api/training/loss-logs/${encodeURIComponent(roomId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  }).catch(() => {
+    // Loss logs are training aids; gameplay should not depend on them.
+  });
+}

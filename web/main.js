@@ -1,9 +1,9 @@
 import { elements } from "./dom.js";
-import { capitalize, presentTime, samePosition } from "./board.js";
+import { capitalize, getBoard, getLatestBoard, isActiveTimeline, isLatestBoard, presentTime, samePosition } from "./board.js";
 import { renderGame } from "./render.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
-import { appendNotationLine, postMatchLog } from "./match-log.js";
-import { readWasmString } from "./engine-io.js";
+import { appendNotationLine, postMatchLog, postBotLossLog } from "./match-log.js";
+import { readWasmString, writeWasmString } from "./engine-io.js";
 
 const LOCAL_GAME_STORAGE_KEY = "chronofish.localGameState.v1";
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
@@ -78,6 +78,7 @@ let legalTargets = [];
 let submittedTurns = [];
 let submittedNotation = "";
 let stagedMoves = [];
+let botDecisionLog = [];
 let aiWorkers = [];
 let aiRequestId = 0;
 let legalTargetRequestId = 0;
@@ -86,7 +87,10 @@ let trainingRequestId = 0;
 let trainingEnabled = false;
 let trainingRunning = false;
 let trainingCycle = 0;
+let trainingGpuProfile = null;
+let trainingGpuProfileApplied = false;
 let phase = "lobby";
+let lastRenderedPhase = phase;
 let lastScrolledPresentTime = null;
 let lastMatchAlertMessage = "";
 let assignments = {
@@ -356,6 +360,7 @@ function isMatchOverMessage(message) {
 
 function resetEngine() {
   // Engine reset clears both visible and committed state plus all local history.
+  engine?.chronofish_reset?.();
   game = initialGame();
   committedGame = game;
   selected = null;
@@ -363,7 +368,49 @@ function resetEngine() {
   submittedTurns = [];
   submittedNotation = "";
   stagedMoves = [];
+  botDecisionLog = [];
   lastMatchAlertMessage = "";
+}
+
+function engineSnapshot() {
+  return JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json()));
+}
+
+function engineLastMessage() {
+  return readWasmString(engine, engine.chronofish_last_message());
+}
+
+function syncEngineSnapshot(snapshot = game) {
+  if (!engine?.chronofish_load_snapshot_json) {
+    throw new Error("CPU rule engine is unavailable in this WASM build.");
+  }
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(snapshot));
+  try {
+    if (!engine.chronofish_load_snapshot_json(ptr, len)) {
+      throw new Error(engineLastMessage());
+    }
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function syncEngineToStagedState() {
+  syncEngineSnapshot(committedGame);
+  for (const move of stagedMoves) {
+    const ok = engine.chronofish_apply_move(
+      move.from.timelineId,
+      move.from.time,
+      move.from.x,
+      move.from.y,
+      move.to.timelineId,
+      move.to.time,
+      move.to.x,
+      move.to.y
+    );
+    if (!ok) {
+      throw new Error(engineLastMessage());
+    }
+  }
 }
 
 function appendSubmittedNotation(turnNotation, actor = game.turn) {
@@ -382,6 +429,10 @@ function cloneMove(move) {
     from: { ...move.from },
     to: { ...move.to }
   };
+}
+
+function cloneGame(snapshot) {
+  return JSON.parse(JSON.stringify(snapshot));
 }
 
 function botToken(color) {
@@ -469,129 +520,52 @@ function targetFor(position) {
   return legalTargets.find((target) => samePosition(target, position));
 }
 
+function pieceAt(position) {
+  return getBoard(game, position.timelineId, position.time)?.board[position.y]?.[position.x] ?? null;
+}
+
 function legalTargetsFor(position) {
   if (!engine) {
-    return Promise.resolve([]);
+    return Promise.resolve({ source: null, targets: [] });
   }
-
-  const requestId = ++legalTargetRequestId;
-  return new Promise((resolve, reject) => {
-    const worker = new Worker("./ai-worker.js", { type: "module" });
-    const cleanup = () => {
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
-      worker.removeEventListener("messageerror", handleError);
-      worker.terminate();
-    };
-    const handleMessage = (event) => {
-      if (event.data.id !== requestId) {
-        return;
-      }
-      cleanup();
-      if (event.data.ok) {
-        resolve(event.data.selection ?? { source: null, targets: [] });
-      } else {
-        reject(new Error(event.data.error ?? "GPU legal target calculation failed."));
-      }
-    };
-    const handleError = (event) => {
-      cleanup();
-      reject(new Error(event.message || "GPU legal target worker failed."));
-    };
-    worker.addEventListener("message", handleMessage);
-    worker.addEventListener("error", handleError);
-    worker.addEventListener("messageerror", handleError);
-    worker.postMessage({
-      id: requestId,
-      type: "legalTargets",
-      game,
-      position
-    });
-  });
-}
-
-function applyMoveOnGpu(from, to) {
-  const requestId = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const worker = new Worker("./ai-worker.js", { type: "module" });
-    const cleanup = () => {
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
-      worker.removeEventListener("messageerror", handleError);
-      worker.terminate();
-    };
-    const handleMessage = (event) => {
-      if (event.data.id !== requestId) {
-        return;
-      }
-      cleanup();
-      if (event.data.ok) {
-        resolve(event.data.game);
-      } else {
-        reject(new Error(event.data.error ?? "GPU move application failed."));
-      }
-    };
-    const handleError = (event) => {
-      cleanup();
-      reject(new Error(event.message || "GPU move application worker failed."));
-    };
-    worker.addEventListener("message", handleMessage);
-    worker.addEventListener("error", handleError);
-    worker.addEventListener("messageerror", handleError);
-    worker.postMessage({
-      id: requestId,
-      type: "applyMove",
-      game,
-      move: {
-        from,
-        to
-      }
-    });
-  });
-}
-
-function submitTurnOnGpu() {
-  const requestId = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    const worker = new Worker("./ai-worker.js", { type: "module" });
-    const cleanup = () => {
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
-      worker.removeEventListener("messageerror", handleError);
-      worker.terminate();
-    };
-    const handleMessage = (event) => {
-      if (event.data.id !== requestId) {
-        return;
-      }
-      cleanup();
-      if (event.data.ok) {
-        resolve(event.data.status);
-      } else {
-        reject(new Error(event.data.error ?? "GPU turn submission failed."));
-      }
-    };
-    const handleError = (event) => {
-      cleanup();
-      reject(new Error(event.message || "GPU turn submission worker failed."));
-    };
-    worker.addEventListener("message", handleMessage);
-    worker.addEventListener("error", handleError);
-    worker.addEventListener("messageerror", handleError);
-    worker.postMessage({
-      id: requestId,
-      type: "submitTurn",
-      game
-    });
+  syncEngineSnapshot(game);
+  const piece = pieceAt(position);
+  const board = getBoard(game, position.timelineId, position.time);
+  const selectable = piece?.color === game.turn
+    && board?.sideToMove === game.turn
+    && isLatestBoard(game, position.timelineId, position.time);
+  return Promise.resolve({
+    source: selectable ? { ...position, piece } : null,
+    targets: JSON.parse(readWasmString(engine, engine.chronofish_legal_targets_json(
+      position.timelineId,
+      position.time,
+      position.x,
+      position.y
+    )))
   });
 }
 
 async function applyEngineMove(from, to) {
-  let nextGame;
+  let ok;
   try {
-    nextGame = await applyMoveOnGpu(from, to);
+    syncEngineSnapshot(game);
+    ok = engine.chronofish_apply_move(
+      from.timelineId,
+      from.time,
+      from.x,
+      from.y,
+      to.timelineId,
+      to.time,
+      to.x,
+      to.y
+    );
   } catch (error) {
     elements.message.textContent = error.message;
+    return null;
+  }
+  const message = engineLastMessage();
+  if (!ok) {
+    elements.message.textContent = message;
     return null;
   }
 
@@ -601,10 +575,10 @@ async function applyEngineMove(from, to) {
     from: { ...from },
     to: { ...to }
   });
-  game = nextGame;
+  game = engineSnapshot();
   selected = null;
   legalTargets = [];
-  elements.message.textContent = "Move staged on GPU.";
+  elements.message.textContent = message;
   persistLocalGameState();
   return elements.message.textContent;
 }
@@ -615,25 +589,23 @@ async function submitVisibleTurn(actor) {
     return null;
   }
 
-  let status;
+  let ok;
   try {
-    status = await submitTurnOnGpu();
+    syncEngineToStagedState();
+    ok = engine.chronofish_submit_turn();
   } catch (error) {
     elements.message.textContent = error.message;
     return null;
   }
-  if (!status?.complete) {
-    elements.message.textContent = "Make moves until the present line reaches the opponent's turn.";
+  const engineMessage = engineLastMessage();
+  if (!ok) {
+    elements.message.textContent = engineMessage;
     return null;
   }
 
   const turnNotation = clientTurnNotation();
   const submitted = stagedMoves.map(cloneMove);
-  const nextTurn = status.nextTurn ?? game.turn;
-  game = {
-    ...game,
-    turn: nextTurn
-  };
+  game = engineSnapshot();
   committedGame = game;
   submittedTurns.push(submitted);
   appendSubmittedNotation(turnNotation, actor);
@@ -641,7 +613,7 @@ async function submitVisibleTurn(actor) {
   selected = null;
   legalTargets = [];
 
-  const message = `${capitalize(game.turn)} to move.`;
+  const message = engineMessage || `${capitalize(game.turn)} to move.`;
   elements.message.textContent = message;
   persistLocalGameState();
   return message;
@@ -692,8 +664,8 @@ async function handleSquareClick(position) {
 
   selected = position;
   legalTargets = [];
-  const requestId = legalTargetRequestId + 1;
-  elements.message.textContent = "Checking selection on GPU.";
+  const requestId = ++legalTargetRequestId;
+  elements.message.textContent = "Checking legal moves.";
   render({ preserveScroll: true });
   try {
     const selection = await legalTargetsFor(position);
@@ -728,6 +700,7 @@ function render(options = {}) {
   const scrollState = options.preserveScroll ? captureScrollState() : null;
   const previousPresentTime = lastScrolledPresentTime;
   const nextPresentTime = committedGame.timelines.length ? presentTime(committedGame) : null;
+  const enteredGame = lastRenderedPhase !== "game" && phase === "game";
   const inGame = phase === "game";
   elements.startGameButton.disabled = !engine || inGame || multiplayer.color === "spectator";
   elements.joinWhiteButton.disabled = inGame;
@@ -755,10 +728,15 @@ function render(options = {}) {
 
   if (scrollState) {
     restoreScrollState(scrollState);
-  } else if (phase === "game" && nextPresentTime !== null && nextPresentTime !== previousPresentTime) {
+  } else if (phase === "game" && nextPresentTime !== null && (enteredGame || nextPresentTime !== previousPresentTime)) {
     scrollMultiverseToPresent();
   }
-  lastScrolledPresentTime = nextPresentTime;
+  if (phase === "game") {
+    lastScrolledPresentTime = nextPresentTime;
+  } else {
+    lastScrolledPresentTime = null;
+  }
+  lastRenderedPhase = phase;
 }
 
 function captureScrollState() {
@@ -782,7 +760,78 @@ function renderEvaluationBar() {
   if (!elements.evaluationBar || !elements.evaluationWhite || !elements.evaluationScore) {
     return;
   }
-  elements.evaluationBar.hidden = true;
+  const evaluation = evaluateClientPosition(game);
+  if (!evaluation) {
+    elements.evaluationBar.hidden = true;
+    return;
+  }
+
+  const { score, source } = evaluation;
+  const whiteShare = 0.5 + 0.5 * normalizedEvaluation(score);
+  const whitePercent = Math.max(3, Math.min(97, whiteShare * 100));
+  elements.evaluationWhite.style.height = `${whitePercent}%`;
+  elements.evaluationScore.textContent = formatEvaluation(score);
+  elements.evaluationBar.dataset.leader = score >= 0 ? "white" : "black";
+  elements.evaluationBar.title = `White ${formatSignedPawns(score)}. Source: ${source}.`;
+  elements.evaluationBar.hidden = false;
+}
+
+function evaluateClientPosition(position) {
+  if (!position?.timelines?.length) {
+    return null;
+  }
+  let score = 0;
+  let boardCount = 0;
+  for (const timeline of position.timelines) {
+    if (!isActiveTimeline(position, timeline)) {
+      continue;
+    }
+    const board = getLatestBoard(position, timeline.id);
+    if (!board?.board) {
+      continue;
+    }
+    boardCount += 1;
+    score += evaluateBoardMaterial(board);
+    score += board.sideToMove === "white" ? 12 : -12;
+  }
+  if (boardCount === 0) {
+    return null;
+  }
+  return {
+    score: Math.round(score / boardCount),
+    source: "client material"
+  };
+}
+
+function evaluateBoardMaterial(board) {
+  let score = 0;
+  for (const row of board.board) {
+    for (const piece of row) {
+      if (!piece) {
+        continue;
+      }
+      const value = pieceValue(piece.type);
+      score += piece.color === "white" ? value : -value;
+    }
+  }
+  return score;
+}
+
+function pieceValue(type) {
+  return {
+    king: 20000,
+    commonKing: 10000,
+    queen: 900,
+    royalQueen: 20000,
+    princess: 700,
+    rook: 500,
+    bishop: 330,
+    unicorn: 500,
+    dragon: 900,
+    knight: 320,
+    pawn: 100,
+    brawn: 130
+  }[type] ?? 0;
 }
 
 function formatEvaluation(score) {
@@ -810,7 +859,8 @@ function formatSignedPawns(score) {
 }
 
 function scrollMultiverseToPresent() {
-  const marker = elements.timelineGrid.querySelector(".present-line");
+  const marker = elements.timelineGrid.querySelector('.timeline-row[data-active="true"] .present-line')
+    ?? elements.timelineGrid.querySelector(".present-line");
   if (!marker) {
     return;
   }
@@ -993,7 +1043,45 @@ async function enterPostMatchReview(message, credentials = null) {
   render();
   showMatchDialog(message);
   postMatchLog(multiplayer.roomId, submittedNotation.split(/\n/).at(-1) ?? "");
+  recordBotLossLog(message);
   await syncState("state", message, credentials);
+}
+
+function recordBotLossLog(message) {
+  const winner = winnerFromMatchMessage(message);
+  if (!winner) {
+    return;
+  }
+  const loser = winner === "white" ? "black" : "white";
+  if (!isBotAssignment(assignments[loser]) || isBotAssignment(assignments[winner])) {
+    return;
+  }
+  const decisions = botDecisionLog.filter((decision) => decision.botColor === loser);
+  if (!decisions.length) {
+    return;
+  }
+  postBotLossLog(multiplayer.roomId, {
+    roomId: multiplayer.roomId,
+    recordedAt: Date.now(),
+    winner,
+    loser,
+    reason: message,
+    assignments,
+    notation: submittedNotation,
+    finalGame: game,
+    decisions
+  });
+}
+
+function winnerFromMatchMessage(message) {
+  const normalized = String(message ?? "").toLowerCase();
+  if (/\bwhite\b.*\bwins\b/.test(normalized)) {
+    return "white";
+  }
+  if (/\bblack\b.*\bwins\b/.test(normalized)) {
+    return "black";
+  }
+  return null;
 }
 
 function victoryMessage(loser) {
@@ -1116,6 +1204,7 @@ function maybeStartBotTurn() {
   bot.pendingSearch = {
     id,
     botColor,
+    game: cloneGame(game),
     expected: 0,
     deadlineAt: Date.now() + timeMs,
     results: [],
@@ -1177,13 +1266,16 @@ function handleBotTimeout(id, botColor, timeMs) {
   aiRequestId += 1;
   bot.thinking = false;
   clearBotTimeout();
-  terminateAiWorkers();
   if (bestResult) {
+    logBotSearchChoices(pending, bestResult, "timeout");
+    bestResult.trainingDecision = buildBotDecisionRecord(pending, bestResult);
+    terminateAiWorkers();
     elements.message.textContent = `${botDisplayName(botColor)} used the best move found in ${formatBotTimeLimit(timeMs)}.`;
     void completeBotTurn(botColor, bestResult);
     return;
   }
 
+  terminateAiWorkers();
   elements.message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
   void completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
 }
@@ -1211,15 +1303,20 @@ function handleAiWorkerMessage(event) {
 
   bot.thinking = false;
   clearBotTimeout();
-  terminateAiWorkers();
 
   const bestResult = selectBestAiResult(pending.results.map((entry) => entry.result));
+  logBotSearchChoices(pending, bestResult, "complete");
   if (!bestResult && pending.errors.length > 0) {
+    terminateAiWorkers();
     elements.message.textContent = `${botDisplayName(pending.botColor)} search failed: ${pending.errors[0]}`;
     render();
     return;
   }
 
+  if (bestResult) {
+    bestResult.trainingDecision = buildBotDecisionRecord(pending, bestResult);
+  }
+  terminateAiWorkers();
   void completeBotTurn(pending.botColor, bestResult ?? { status: "noLegalTurn", moves: [] });
 }
 
@@ -1239,6 +1336,136 @@ function selectBestAiResult(results) {
     })[0] ?? null;
 }
 
+function logBotSearchChoices(pending, selectedResult, reason) {
+  if (!pending) {
+    return;
+  }
+  const choices = rankedBotChoices(pending.results, selectedResult);
+  const botName = botDisplayName(pending.botColor);
+  if (!choices.length) {
+    console.info(`${botName} search ${reason}: no legal move choices`, {
+      errors: pending.errors
+    });
+    return;
+  }
+  console.groupCollapsed(`${botName} search ${reason}: ${choices.length} move choice${choices.length === 1 ? "" : "s"}`);
+  console.table(choices.map((choice, index) => ({
+    rank: index + 1,
+    selected: choice.selected ? "yes" : "",
+    eval: formatBotEvaluation(choice.score),
+    moves: choice.moves.map(formatBotMove).join(" | "),
+    depth: choice.depth ?? "",
+    nodes: choice.nodes ?? "",
+    worker: choice.partitionIndex ?? "",
+    search: choice.gpuSearch ?? ""
+  })));
+  if (pending.errors.length) {
+    console.info("Bot search worker errors", pending.errors);
+  }
+  console.groupEnd();
+}
+
+function rankedBotChoices(results, selectedResult) {
+  const selectedKey = botMovesKey(selectedResult?.moves ?? []);
+  const byMoves = new Map();
+  for (const entry of results) {
+    const result = entry.result;
+    const rawChoices = Array.isArray(result?.choices) && result.choices.length
+      ? result.choices
+      : result?.moves?.length
+        ? [{ moves: result.moves, score: result.score, depth: result.depth, nodes: result.nodes, gpuSearch: result.gpuSearch }]
+        : [];
+    for (const choice of rawChoices) {
+      const moves = choice.moves ?? [];
+      const key = botMovesKey(moves);
+      if (!key) {
+        continue;
+      }
+      const current = byMoves.get(key);
+      const next = {
+        moves,
+        score: choice.score,
+        depth: choice.depth ?? result?.depth,
+        nodes: choice.nodes ?? result?.nodes,
+        gpuSearch: choice.gpuSearch ?? result?.gpuSearch,
+        partitionIndex: entry.partitionIndex,
+        selected: key === selectedKey
+      };
+      if (!current || (next.score ?? -Infinity) > (current.score ?? -Infinity)) {
+        byMoves.set(key, next);
+      } else if (key === selectedKey) {
+        current.selected = true;
+      }
+    }
+  }
+  return Array.from(byMoves.values())
+    .sort((left, right) => {
+      const score = botChoiceScore(right) - botChoiceScore(left);
+      if (score !== 0) {
+        return score;
+      }
+      return botMovesKey(left.moves).localeCompare(botMovesKey(right.moves));
+    })
+    .slice(0, 16);
+}
+
+function buildBotDecisionRecord(pending, result) {
+  if (!pending || result?.status !== "ok" || !result.moves?.length) {
+    return null;
+  }
+  return {
+    ply: submittedTurns.length + 1,
+    botColor: pending.botColor,
+    effort: botEffortName(assignments[pending.botColor]),
+    game: cloneGame(pending.game ?? game),
+    selectedMoves: result.moves.map(cloneMove),
+    selectedScore: result.score ?? null,
+    selectedDepth: result.depth ?? null,
+    selectedNodes: result.nodes ?? null,
+    choices: rankedBotChoices(pending.results, result).map((choice) => ({
+      moves: choice.moves.map(cloneMove),
+      score: choice.score ?? null,
+      depth: choice.depth ?? null,
+      nodes: choice.nodes ?? null,
+      gpuSearch: choice.gpuSearch ?? null
+    }))
+  };
+}
+
+function recordBotDecision(result) {
+  if (result?.trainingDecision) {
+    botDecisionLog.push(result.trainingDecision);
+  }
+}
+
+function botChoiceScore(choice) {
+  return Number.isFinite(choice?.score) ? choice.score : -Infinity;
+}
+
+function botMovesKey(moves) {
+  return (moves ?? []).map(formatBotMove).join("|");
+}
+
+function formatBotMove(move) {
+  if (!move?.from || !move?.to) {
+    return "?";
+  }
+  return `${formatBotSquare(move.from)} -> ${formatBotSquare(move.to)}`;
+}
+
+function formatBotSquare(square) {
+  const file = typeof square.x === "number" ? String.fromCharCode(97 + square.x) : "?";
+  const rank = typeof square.y === "number" ? String(8 - square.y) : "?";
+  return `T${square.timelineId ?? "?"}@${square.time ?? "?"}:${file}${rank}`;
+}
+
+function formatBotEvaluation(score) {
+  if (!Number.isFinite(score)) {
+    return "?";
+  }
+  return `${score > 0 ? "+" : ""}${(score / 100).toFixed(2)}`;
+}
+
 async function completeBotTurn(botColor, result) {
   if (!isBotAssignment(assignments[botColor]) || stagedMoves.length > 0) {
     return;
@@ -1250,6 +1477,7 @@ async function completeBotTurn(botColor, result) {
     return;
   }
 
+  recordBotDecision(result);
   const before = turnSignature();
   for (const move of result.moves) {
     if (!(await applyEngineMove(move.from, move.to))) {
@@ -1341,33 +1569,134 @@ async function loadTrainingStatus() {
       throw new Error("Training endpoints disabled");
     }
     const payload = await response.json();
-    trainingEnabled = payload.enabled === true;
-    elements.trainingPanel.hidden = !trainingEnabled;
+    if (payload?.enabled !== true || payload.modelPath !== "engine/models/value-v1/value-model.cfnn") {
+      throw new Error("Training endpoints disabled");
+    }
+    trainingEnabled = true;
+    elements.openTrainingButton.hidden = false;
+    elements.trainingPanel.hidden = false;
+    await applyTrainingGpuProfile();
+    const modelHash = payload.modelHash ? `, hash ${payload.modelHash}` : "";
+    const modelPath = payload.resolvedModelPath ? ` (${payload.resolvedModelPath})` : "";
+    const gpuText = trainingGpuProfile ? `, GPU ${trainingGpuProfile.name}` : "";
     elements.trainingStatus.textContent = payload.modelPresent
-      ? `Active model ${payload.modelBytes ?? 0} bytes`
-      : "No active model";
+      ? `Active model ${payload.modelBytes ?? 0} bytes${modelHash}${gpuText}${modelPath}`
+      : `No active model${gpuText}`;
     renderTrainingButtons();
   } catch {
     trainingEnabled = false;
+    elements.openTrainingButton.hidden = true;
+    elements.trainingModal.hidden = true;
     elements.trainingPanel.hidden = true;
   }
 }
 
 function trainingConfig() {
+  const caps = trainingGpuProfile?.config ?? {};
   return {
-    samples: clampNumber(elements.trainingSamplesInput.value, 1, 64, 4),
-    depth: clampNumber(elements.trainingDepthInput.value, 1, 5, 5),
-    nodes: clampNumber(elements.trainingNodesInput.value, 1, 200000, 200000),
-    learningRate: clampNumber(elements.trainingRateInput.value, 0.0001, 0.1, 0.001),
-    epochs: clampNumber(elements.trainingEpochsInput.value, 1, 5000, 1000),
-    maxBuffer: clampNumber(elements.trainingBufferInput.value, 16, 2048, 256),
+    labelMode: elements.trainingLabelModeSelect.value,
+    samples: clampNumber(elements.trainingSamplesInput.value, 1, caps.maxSamples ?? 512, caps.samples ?? 64),
+    selfPlayWorkers: clampNumber(elements.trainingSelfPlayWorkersInput.value, 1, caps.maxSelfPlayWorkers ?? 8, caps.selfPlayWorkers ?? 2),
+    searchWorkers: clampNumber(elements.trainingSearchWorkersInput.value, 1, caps.maxSearchWorkers ?? 16, caps.searchWorkers ?? 2),
+    explorationTemperature: clampNumber(elements.trainingTemperatureInput.value, 0, 2, 0.25),
+    depth: clampNumber(elements.trainingDepthInput.value, 1, 8, 5),
+    nodes: clampNumber(elements.trainingNodesInput.value, 1, caps.maxNodes ?? 65536, caps.nodes ?? 16384),
+    learningRate: clampNumber(elements.trainingRateInput.value, 0.0001, 0.1, 0.01),
+    epochs: clampNumber(elements.trainingEpochsInput.value, 1, caps.maxEpochs ?? 65536, caps.epochs ?? 8192),
+    maxBuffer: clampNumber(elements.trainingBufferInput.value, 16, caps.maxBuffer ?? 8192, caps.buffer ?? 4096),
+    batchSize: clampNumber(elements.trainingBatchInput.value, 16, caps.maxBatch ?? 4096, caps.batch ?? 1024),
+    validationSplit: clampNumber(elements.trainingValidationInput.value, 0, 0.3, 0.1),
+    lossLogReplay: clampNumber(elements.trainingLossLogReplayInput.value, 0, 32, 4),
+    validationInterval: clampNumber(elements.trainingValidationIntervalInput.value, 16, caps.maxValidationInterval ?? 4096, caps.validationInterval ?? 256),
+    patience: clampNumber(elements.trainingPatienceInput.value, 1, 64, 12),
+    weightDecay: clampNumber(elements.trainingDecayInput.value, 0, 0.01, 0.00001),
     labelWorkers: autoTrainingWorkers()
   };
 }
 
 function autoTrainingWorkers() {
   const cores = navigator.hardwareConcurrency ?? 4;
-  return Math.max(1, Math.min(cores - 1, 16));
+  return Math.max(1, Math.min(cores - 1, 4));
+}
+
+async function applyTrainingGpuProfile() {
+  if (trainingGpuProfileApplied) {
+    return;
+  }
+  trainingGpuProfileApplied = true;
+  trainingGpuProfile = await detectTrainingGpuProfile();
+  if (!trainingGpuProfile) {
+    return;
+  }
+  const config = trainingGpuProfile.config;
+  applyTrainingInputProfile(elements.trainingSamplesInput, config.samples, config.maxSamples);
+  applyTrainingInputProfile(elements.trainingSelfPlayWorkersInput, config.selfPlayWorkers, config.maxSelfPlayWorkers);
+  applyTrainingInputProfile(elements.trainingSearchWorkersInput, config.searchWorkers, config.maxSearchWorkers);
+  applyTrainingInputProfile(elements.trainingNodesInput, config.nodes, config.maxNodes);
+  applyTrainingInputProfile(elements.trainingEpochsInput, config.epochs, config.maxEpochs);
+  applyTrainingInputProfile(elements.trainingBufferInput, config.buffer, config.maxBuffer);
+  applyTrainingInputProfile(elements.trainingBatchInput, config.batch, config.maxBatch);
+  applyTrainingInputProfile(elements.trainingValidationIntervalInput, config.validationInterval, config.maxValidationInterval);
+}
+
+async function detectTrainingGpuProfile() {
+  if (!navigator.gpu?.requestAdapter) {
+    return null;
+  }
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      return null;
+    }
+    const limits = adapter.limits ?? {};
+    const maxStorageBinding = limits.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
+    const maxBufferSize = limits.maxBufferSize ?? maxStorageBinding;
+    const hardwareThreads = navigator.hardwareConcurrency ?? 4;
+    const maxProjectedReplay = clampPowerOfTwo(Math.floor(maxStorageBinding / (2048 * Float32Array.BYTES_PER_ELEMENT)), 512, 16384);
+    const maxBatchByActivation = clampPowerOfTwo(Math.floor(maxStorageBinding / (1024 * Float32Array.BYTES_PER_ELEMENT)), 512, 8192);
+    const highMemory = maxStorageBinding >= 512 * 1024 * 1024 || maxBufferSize >= 1024 * 1024 * 1024;
+    const mediumMemory = maxStorageBinding >= 256 * 1024 * 1024 || maxBufferSize >= 512 * 1024 * 1024;
+    const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 16 : 8, hardwareThreads - 1));
+    const config = {
+      maxSamples: highMemory ? 1024 : 512,
+      samples: highMemory ? 256 : mediumMemory ? 128 : 64,
+      maxSelfPlayWorkers: maxWorkerBudget,
+      selfPlayWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 4 : mediumMemory ? 3 : 2)),
+      maxSearchWorkers: maxWorkerBudget,
+      searchWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 8 : mediumMemory ? 4 : 2)),
+      maxNodes: highMemory ? 131072 : 65536,
+      nodes: highMemory ? 32768 : 16384,
+      maxEpochs: 65536,
+      epochs: highMemory ? 16384 : 8192,
+      maxBuffer: Math.min(maxProjectedReplay, highMemory ? 16384 : 8192),
+      buffer: Math.min(maxProjectedReplay, highMemory ? 8192 : mediumMemory ? 6144 : 4096),
+      maxBatch: Math.min(maxBatchByActivation, highMemory ? 8192 : 4096),
+      batch: Math.min(maxBatchByActivation, highMemory ? 4096 : mediumMemory ? 2048 : 1024),
+      maxValidationInterval: 4096,
+      validationInterval: highMemory ? 256 : 128
+    };
+    return {
+      name: adapter.info?.description || adapter.info?.device || adapter.info?.vendor || "WebGPU",
+      limits,
+      config
+    };
+  } catch (error) {
+    console.warn("GPU capability detection failed", error);
+    return null;
+  }
+}
+
+function applyTrainingInputProfile(input, value, max) {
+  if (!input) {
+    return;
+  }
+  input.max = String(max);
+  input.value = String(value);
+}
+
+function clampPowerOfTwo(value, min, max) {
+  const clamped = Math.max(min, Math.min(max, value || min));
+  return 2 ** Math.floor(Math.log2(clamped));
 }
 
 function clampNumber(value, min, max, fallback) {
@@ -1379,11 +1708,25 @@ function clampNumber(value, min, max, fallback) {
 }
 
 function renderTrainingButtons() {
-  if (!elements.trainingPanel || elements.trainingPanel.hidden) {
+  if (!elements.trainingPanel || !trainingEnabled) {
     return;
   }
   elements.startTrainingButton.disabled = !engine || !trainingEnabled || trainingRunning;
   elements.stopTrainingButton.disabled = !trainingRunning;
+}
+
+function openTrainingModal() {
+  if (!trainingEnabled) {
+    return;
+  }
+  elements.trainingModal.hidden = false;
+  elements.openTrainingButton.setAttribute("aria-expanded", "true");
+  renderTrainingButtons();
+}
+
+function closeTrainingModal() {
+  elements.trainingModal.hidden = true;
+  elements.openTrainingButton.setAttribute("aria-expanded", "false");
 }
 
 async function startFrontendTraining() {
@@ -1442,6 +1785,7 @@ async function replaceActiveModel(model) {
   }
   resetAiWorker();
   await loadTrainingStatus();
+  return payload;
 }
 
 function resetAiWorker() {
@@ -1474,9 +1818,24 @@ async function handleTrainingWorkerMessage(event) {
     collected,
     sampleCount,
     labelWorkers,
+    labelKind,
+    labelPhase,
+    selfPlayWorkers,
+    searchWorkers,
     bufferSize,
-    pseudoCount,
-    gpuPhase
+    labelCounts,
+    batchSize,
+    batchesPerSubmit,
+    validationInterval,
+    replaySize,
+    validationLoss,
+    bestValidationLoss,
+    epochsWithoutImprovement,
+    earlyStopReason,
+    nonZeroWeights,
+    gpuPhase,
+    metrics,
+    lossLogValidation
   } = event.data;
   if (id !== trainingRequestId) {
     return;
@@ -1487,15 +1846,21 @@ async function handleTrainingWorkerMessage(event) {
     renderTrainingButtons();
     return;
   }
-  if (labelWorkers !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: encoding positions with ${labelWorkers} workers.`;
+  if (labelWorkers !== undefined && collected === undefined) {
+    const suffix = labelKind ? ` (${labelKind})` : "";
+    const phase = labelPhase === "positions" ? "generating positions" : "encoding positions";
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: ${phase} with ${labelWorkers} workers${suffix}.`;
     return;
   }
   if (model) {
     trainingCycle += 1;
-    elements.trainingStatus.textContent = `Run ${trainingCycle}: replacing model. Loss ${formatLoss(loss)}.`;
+    const stopText = earlyStopReason ? ` ${earlyStopReason}.` : "";
+    const replayText = formatLossLogValidation(metrics?.lossLogValidation);
+    elements.trainingStatus.textContent = `Run ${trainingCycle}: replacing model. Loss ${formatLoss(loss)}, best validation ${formatLoss(bestValidationLoss)}${replayText}.${stopText}`;
+    logTrainingMetrics(trainingCycle, metrics);
+    let replacement = null;
     try {
-      await replaceActiveModel(model);
+      replacement = await replaceActiveModel(model);
     } catch (replaceError) {
       trainingRunning = false;
       elements.trainingStatus.textContent = replaceError.message;
@@ -1506,25 +1871,143 @@ async function handleTrainingWorkerMessage(event) {
       renderTrainingButtons();
       return;
     }
-    elements.trainingStatus.textContent = `Run ${trainingCycle}: ${model.nonZeroWeights ?? 0} weights changed. Restarting.`;
+    const lossLogValidation = await validateTrainingLossLogs(trainingConfig());
+    if (metrics && lossLogValidation) {
+      metrics.lossLogValidation = lossLogValidation;
+    }
+    if (!trainingRunning) {
+      renderTrainingButtons();
+      return;
+    }
+    if (replacement?.changed === false) {
+      const path = replacement.resolvedModelPath ?? replacement.modelPath ?? "model file";
+      const hash = replacement.newHash ?? "same hash";
+      elements.trainingStatus.textContent = `Run ${trainingCycle}: trained model matched disk (${hash}); no file diff at ${path}${formatLossLogValidation(lossLogValidation)}. Continuing with fresh samples.`;
+      setTimeout(runFrontendTrainingCycle, 0);
+      return;
+    }
+    const persisted = `model saved (${replacement?.newHash ?? "new hash"})`;
+    elements.trainingStatus.textContent = `Run ${trainingCycle}: ${nonZeroWeights ?? 0} nonzero weights, ${persisted}${formatLossLogValidation(lossLogValidation)}. Restarting.`;
     setTimeout(runFrontendTrainingCycle, 0);
     return;
   }
+  if (lossLogValidation) {
+    const validation = event.data.lossLogValidation ?? event.data.validation;
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: replaying loss logs${formatLossLogValidation(validation)}.`;
+    return;
+  }
   if (collected !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: encoded ${collected}/${sampleCount}.`;
+    const suffix = labelKind ? ` ${labelKind}` : "";
+    const workerText = labelWorkers ? ` across ${labelWorkers} worker${labelWorkers === 1 ? "" : "s"}` : "";
+    const verb = labelPhase === "positions" ? "generated" : "encoded";
+    const noun = labelPhase === "labels" && labelKind === "search" ? " labels" : "";
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: ${verb} ${collected}/${sampleCount}${suffix}${noun}${workerText}.`;
     return;
   }
   if (gpuPhase) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples (${pseudoCount} model-labeled).`;
+    const selfPlayText = selfPlayWorkers ? `, self-play ${selfPlayWorkers}` : "";
+    const searchText = searchWorkers ? `, search ${searchWorkers}` : "";
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: GPU training ${bufferSize} samples, batch ${batchSize}${selfPlayText}${searchText}, temp ${formatTemperature(trainingConfig().explorationTemperature)}. ${formatLabelCounts(labelCounts)}.`;
     return;
   }
   if (epoch !== undefined) {
-    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: epoch ${epoch}. Loss ${formatLoss(loss)}.`;
+    const stale = epochsWithoutImprovement !== undefined ? `, stale ${epochsWithoutImprovement}` : "";
+    const submitGroup = batchesPerSubmit ? `, submit group ${batchesPerSubmit}` : "";
+    const validationText = validationInterval ? `, val every ${validationInterval}` : "";
+    elements.trainingStatus.textContent = `Run ${trainingCycle + 1}: epoch ${epoch}. Train ${formatLoss(loss)}, validation ${formatLoss(validationLoss)}, best ${formatLoss(bestValidationLoss)}${stale}. Replay ${replaySize ?? "?"}, batch ${batchSize ?? "?"}${submitGroup}${validationText}.`;
   }
+}
+
+function validateTrainingLossLogs(config) {
+  if (!trainingRunning || (config.lossLogReplay ?? 0) <= 0) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const worker = new Worker("./training-worker.js", { type: "module" });
+    const id = ++trainingRequestId;
+    const cleanup = () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+      worker.removeEventListener("messageerror", handleError);
+      worker.terminate();
+    };
+    const handleMessage = (event) => {
+      if (event.data.id !== id) {
+        return;
+      }
+      if (event.data.type === "lossLogValidation") {
+        cleanup();
+        resolve(event.data.validation ?? null);
+        return;
+      }
+      if (event.data.lossLogValidation) {
+        elements.trainingStatus.textContent = `Run ${trainingCycle}: replaying loss logs${formatLossLogValidation(event.data.lossLogValidation)}.`;
+      }
+      if (event.data.ok === false) {
+        cleanup();
+        resolve(null);
+      }
+    };
+    const handleError = () => {
+      cleanup();
+      resolve(null);
+    };
+    worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
+    worker.addEventListener("messageerror", handleError);
+    worker.postMessage({
+      id,
+      type: "validateLossLogs",
+      config
+    });
+  });
+}
+
+function logTrainingMetrics(run, metrics) {
+  if (!metrics?.phases) {
+    return;
+  }
+  console.groupCollapsed(`Training run ${run}: ${metrics.totalMs ?? "?"} ms`);
+  console.table(Object.entries(metrics.phases).map(([phase, ms]) => ({
+    phase,
+    ms
+  })));
+  if (metrics.sampleRates && Object.keys(metrics.sampleRates).length > 0) {
+    console.table(Object.entries(metrics.sampleRates).map(([source, samplesPerSecond]) => ({
+      source,
+      samplesPerSecond
+    })));
+  }
+  if (metrics.lossLogValidation) {
+    console.table([metrics.lossLogValidation]);
+  }
+  console.groupEnd();
+}
+
+function formatLossLogValidation(validation) {
+  if (!validation || validation.checked === 0) {
+    return "";
+  }
+  const state = validation.failed ? "no loss-log decision changes" : "loss-log changes";
+  return `, ${state} ${validation.changed}/${validation.checked}`;
 }
 
 function formatLoss(loss) {
   return Number.isFinite(loss) ? loss.toFixed(2) : "pending";
+}
+
+function formatTemperature(value) {
+  return Number.isFinite(value) ? value.toFixed(2).replace(/\.?0+$/, "") : "?";
+}
+
+function formatLabelCounts(counts) {
+  if (!counts || typeof counts !== "object") {
+    return "No source counts";
+  }
+  return ["search", "outcome", "distilled", "unknown"]
+    .filter((key) => counts[key])
+    .map((key) => `${key} ${counts[key]}`)
+    .join(", ") || "No source counts";
 }
 
 elements.resetButton.addEventListener("click", () => {
@@ -1613,6 +2096,26 @@ elements.concedeButton.addEventListener("click", () => {
 
 elements.toggleHudButton.addEventListener("click", () => {
   setHudCollapsed(elements.hud.dataset.collapsed !== "true");
+});
+
+elements.openTrainingButton.addEventListener("click", () => {
+  openTrainingModal();
+});
+
+elements.closeTrainingButton.addEventListener("click", () => {
+  closeTrainingModal();
+});
+
+elements.trainingModal.addEventListener("click", (event) => {
+  if (event.target === elements.trainingModal) {
+    closeTrainingModal();
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.trainingModal.hidden) {
+    closeTrainingModal();
+  }
 });
 
 elements.joinWhiteButton.addEventListener("click", () => {

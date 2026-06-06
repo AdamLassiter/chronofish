@@ -1,7 +1,7 @@
 const GPU_CANDIDATE_STRIDE = 24;
 const GPU_SOURCE_STRIDE = 10;
 const GPU_TARGET_STRIDE = 10;
-const GPU_BOARD_STRIDE = 68;
+const GPU_BOARD_STRIDE = 69;
 const GPU_MUTATION_BOARD_STRIDE = 76;
 const GPU_MUTATION_CHILD_STRIDE = GPU_MUTATION_BOARD_STRIDE * 2;
 const GPU_MUTATION_STATUS_OK = 1;
@@ -9,6 +9,9 @@ const GPU_MUTATION_STATUS_ROYAL_CAPTURE = 2;
 const GPU_MUTATION_STATUS_BRANCH_OK = 3;
 const GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE = 4;
 const GPU_TURN_STATUS_RECORD_STRIDE = 4;
+let cachedGpuAdapter = null;
+let cachedGpuDevice = null;
+const pipelineCache = new Map();
 
 const GPU_TURN_STATUS_SHADER = `
 struct Params {
@@ -123,8 +126,8 @@ struct Params {
 @group(0) @binding(4) var<uniform> params: Params;
 @group(0) @binding(5) var<storage, read> boards: array<i32>;
 
-const BOARD_STRIDE: u32 = 68u;
-const BOARD_SQUARE_OFFSET: u32 = 4u;
+const BOARD_STRIDE: u32 = 69u;
+const BOARD_SQUARE_OFFSET: u32 = 5u;
 const SOURCE_STRIDE: u32 = 10u;
 const TARGET_STRIDE: u32 = 10u;
 
@@ -198,21 +201,19 @@ fn same_distance(a: i32, b: i32, c: i32, d: i32, count: i32) -> bool {
 }
 
 fn piece_value(piece_type: i32) -> i32 {
-  switch piece_type {
-    case 1: { return 20000; }
-    case 2: { return 10000; }
-    case 3: { return 900; }
-    case 4: { return 20000; }
-    case 5: { return 700; }
-    case 6: { return 500; }
-    case 7: { return 330; }
-    case 8: { return 500; }
-    case 9: { return 900; }
-    case 10: { return 320; }
-    case 11: { return 100; }
-    case 12: { return 130; }
-    default: { return 0; }
-  }
+  if (piece_type == 1) { return 20000; }
+  if (piece_type == 2) { return 10000; }
+  if (piece_type == 3) { return 900; }
+  if (piece_type == 4) { return 20000; }
+  if (piece_type == 5) { return 700; }
+  if (piece_type == 6) { return 500; }
+  if (piece_type == 7) { return 330; }
+  if (piece_type == 8) { return 500; }
+  if (piece_type == 9) { return 900; }
+  if (piece_type == 10) { return 320; }
+  if (piece_type == 11) { return 100; }
+  if (piece_type == 12) { return 130; }
+  return 0;
 }
 
 fn royal_move_penalty(piece_type: i32, target_piece: i32) -> i32 {
@@ -225,7 +226,7 @@ fn royal_move_penalty(piece_type: i32, target_piece: i32) -> i32 {
   return 0;
 }
 
-fn legal_shape(piece_type: i32, color: i32, dx: i32, dy: i32, dt: i32, dl: i32, same_board: bool, target_piece: i32, target_color: i32) -> bool {
+fn legal_shape(piece_type: i32, color: i32, from_y: i32, dx: i32, dy: i32, dt: i32, dl: i32, same_board: bool, target_piece: i32, target_color: i32, castling: i32) -> bool {
   let ax = abs_i32(dx);
   let ay = abs_i32(dy);
   let at = abs_i32(dt);
@@ -236,8 +237,15 @@ fn legal_shape(piece_type: i32, color: i32, dx: i32, dy: i32, dt: i32, dl: i32, 
   }
   let forward = select(1, -1, color == 1);
   let timeline_forward = forward;
+  let has_moved = select(from_y != 1, from_y != 6, color == 1);
 
   if (piece_type == 1 || piece_type == 2) {
+    if (piece_type == 1 && same_board && dy == 0 && dt == 0 && dl == 0 && ax == 2 && target_piece == 0) {
+      if (color == 0 && from_y == 0 && dx == 2 && (castling & 1) != 0) { return true; }
+      if (color == 0 && from_y == 0 && dx == -2 && (castling & 2) != 0) { return true; }
+      if (color == 1 && from_y == 7 && dx == 2 && (castling & 4) != 0) { return true; }
+      if (color == 1 && from_y == 7 && dx == -2 && (castling & 8) != 0) { return true; }
+    }
     return ax <= 1 && ay <= 1 && at <= 1 && al <= 1;
   }
   if (piece_type == 10) {
@@ -245,15 +253,18 @@ fn legal_shape(piece_type: i32, color: i32, dx: i32, dy: i32, dt: i32, dl: i32, 
   }
   if (piece_type == 11) {
     if (same_board && dx == 0 && dy == forward && target_piece == 0) { return true; }
+    if (same_board && dx == 0 && dy == forward * 2 && !has_moved && target_piece == 0) { return true; }
     if (same_board && ax == 1 && dy == forward && target_piece != 0 && target_color != color) { return true; }
-    if (!same_board && dx == 0 && dy == 0 && dt == 0 && (dl == timeline_forward || dl == timeline_forward * 2) && target_piece == 0) { return true; }
+    if (!same_board && dx == 0 && dy == 0 && dt == 0 && (dl == timeline_forward || (dl == timeline_forward * 2 && !has_moved)) && target_piece == 0) { return true; }
     return at == 1 && dl == timeline_forward && dx == 0 && dy == 0 && target_piece != 0 && target_color != color;
   }
   if (piece_type == 12) {
     if (target_piece != 0 && changed >= 2 && ax <= 1 && ay <= 1 && at <= 1 && al <= 1 && (dy == forward || dl == timeline_forward) && dy != -forward && dl != -timeline_forward) {
       return true;
     }
-    return same_board && dx == 0 && dy == forward && target_piece == 0;
+    if (same_board && dx == 0 && dy == forward && target_piece == 0) { return true; }
+    if (same_board && dx == 0 && dy == forward * 2 && !has_moved && target_piece == 0) { return true; }
+    return !same_board && dx == 0 && dy == 0 && dt == 0 && (dl == timeline_forward || (dl == timeline_forward * 2 && !has_moved)) && target_piece == 0;
   }
   if (piece_type == 6) {
     return changed == 1;
@@ -337,6 +348,37 @@ fn path_clear(piece_type: i32, color: i32, from_row: i32, from_time: i32, from_x
   return true;
 }
 
+fn castling_path_clear(castling: i32, piece_type: i32, color: i32, from_row: i32, from_time: i32, from_x: i32, from_y: i32, dx: i32, dy: i32, dt: i32, dl: i32) -> bool {
+  if (piece_type != 1 || dy != 0 || dt != 0 || dl != 0 || abs_i32(dx) != 2) {
+    return true;
+  }
+  let expected_y = select(0, 7, color == 1);
+  if (from_x != 4 || from_y != expected_y) {
+    return false;
+  }
+  let rook_x = select(0, 7, dx > 0);
+  let rook_code = square_code_at(from_row, from_time, rook_x, from_y);
+  if ((rook_code & 255) != 6 || ((rook_code >> 8) & 255) != color) {
+    return false;
+  }
+  if (color == 0 && dx == 2 && (castling & 1) == 0) { return false; }
+  if (color == 0 && dx == -2 && (castling & 2) == 0) { return false; }
+  if (color == 1 && dx == 2 && (castling & 4) == 0) { return false; }
+  if (color == 1 && dx == -2 && (castling & 8) == 0) { return false; }
+  let step = sign_i32(dx);
+  var x = from_x + step;
+  loop {
+    if (x == rook_x) {
+      break;
+    }
+    if (square_code_at(from_row, from_time, x, from_y) != 0) {
+      return false;
+    }
+    x = x + step;
+  }
+  return true;
+}
+
 @compute @workgroup_size(64)
 fn score_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
   let index = id.x;
@@ -368,6 +410,11 @@ fn score_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
   let to_row = targets[target_base + 6u];
   let target_side_to_move = targets[target_base + 7u];
   let target_latest = targets[target_base + 9u] != 0;
+  let source_board_base_i32 = board_base_by_row_time(from_row, from_time);
+  var source_castling = 0;
+  if (source_board_base_i32 >= 0) {
+    source_castling = boards[u32(source_board_base_i32) + 4u];
+  }
   let active_distance = active_distance_from_targets();
   let present = present_time_from_targets(active_distance);
   let source_active = owner_active(source_owner, from_timeline, active_distance);
@@ -420,11 +467,15 @@ fn score_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
     scores[index] = -2147483647;
     return;
   }
-  if (!legal_shape(piece_type, color, dx, dy, dt, dl, same_board, target_piece, target_color)) {
+  if (!legal_shape(piece_type, color, from_y, dx, dy, dt, dl, same_board, target_piece, target_color, source_castling)) {
     scores[index] = -2147483647;
     return;
   }
   if (!path_clear(piece_type, color, from_row, from_time, from_x, from_y, dx, dy, raw_dt, dt, dl)) {
+    scores[index] = -2147483647;
+    return;
+  }
+  if (!castling_path_clear(source_castling, piece_type, color, from_row, from_time, from_x, from_y, dx, dy, dt, dl)) {
     scores[index] = -2147483647;
     return;
   }
@@ -459,21 +510,19 @@ fn same_square(left_base: u32, right_base: u32, left_offset: u32, right_offset: 
 }
 
 fn piece_value(piece_type: i32) -> i32 {
-  switch piece_type {
-    case 1: { return 20000; }
-    case 2: { return 10000; }
-    case 3: { return 900; }
-    case 4: { return 20000; }
-    case 5: { return 700; }
-    case 6: { return 500; }
-    case 7: { return 330; }
-    case 8: { return 500; }
-    case 9: { return 900; }
-    case 10: { return 320; }
-    case 11: { return 100; }
-    case 12: { return 130; }
-    default: { return 0; }
-  }
+  if (piece_type == 1) { return 20000; }
+  if (piece_type == 2) { return 10000; }
+  if (piece_type == 3) { return 900; }
+  if (piece_type == 4) { return 20000; }
+  if (piece_type == 5) { return 700; }
+  if (piece_type == 6) { return 500; }
+  if (piece_type == 7) { return 330; }
+  if (piece_type == 8) { return 500; }
+  if (piece_type == 9) { return 900; }
+  if (piece_type == 10) { return 320; }
+  if (piece_type == 11) { return 100; }
+  if (piece_type == 12) { return 130; }
+  return 0;
 }
 
 @compute @workgroup_size(16, 16)
@@ -569,36 +618,36 @@ fn promoted_piece_type(piece_type: i32, color: i32, y: i32) -> i32 {
 fn update_castling_rights(castling: i32, piece_type: i32, color: i32, from_x: i32, from_y: i32, to_x: i32, to_y: i32, target_code: i32) -> i32 {
   var rights = castling;
   if (piece_type == 1 && color == 0) {
-    rights = rights & ~3;
+    rights = rights & 12;
   }
   if (piece_type == 1 && color == 1) {
-    rights = rights & ~12;
+    rights = rights & 3;
   }
   if (piece_type == 6 && color == 0 && from_y == 0 && from_x == 0) {
-    rights = rights & ~2;
+    rights = rights & 13;
   }
   if (piece_type == 6 && color == 0 && from_y == 0 && from_x == 7) {
-    rights = rights & ~1;
+    rights = rights & 14;
   }
   if (piece_type == 6 && color == 1 && from_y == 7 && from_x == 0) {
-    rights = rights & ~8;
+    rights = rights & 7;
   }
   if (piece_type == 6 && color == 1 && from_y == 7 && from_x == 7) {
-    rights = rights & ~4;
+    rights = rights & 11;
   }
   let captured_type = target_code & 255;
   let captured_color = (target_code >> 8) & 255;
   if (captured_type == 6 && captured_color == 0 && to_y == 0 && to_x == 0) {
-    rights = rights & ~2;
+    rights = rights & 13;
   }
   if (captured_type == 6 && captured_color == 0 && to_y == 0 && to_x == 7) {
-    rights = rights & ~1;
+    rights = rights & 14;
   }
   if (captured_type == 6 && captured_color == 1 && to_y == 7 && to_x == 0) {
-    rights = rights & ~8;
+    rights = rights & 7;
   }
   if (captured_type == 6 && captured_color == 1 && to_y == 7 && to_x == 7) {
-    rights = rights & ~4;
+    rights = rights & 11;
   }
   return rights;
 }
@@ -741,7 +790,7 @@ fn mutate_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `;
 
-async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshotOverride = null }) {
+async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshotOverride = null, temperature = 0, randomSeed = 0 }) {
   if (!navigator.gpu) {
     return null;
   }
@@ -755,14 +804,13 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
     return null;
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     return null;
   }
-  const device = await adapter.requestDevice();
   const turnStatus = await turnStatusOnGpu(device, snapshot);
   if (gpuMode === "full") {
-    return tryFullGpuSearch(device, snapshot, candidates, { requestedDepth, nodes: nodes ?? 64, turnStatus });
+    return tryFullGpuSearch(device, snapshot, candidates, { requestedDepth, nodes: nodes ?? 64, turnStatus, temperature, randomSeed });
   }
   const scored = await scoreCandidatesOnGpu(device, candidates, snapshot.turn);
   let ranked = Array.from(scored.scores, (score, index) => ({
@@ -777,17 +825,24 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
   if (requestedDepth > 1) {
     return searchSingleMoveRepliesOnGpu(device, snapshot, candidates, scored.records, ranked, {
       requestedDepth,
-      nodes: nodes ?? 64
+      nodes: nodes ?? 64,
+      temperature,
+      randomSeed
     });
   }
 
   if (turnStatus.pendingPresentBoardCount === 1 && ranked.length > 0) {
     const mutated = await mutateRankedCandidatesOnGpu(device, candidates, scored.records, ranked);
-    const selected = mutated.find((entry) => entry.mutationStatus >= GPU_MUTATION_STATUS_OK);
+    const selected = selectSearchCandidate(
+      mutated.filter((entry) => entry.mutationStatus >= GPU_MUTATION_STATUS_OK),
+      temperature,
+      randomSeed
+    );
     if (selected) {
       return {
         moves: [selected.move],
         score: selected.score,
+        choices: selected.choices,
         depth: requestedDepth,
         nodes: ranked.length,
         status: "ok",
@@ -802,9 +857,9 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
   return null;
 }
 
-async function searchSingleMoveRepliesOnGpu(device, snapshot, inputs, allCandidateRecords, ranked, { requestedDepth, nodes }) {
+async function searchSingleMoveRepliesOnGpu(device, snapshot, inputs, allCandidateRecords, ranked, { requestedDepth, nodes, temperature = 0, randomSeed = 0 }) {
   const mutated = await mutateRankedCandidatesOnGpu(device, inputs, allCandidateRecords, ranked, { readChildren: true });
-  let best = null;
+  const candidates = [];
   for (const entry of mutated.filter((candidate) => candidate.mutationStatus >= GPU_MUTATION_STATUS_OK && candidate.childBoards)) {
     let score = entry.score;
     if (entry.mutationStatus !== GPU_MUTATION_STATUS_ROYAL_CAPTURE && entry.mutationStatus !== GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE) {
@@ -821,11 +876,9 @@ async function searchSingleMoveRepliesOnGpu(device, snapshot, inputs, allCandida
       gpuSnapshot: snapshot.format,
       gpuSearch: "single-move-replies"
     };
-    if (!best || candidate.score > best.score || candidate.score === best.score && turnPlanKey(candidate.moves) < turnPlanKey(best.moves)) {
-      best = candidate;
-    }
+    candidates.push(candidate);
   }
-  return best;
+  return selectSearchCandidate(candidates, temperature, randomSeed);
 }
 
 async function legalTargetsOnGpu(position, snapshotOverride = null) {
@@ -841,11 +894,10 @@ async function legalTargetsOnGpu(position, snapshotOverride = null) {
     return { source: null, targets: [] };
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
   const targets = [];
   const seen = new Set();
@@ -907,11 +959,10 @@ async function applyMoveOnGpu(move, snapshotOverride = null) {
     throw new Error("No GPU move candidates are available.");
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
   const index = findCandidateIndex(scored, move);
   if (index < 0 || (scored.scores[index] ?? -2147483647) <= -2147480000) {
@@ -936,11 +987,21 @@ async function submitTurnOnGpu(snapshotOverride = null) {
   if (!snapshot) {
     throw new Error("GPU snapshot is unavailable.");
   }
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) {
+  if (snapshot.royalCaptureBy) {
+    return {
+      complete: true,
+      terminal: true,
+      winner: snapshot.royalCaptureBy,
+      nextTurn: snapshot.turn,
+      presentTime: presentTimeForSnapshot(snapshot) ?? 0,
+      pendingPresentBoardCount: 0,
+      message: `${capitalize(snapshot.royalCaptureBy)} wins by royal capture.`
+    };
+  }
+  const device = await getGpuDevice();
+  if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const device = await adapter.requestDevice();
   return turnStatusOnGpu(device, snapshot);
 }
 
@@ -969,10 +1030,7 @@ async function turnStatusOnGpu(device, snapshot) {
   view.setUint32(0, records.length / GPU_TURN_STATUS_RECORD_STRIDE, true);
   view.setInt32(4, colorCode(snapshot.turn), true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: GPU_TURN_STATUS_SHADER }), entryPoint: "turn_status" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "turn_status", GPU_TURN_STATUS_SHADER, "turn_status");
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [boardBuffer, resultBuffer, paramsBuffer]
@@ -1014,7 +1072,7 @@ function findCandidateIndex(scored, move) {
   return -1;
 }
 
-async function tryFullGpuSearch(device, snapshot, inputs, { requestedDepth, nodes, turnStatus }) {
+async function tryFullGpuSearch(device, snapshot, inputs, { requestedDepth, nodes, turnStatus, temperature = 0, randomSeed = 0 }) {
   if (turnStatus.pendingPresentBoardCount !== 1) {
     throw new Error("Full GPU search currently requires one pending present board.");
   }
@@ -1038,7 +1096,7 @@ async function tryFullGpuSearch(device, snapshot, inputs, { requestedDepth, node
     throw new Error("Full GPU mutation produced no supported child states.");
   }
 
-  let best = null;
+  const candidates = [];
   for (const entry of supported.slice(0, Math.min(32, Math.max(8, nodes ?? 64)))) {
     let score = entry.score;
     if (requestedDepth > 1 && entry.mutationStatus !== GPU_MUTATION_STATUS_ROYAL_CAPTURE && entry.mutationStatus !== GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE) {
@@ -1058,14 +1116,13 @@ async function tryFullGpuSearch(device, snapshot, inputs, { requestedDepth, node
       gpuSnapshot: snapshot.format,
       gpuSearch: "full-single-present"
     };
-    if (!best || candidate.score > best.score || candidate.score === best.score && turnPlanKey(candidate.moves) < turnPlanKey(best.moves)) {
-      best = candidate;
-    }
+    candidates.push(candidate);
   }
-  if (!best) {
+  const selected = selectSearchCandidate(candidates, temperature, randomSeed);
+  if (!selected) {
     throw new Error("Full GPU search produced no legal result.");
   }
-  return best;
+  return selected;
 }
 
 async function bestReplyScoreOnGpu(device, snapshot, nodes) {
@@ -1082,6 +1139,73 @@ async function bestReplyScoreOnGpu(device, snapshot, nodes) {
     }
   }
   return best;
+}
+
+function selectSearchCandidate(candidates, temperature = 0, randomSeed = 0) {
+  const supported = candidates
+    .filter((candidate) => candidate?.moves?.length && Number.isFinite(candidate.score))
+    .sort((left, right) => {
+      const score = right.score - left.score;
+      if (score !== 0) {
+        return score;
+      }
+      const leftKey = turnPlanKey(left.moves);
+      const rightKey = turnPlanKey(right.moves);
+      if (leftKey === rightKey) {
+        return 0;
+      }
+      return leftKey < rightKey ? -1 : 1;
+    });
+  if (supported.length === 0) {
+    return null;
+  }
+  const temp = Number(temperature) || 0;
+  if (temp <= 0) {
+    return withSearchChoices(supported[0], supported);
+  }
+
+  const candidateLimit = Math.min(32, supported.length);
+  const top = supported.slice(0, candidateLimit);
+  const maxScore = top[0].score;
+  const scoreScale = Math.max(1, temp * 100);
+  const weights = top.map((candidate) => Math.exp(Math.max(-50, Math.min(0, (candidate.score - maxScore) / scoreScale))));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  let pick = seededUnit(randomSeed) * total;
+  for (let index = 0; index < top.length; index += 1) {
+    pick -= weights[index];
+    if (pick <= 0) {
+      return withSearchChoices(top[index], supported);
+    }
+  }
+  return withSearchChoices(top.at(-1), supported);
+}
+
+function withSearchChoices(selected, candidates) {
+  return {
+    ...selected,
+    choices: summarizeSearchChoices(candidates)
+  };
+}
+
+function summarizeSearchChoices(candidates) {
+  return candidates
+    .slice(0, 12)
+    .map((candidate, index) => ({
+      rank: index + 1,
+      score: candidate.score,
+      moves: candidate.moves ?? (candidate.move ? [candidate.move] : []),
+      depth: candidate.depth,
+      nodes: candidate.nodes,
+      gpuSearch: candidate.gpuSearch
+    }));
+}
+
+function seededUnit(seed) {
+  let state = (Number(seed) || 0) >>> 0;
+  state ^= state << 13;
+  state ^= state >>> 17;
+  state ^= state << 5;
+  return ((state >>> 0) || 1) / 0xffffffff;
 }
 
 function turnPlanKey(moves) {
@@ -1108,10 +1232,7 @@ async function scoreCandidatesOnGpu(device, inputs, turn) {
   }
   const targetBuffer = storageBuffer(device, inputs.targets, GPUBufferUsage.STORAGE);
   const boardBuffer = storageBuffer(device, inputs.boards ?? new Int32Array(GPU_BOARD_STRIDE), GPUBufferUsage.STORAGE);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: GPU_MOVEGEN_SHADER }), entryPoint: "score_candidates" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "score_candidates", GPU_MOVEGEN_SHADER, "score_candidates");
   const records = new Int32Array(candidateCount * GPU_CANDIDATE_STRIDE);
   const scores = new Int32Array(candidateCount);
   const sourceBatchSize = Math.max(1, Math.floor(maxCandidatesPerBatch / inputs.targetCount));
@@ -1187,10 +1308,7 @@ async function mutateRankedCandidatesOnGpu(device, inputs, allCandidateRecords, 
   view.setUint32(4, inputs.boardCount, true);
   view.setUint32(8, candidateRecords[1] ?? 0, true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: GPU_MUTATE_SHADER }), entryPoint: "mutate_candidates" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "mutate_candidates", GPU_MUTATE_SHADER, "mutate_candidates");
   const encoder = device.createCommandEncoder();
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -1252,10 +1370,7 @@ async function scoreRootCandidatesWithReplies(
   view.setUint32(0, rankedRoots.length, true);
   view.setUint32(4, rankedReplies.length, true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = device.createComputePipeline({
-    layout: "auto",
-    compute: { module: device.createShaderModule({ code: GPU_REPLY_SHADER }), entryPoint: "score_replies" }
-  });
+  const pipeline = await createComputePipelineChecked(device, "score_replies", GPU_REPLY_SHADER, "score_replies");
   const encoder = device.createCommandEncoder();
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -1305,6 +1420,8 @@ function buildGpuCandidateInputsFromSnapshot(snapshot, color) {
 
 function snapshotWithGpuChildBoards(snapshot, childBoardRecords, mutationStatus, options = {}) {
   const { move = null, advanceTurn = true } = options;
+  const royalCapture = mutationStatus === GPU_MUTATION_STATUS_ROYAL_CAPTURE
+    || mutationStatus === GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE;
   const records = [
     childBoardRecords.subarray(0, GPU_MUTATION_BOARD_STRIDE)
   ];
@@ -1346,6 +1463,7 @@ function snapshotWithGpuChildBoards(snapshot, childBoardRecords, mutationStatus,
   return {
     ...snapshot,
     turn: advanceTurn ? colorFromCode(records[records.length - 1][3]) : snapshot.turn,
+    royalCaptureBy: royalCapture ? snapshot.turn : snapshot.royalCaptureBy,
     timelines,
     boards
   };
@@ -1384,6 +1502,7 @@ function gpuSnapshotToGame(snapshot) {
     turn: snapshot.turn,
     nextTimelineId: snapshot.nextTimelineId ?? 1,
     nextBlackTimelineId: snapshot.nextBlackTimelineId ?? -1,
+    royalCaptureBy: snapshot.royalCaptureBy ?? null,
     checkedRoyals: [],
     timelines: snapshot.timelines.map((timeline) => ({
       id: timeline.id,
@@ -1454,6 +1573,7 @@ function buildGpuCandidateInputs(game, color) {
       pushGpuBoardRecord(boards, timeline, {
         time: board.time,
         sideToMove: board.sideToMove,
+        castling: board.castling ?? 0,
         squares
       });
       pushGpuMutationBoardRecord(mutationBoards, timeline, {
@@ -1531,7 +1651,8 @@ function pushGpuBoardRecord(out, timeline, board) {
     timeline.id,
     timeline.row,
     board.time,
-    colorCode(board.sideToMove)
+    colorCode(board.sideToMove),
+    board.castling ?? 0
   );
   for (let index = 0; index < 64; index += 1) {
     out.push(board.squares?.[index] ?? 0);
@@ -1602,6 +1723,24 @@ function latestBoard(timeline) {
   return timeline.boards.reduce((latest, board) => board.time > latest.time ? board : latest, timeline.boards[0]);
 }
 
+function presentTimeForSnapshot(snapshot) {
+  let present = null;
+  for (const timeline of sortedTimelines(snapshot)) {
+    const board = latestBoard(timeline);
+    if (!board) {
+      continue;
+    }
+    if (present === null || board.time < present) {
+      present = board.time;
+    }
+  }
+  return present;
+}
+
+function capitalize(value) {
+  return value ? `${value[0].toUpperCase()}${value.slice(1)}` : "";
+}
+
 function pieceTypeCode(type) {
   return {
     king: 1,
@@ -1652,6 +1791,72 @@ function storageBuffer(device, data, usage) {
   return buffer;
 }
 
+async function getGpuDevice() {
+  if (!navigator.gpu) {
+    return null;
+  }
+  if (cachedGpuDevice) {
+    return cachedGpuDevice;
+  }
+  cachedGpuAdapter = cachedGpuAdapter ?? await navigator.gpu.requestAdapter();
+  if (!cachedGpuAdapter) {
+    return null;
+  }
+  cachedGpuDevice = await requestHighLimitDevice(cachedGpuAdapter);
+  cachedGpuDevice.lost?.then(() => {
+    cachedGpuDevice = null;
+    pipelineCache.clear();
+  });
+  return cachedGpuDevice;
+}
+
+async function requestHighLimitDevice(adapter) {
+  const requiredLimits = {};
+  for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"]) {
+    const value = adapter.limits?.[key];
+    if (Number.isFinite(value) && value > 0) {
+      requiredLimits[key] = value;
+    }
+  }
+  if (Object.keys(requiredLimits).length === 0) {
+    return adapter.requestDevice();
+  }
+  try {
+    return await adapter.requestDevice({ requiredLimits });
+  } catch {
+    return adapter.requestDevice();
+  }
+}
+
+async function createComputePipelineChecked(device, label, code, entryPoint) {
+  const cacheKey = `${label}:${entryPoint}`;
+  const cached = pipelineCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const module = device.createShaderModule({ label: `${label}.module`, code });
+  if (module.compilationInfo) {
+    const info = await module.compilationInfo();
+    const errors = info.messages.filter((message) => message.type === "error");
+    if (errors.length > 0) {
+      throw new Error(formatShaderErrors(label, errors));
+    }
+  }
+  const pipeline = device.createComputePipeline({
+    label,
+    layout: "auto",
+    compute: { module, entryPoint }
+  });
+  pipelineCache.set(cacheKey, pipeline);
+  return pipeline;
+}
+
+function formatShaderErrors(label, errors) {
+  return `${label} shader compilation failed: ${errors.map((error) =>
+    `line ${error.lineNum ?? "?"}, column ${error.linePos ?? "?"}: ${error.message}`
+  ).join("; ")}`;
+}
+
 async function readInts(device, buffer, byteLength) {
   const readBuffer = device.createBuffer({
     size: align4(byteLength),
@@ -1686,6 +1891,8 @@ self.addEventListener("message", async (event) => {
     timeMs,
     partitionIndex,
     partitionCount,
+    temperature = 0,
+    randomSeed = 0,
     gpuMode = "hybrid"
   } = event.data;
 
@@ -1716,7 +1923,7 @@ self.addEventListener("message", async (event) => {
     const searchTimeMs = Math.max(1, timeMs ?? 10_000);
     gpuDeadlineAt = Date.now() + Math.max(1, Math.floor(searchTimeMs * 0.8));
     try {
-      const gpuResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode, snapshotOverride });
+      const gpuResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode, snapshotOverride, temperature, randomSeed });
       if (gpuResult?.status === "ok" && gpuResult.moves?.length) {
         self.postMessage({ id, ok: true, result: gpuResult, partitionIndex: partitionIndex ?? 0 });
         return;
@@ -1725,7 +1932,7 @@ self.addEventListener("message", async (event) => {
       console.debug?.("GPU search failed", gpuError);
       if (gpuMode === "full") {
         try {
-          const hybridResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode: "hybrid", snapshotOverride });
+          const hybridResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode: "hybrid", snapshotOverride, temperature, randomSeed });
           if (hybridResult?.status === "ok" && hybridResult.moves?.length) {
             self.postMessage({ id, ok: true, result: hybridResult, partitionIndex: partitionIndex ?? 0 });
             return;

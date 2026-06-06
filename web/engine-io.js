@@ -4,3 +4,10 @@ export function readWasmString(engine, ptr) {
   const bytes = new Uint8Array(engine.memory.buffer, ptr, engine.chronofish_output_len());
   return new TextDecoder("utf-8").decode(bytes);
 }
+
+export function writeWasmString(engine, value) {
+  const bytes = new TextEncoder().encode(value);
+  const ptr = engine.chronofish_alloc(bytes.length);
+  new Uint8Array(engine.memory.buffer, ptr, bytes.length).set(bytes);
+  return { ptr, len: bytes.length };
+}

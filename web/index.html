@@ -17,6 +17,7 @@
         <span id="wasm-status">Loading WASM</span>
         <span id="server-status">Loading server</span>
         <span id="message">Configure the lobby, then start the game.</span>
+        <button id="open-training" type="button" aria-controls="training-modal" aria-expanded="false" hidden>Training</button>
         <button id="toggle-hud" type="button" aria-controls="hud-panel" aria-expanded="true">Hide</button>
       </div>
 
@@ -62,58 +63,6 @@
           <span id="share-link"></span>
         </section>
 
-        <section class="training" id="training-panel" aria-label="Neural training controls" hidden>
-          <div>
-            <label>
-              Labels
-              <input id="training-samples" type="number" min="1" max="64" step="1" value="8"
-                title="Model-labeled positions collected per cycle. Higher values improve coverage and increase GPU prediction/training work."
-                aria-describedby="training-samples-help">
-              <span id="training-samples-help" class="field-help">GPU labels</span>
-            </label>
-            <label>
-              Depth
-              <input id="training-depth" type="number" min="1" max="8" step="1" value="5"
-                title="Reserved search depth for GPU search experiments. Training label generation no longer runs CPU search."
-                aria-describedby="training-depth-help">
-              <span id="training-depth-help" class="field-help">GPU depth</span>
-            </label>
-            <label>
-              Nodes
-              <input id="training-nodes" type="number" min="1" max="16384" step="1000" value="4096"
-                title="Reserved node budget for GPU search experiments. Training label generation no longer runs CPU search."
-                aria-describedby="training-nodes-help">
-              <span id="training-nodes-help" class="field-help">GPU budget</span>
-            </label>
-            <label>
-              Rate
-              <input id="training-rate" type="number" min="0.0001" max="0.1" step="0.0001" value="0.01"
-                title="GPU learning rate. Higher values adapt faster but can destabilize training; lower values are steadier but need more GPU steps."
-                aria-describedby="training-rate-help">
-              <span id="training-rate-help" class="field-help">GPU step size</span>
-            </label>
-            <label>
-              Steps
-              <input id="training-epochs" type="number" min="1" max="16384" step="50" value="2048"
-                title="GPU optimization steps per cycle. Higher values use more GPU time and squeeze more value from each model-labeled batch, but may overfit stale labels."
-                aria-describedby="training-epochs-help">
-              <span id="training-epochs-help" class="field-help">GPU work</span>
-            </label>
-            <label>
-              Buffer
-              <input id="training-buffer" type="number" min="16" max="65536" step="16" value="16384"
-                title="Replay buffer size used for GPU training. Larger buffers improve variety and reduce forgetting but increase GPU memory and per-step work."
-                aria-describedby="training-buffer-help">
-              <span id="training-buffer-help" class="field-help">GPU memory</span>
-            </label>
-          </div>
-          <div>
-            <button id="start-training" type="button">Train</button>
-            <button id="stop-training" type="button" disabled>Stop</button>
-            <span id="training-status">Training disabled</span>
-          </div>
-        </section>
-
         <section class="legend" aria-label="Timeline legend">
           <span><i class="swatch selected"></i>Selected piece</span>
           <span><i class="swatch target"></i>Legal target</span>
@@ -134,6 +83,141 @@
         <button id="concede-game" type="button">Concede</button>
       </section>
     </section>
+
+    <div class="modal-overlay" id="training-modal" hidden>
+      <section class="training training-modal-panel" id="training-panel" aria-label="Neural training controls" hidden>
+        <header class="training-modal-header">
+          <div>
+            <p class="eyebrow">Neural Training</p>
+          </div>
+          <button id="close-training" type="button" aria-label="Close training controls">Close</button>
+        </header>
+        <div>
+          <label>
+            Mode
+            <select id="training-label-mode"
+              title="Label source strategy. Mixed is the recommended default: it combines fresh GPU search labels, bounded GPU self-play outcomes, and low-weight distillation when a model exists."
+              aria-describedby="training-label-mode-help">
+              <option value="mixed" selected title="Recommended. 60% GPU search labels, 40% GPU self-play outcome labels, plus low-weight distillation fallback when available.">Mixed</option>
+              <option value="search" title="Samples positions, runs GPU search, and trains from the selected move and search score. Best for tactical value/policy labels.">GPU Search</option>
+              <option value="selfPlay" title="Runs bounded GPU self-play from the current position and backfills discounted outcome labels after royal captures.">Self-play</option>
+              <option value="distill" title="Uses the current neural model as a low-weight bootstrap label source. Fast, but it cannot discover better play by itself.">Distill</option>
+            </select>
+            <span id="training-label-mode-help" class="field-help field-help-wide">Mixed: search plus self-play, recommended. GPU Search: tactical search labels. Self-play: outcome labels. Distill: bootstrap from the current model only.</span>
+          </label>
+          <label>
+            Labels
+            <input id="training-samples" type="number" min="1" max="65536" step="1024" value="1024"
+              title="New labeled samples collected before each training cycle. Higher values increase GPU search/self-play work and give each model update more fresh data."
+              aria-describedby="training-samples-help">
+            <span id="training-samples-help" class="field-help">Fresh labels per cycle. Higher keeps GPU search busier and improves replay diversity.</span>
+          </label>
+          <label>
+            Self-play
+            <input id="training-self-play-workers" type="number" min="1" max="64" step="1" value="16"
+              title="Parallel GPU self-play rollout workers used in Mixed and Self-play modes. More workers can keep the GPU queue busier, but too many workers compete for the same GPU memory and device time."
+              aria-describedby="training-self-play-workers-help">
+            <span id="training-self-play-workers-help" class="field-help">Parallel outcome rollouts. Start with 2; raise if GPU utilization remains low.</span>
+          </label>
+          <label>
+            Search workers
+            <input id="training-search-workers" type="number" min="1" max="64" step="1" value="16"
+              title="Parallel GPU search workers used for search position generation and GPU Search labels. More workers improve label throughput when compute is idle, but each worker has its own WebGPU queue and memory use."
+              aria-describedby="training-search-workers-help">
+            <span id="training-search-workers-help" class="field-help">Parallel search position and label workers. Raise while CPU/GPU utilization is low.</span>
+          </label>
+          <label>
+            Temperature
+            <input id="training-temperature" type="number" min="0" max="2" step="0.05" value="0.25"
+              title="Exploration temperature for GPU search labels and self-play. 0 always chooses the best searched move; higher values sample plausible alternatives by score to avoid repeatedly training on the same line."
+              aria-describedby="training-temperature-help">
+            <span id="training-temperature-help" class="field-help">Move exploration during label generation. 0 is deterministic; 0.2-0.5 adds controlled variety.</span>
+          </label>
+          <label>
+            Depth
+            <input id="training-depth" type="number" min="1" max="16" step="1" value="5"
+              title="GPU search depth used while creating labels. Larger depth asks the search worker to look farther ahead, but unsupported full-GPU positions can still fall back or skip."
+              aria-describedby="training-depth-help">
+            <span id="training-depth-help" class="field-help">Lookahead depth for GPU label search.</span>
+          </label>
+          <label>
+            Nodes
+            <input id="training-nodes" type="number" min="1" max="65536" step="256" value="32768"
+              title="GPU search node budget for label generation. Higher values rank and probe more move candidates, increasing GPU search time per sample."
+              aria-describedby="training-nodes-help">
+            <span id="training-nodes-help" class="field-help">Search budget per label. Raise for stronger labels and more GPU search work.</span>
+          </label>
+          <label>
+            Rate
+            <input id="training-rate" type="number" min="0.0001" max="0.1" step="0.0001" value="0.01"
+              title="GPU learning rate. Higher values adapt faster but can destabilize training; lower values are steadier but need more GPU steps."
+              aria-describedby="training-rate-help">
+            <span id="training-rate-help" class="field-help">Weight update size. Lower if validation jumps or diverges.</span>
+          </label>
+          <label>
+            Steps
+            <input id="training-epochs" type="number" min="1" max="65536" step="256" value="16384"
+              title="Minibatch optimization steps per cycle. Steps are submitted to the GPU in groups, so higher values keep training kernels running longer before model replacement."
+              aria-describedby="training-epochs-help">
+            <span id="training-epochs-help" class="field-help">Training steps per cycle. More steps means more GPU work on the replay buffer.</span>
+          </label>
+          <label>
+            Buffer
+            <input id="training-buffer" type="number" min="16" max="65536" step="64" value="16384"
+              title="Replay samples retained for GPU training. Larger replay buffers improve diversity and make large minibatches more useful, at the cost of GPU memory."
+              aria-describedby="training-buffer-help">
+            <span id="training-buffer-help" class="field-help">Retained replay samples. Larger improves diversity and GPU batch occupancy.</span>
+          </label>
+          <label>
+            Batch
+            <input id="training-batch" type="number" min="16" max="65536" step="64" value="16384"
+              title="Stochastic minibatch size for GPU value training. Larger batches create larger matrix/vector workloads and usually improve GPU utilization until memory limits are reached."
+              aria-describedby="training-batch-help">
+            <span id="training-batch-help" class="field-help">Samples per GPU step. Raise for better occupancy; reduce if memory errors appear.</span>
+          </label>
+          <label>
+            Validation
+            <input id="training-validation" type="number" min="0" max="0.3" step="0.01" value="0.1"
+              title="Fraction of replay held out for validation. Validation guides early stopping and best-weight restore, but it does not directly train the model."
+              aria-describedby="training-validation-help">
+            <span id="training-validation-help" class="field-help">Replay fraction reserved for validation loss and early stopping.</span>
+          </label>
+          <label>
+            Loss logs
+            <input id="training-loss-log-replay" type="number" min="0" max="32" step="1" value="4"
+              title="Lost bot matches replayed after each training run. Each replay checks whether the current bot now chooses a different move at one recorded losing decision point. Set to 0 to disable."
+              aria-describedby="training-loss-log-replay-help">
+            <span id="training-loss-log-replay-help" class="field-help">Replay lost human-vs-bot logs. Counts changed decisions as validation progress.</span>
+          </label>
+          <label>
+            Val interval
+            <input id="training-validation-interval" type="number" min="16" max="65536" step="16" value="16384"
+              title="Training steps between validation checks. Higher values reduce GPU readbacks and improve throughput, but early stopping reacts more slowly."
+              aria-describedby="training-validation-interval-help">
+            <span id="training-validation-interval-help" class="field-help">Steps between validation readbacks. Higher keeps kernels running longer.</span>
+          </label>
+          <label>
+            Patience
+            <input id="training-patience" type="number" min="1" max="64" step="1" value="16"
+              title="Validation checks without improvement before early stopping. Higher patience lets long GPU runs continue through noisy validation plateaus."
+              aria-describedby="training-patience-help">
+            <span id="training-patience-help" class="field-help">Early-stop tolerance measured in validation checks.</span>
+          </label>
+          <label>
+            Decay
+            <input id="training-decay" type="number" min="0" max="0.01" step="0.00001" value="0.00001"
+              title="L2 weight decay applied during GPU value training. Higher values regularize large weights; too much decay can erase useful signal."
+              aria-describedby="training-decay-help">
+            <span id="training-decay-help" class="field-help">L2 regularization. Keep small unless validation overfits badly.</span>
+          </label>
+        </div>
+        <div>
+          <button id="start-training" type="button">Train</button>
+          <button id="stop-training" type="button" disabled>Stop</button>
+          <span id="training-status">Training disabled</span>
+        </div>
+      </section>
+    </div>
 
     <aside class="evaluation-bar" id="evaluation-bar" aria-label="Position evaluation">
       <span class="evaluation-label evaluation-label-black">Black</span>

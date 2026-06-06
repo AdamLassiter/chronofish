@@ -665,6 +665,60 @@ mod tests {
     }
 
     #[test]
+    fn browser_snapshot_round_trip_preserves_castling_and_pawn_targets() {
+        let mut game = Game::new();
+        let mut board = [[None; 8]; 8];
+        board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        board[0][7] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Rook,
+        });
+        board[1][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Pawn,
+        });
+        board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+        let parsed = parse_game_snapshot(&game.to_json()).expect("browser snapshot parses");
+
+        assert!(parsed.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 4,
+                y: 0,
+            },
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 6,
+                y: 0,
+            },
+        ));
+        assert!(parsed.can_move_to(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 0,
+                y: 1,
+            },
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 0,
+                y: 3,
+            },
+        ));
+    }
+
+    #[test]
     fn present_line_keeps_turn_until_leftmost_active_board_advances() {
         let mut game = Game::new();
         let mut board_a = empty_board_with_kings();
@@ -1427,6 +1481,63 @@ mod tests {
             ),
             1
         );
+        assert_eq!(game.submit_turn(), 1);
+        assert_eq!(game.last_message, "White wins by royal capture.");
+    }
+
+    #[test]
+    fn royal_capture_submit_wins_even_with_other_present_boards_pending() {
+        let mut game = Game::new();
+        let mut main_board = [[None; 8]; 8];
+        main_board[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        main_board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Rook,
+        });
+        main_board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines[0].boards = vec![snapshot(0, Color::White, main_board)];
+
+        let mut pending_board = [[None; 8]; 8];
+        pending_board[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        pending_board[7][7] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "L1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![snapshot(0, Color::White, pending_board)],
+        });
+
+        assert_eq!(
+            game.apply_move(
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 4,
+                    y: 0,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 4,
+                    y: 7,
+                },
+            ),
+            1
+        );
+        assert!(game.has_pending_present_board(Color::White));
         assert_eq!(game.submit_turn(), 1);
         assert_eq!(game.last_message, "White wins by royal capture.");
     }
