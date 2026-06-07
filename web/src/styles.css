@@ -24,6 +24,8 @@ button {
 
 .app {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   padding: 18px 18px 54px 72px;
   background-color: #15181d;
   background-position: 0 0, 0 96px, 96px -96px, -96px 0, 0 0;
@@ -36,6 +38,7 @@ button {
   top: 0;
   z-index: 10;
   max-width: 1440px;
+  width: 100%;
   margin: 0 auto 12px;
   padding-bottom: 1px;
   background: linear-gradient(180deg, rgba(21, 24, 29, 0.98) 0%, rgba(21, 24, 29, 0.92) 72%, transparent 100%);
@@ -55,12 +58,12 @@ button {
   font-size: 1rem;
 }
 
-.hud-compact span {
-  padding: 0 2px;
-  color: #d9e6dd;
-  font-size: 0.85rem;
-  font-weight: 800;
-  white-space: nowrap;
+.hud-compact #open-training {
+  margin-left: auto;
+}
+
+.hud-compact #open-training[hidden] + #toggle-hud {
+  margin-left: auto;
 }
 
 .bottom-message-bar {
@@ -72,6 +75,7 @@ button {
   min-height: 36px;
   display: flex;
   align-items: center;
+  gap: 10px;
   padding: 8px 18px 8px 72px;
   border-top: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(14, 17, 20, 0.96);
@@ -80,12 +84,21 @@ button {
 
 #message {
   display: block;
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   color: #d9e6dd;
   font-size: 0.88rem;
   font-weight: 800;
   line-height: 1.25;
   overflow-wrap: anywhere;
+}
+
+.bottom-version-status {
+  flex: 0 0 auto;
+  color: #d9e6dd;
+  font-size: 0.85rem;
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 #toggle-hud,
@@ -561,7 +574,9 @@ button {
 }
 
 .multiverse {
+  flex: 1 1 auto;
   max-width: 100%;
+  min-height: 0;
   overflow: auto;
   padding: 10px 0 32px;
 }

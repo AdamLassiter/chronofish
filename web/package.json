@@ -5,12 +5,17 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node scripts/check.mjs && tsc --noEmit",
+    "check": "node scripts/check.mjs && npm run typecheck",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test \"tests/**/*.test.js\""
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "esbuild": "^0.28.0",
     "esbuild-plugin-glsl": "^1.4.1",
-    "typescript": "^6.0.3"
+    "eslint": "^10.4.1",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.60.1"
   }
 }

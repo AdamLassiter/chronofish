@@ -47,7 +47,9 @@ interface TrainingGpuProfileConfig {
 }
 
 interface TrainingConfig {
+  trainingSubject: string;
   trainingTarget: string;
+  cpuTrainingTarget: string;
   labelMode: string;
   samples: number;
   selfPlayWorkers: number;
@@ -136,6 +138,8 @@ interface TrainingWorkerMessage {
   type?: string;
   error?: string;
   model?: ArrayBuffer;
+  cpuParameters?: string;
+  cpuScore?: number;
   loss?: number;
   epoch?: number;
   collected?: number;
@@ -195,6 +199,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const validationIntervalInput = requireElement(elements.trainingValidationIntervalInput, "training-validation-interval");
   const patienceInput = requireElement(elements.trainingPatienceInput, "training-patience");
   const decayInput = requireElement(elements.trainingDecayInput, "training-decay");
+  const cpuTargetSelect = requireElement(elements.trainingCpuTargetSelect, "training-cpu-target");
   const cpuDepthInput = requireElement(elements.trainingCpuDepthInput, "training-cpu-depth");
   const cpuNodesInput = requireElement(elements.trainingCpuNodesInput, "training-cpu-nodes");
   const cpuWorkersInput = requireElement(elements.trainingCpuWorkersInput, "training-cpu-workers");
@@ -207,6 +212,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   let trainingCycle = 0;
   let trainingGpuProfile: TrainingGpuProfile | null = null;
   let trainingGpuProfileApplied = false;
+  let selectedTrainingTab = "gpu";
   const trainingProgressState = new Map<LabelKind, TrainingProgressEntry>();
 
   elements.trainingTabButtons.forEach((button) => {
@@ -259,7 +265,9 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     const caps = trainingGpuProfile?.config;
     const cpuWorkerMax = Math.max(1, Math.min(navigator.hardwareConcurrency ?? 4, 32));
     return {
+      trainingSubject: selectedTrainingTab === "cpu" ? "cpu" : "gpu",
       trainingTarget: trainingTargetSelect.value,
+      cpuTrainingTarget: cpuTargetSelect.value,
       labelMode: labelModeSelect.value,
       samples: clampNumber(samplesInput.value, 1, caps?.maxSamples ?? 512, caps?.samples ?? 64),
       selfPlayWorkers: clampNumber(selfPlayWorkersInput.value, 1, caps?.maxSelfPlayWorkers ?? 8, caps?.selfPlayWorkers ?? 2),
@@ -279,13 +287,14 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       labelWorkers: autoTrainingWorkers(),
       cpuDepth: clampNumber(cpuDepthInput.value, 1, 16, 4),
       cpuNodes: clampNumber(cpuNodesInput.value, 1, 131072, 16384),
-      cpuWorkers: clampNumber(cpuWorkersInput.value, 1, cpuWorkerMax, Math.min(Math.ceil(cpuWorkerMax / 2), 16)),
+      cpuWorkers: clampNumber(cpuWorkersInput.value, 1, cpuWorkerMax, Math.min(cpuWorkerMax, 16)),
       cpuTrainSeconds: clampNumber(cpuSecondsInput.value, 1, 86400, 3600)
     };
   }
 
   function selectTrainingTab(name: string): void {
     const selected = name === "cpu" ? "cpu" : "gpu";
+    selectedTrainingTab = selected;
     for (const button of elements.trainingTabButtons) {
       button.setAttribute("aria-pressed", button.dataset.trainingTab === selected ? "true" : "false");
     }
@@ -492,13 +501,15 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   }
 
   function trainingProgressOrder(labelKind: LabelKind): number {
-    return { search: 0, cpu: 1, outcome: 2, distilled: 3 }[labelKind] ?? 4;
+    return { search: 0, cpu: 1, duel: 2, "cpu-train": 3, outcome: 4, distilled: 5 }[labelKind] ?? 6;
   }
 
   function trainingProgressLabel(labelKind: LabelKind): string {
     return {
       search: "GPU Search",
       cpu: "CPU Heuristic",
+      duel: "CPU vs GPU",
+      "cpu-train": "CPU Training",
       outcome: "Self-play",
       distilled: "Distill"
     }[labelKind] ?? capitalize(labelKind);
@@ -550,9 +561,9 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       tone: "active",
       metrics: filterMetrics([trainingMetric("Run", cycle)])
     });
-    if (config.trainingTarget === "cpuLabels") {
+    if (config.trainingTarget === "trainCpu") {
       setTrainingStatus({
-        title: "CPU Labels",
+        title: "Training CPU",
         tone: "active",
         metrics: filterMetrics([
           trainingMetric("Depth", config.cpuDepth),
@@ -610,6 +621,21 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     return isRecord(payload) ? payload as TrainingReplacementPayload : {};
   }
 
+  async function replaceCpuParameters(parameters: string): Promise<TrainingReplacementPayload> {
+    const response = await fetch("/api/training/cpu-parameters", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: parameters
+    });
+    const payload = await readJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(recordString(payload, "error") ?? `Failed to replace CPU parameters (${response.status})`);
+    }
+    resetAiWorker();
+    await loadTrainingStatus();
+    return isRecord(payload) ? payload as TrainingReplacementPayload : {};
+  }
+
   async function readJsonResponse(response: Response): Promise<unknown> {
     const text = await response.text();
     if (!text) {
@@ -629,6 +655,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       ok,
       error,
       model,
+      cpuParameters,
+      cpuScore,
       loss,
       epoch,
       collected,
@@ -669,6 +697,42 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     }
     if (labelWorkers !== undefined && collected === undefined) {
       updateTrainingProgress({ labelKind, labelPhase, collected: 0, sampleCount, labelWorkers });
+      return;
+    }
+    if (cpuParameters) {
+      trainingCycle += 1;
+      setTrainingStatus({
+        title: "Replacing CPU",
+        tone: "active",
+        metrics: filterMetrics([
+          trainingMetric("Run", trainingCycle),
+          trainingMetric("Score", cpuScore?.toFixed(2))
+        ])
+      });
+      let replacement: TrainingReplacementPayload | null = null;
+      try {
+        replacement = await replaceCpuParameters(cpuParameters);
+      } catch (replaceError) {
+        trainingRunning = false;
+        setTrainingStatus({
+          title: "CPU Save Error",
+          tone: "error",
+          metrics: filterMetrics([trainingMetric("Message", errorMessage(replaceError))])
+        });
+        resetTrainingProgress();
+        renderTrainingButtons();
+        return;
+      }
+      setTrainingStatus({
+        title: replacement.changed === false ? "CPU Unchanged" : "CPU Saved",
+        tone: replacement.changed === false ? "warn" : "ready",
+        metrics: filterMetrics([
+          trainingMetric("Run", trainingCycle),
+          trainingMetric("Hash", compactHash(replacement.newHash), replacement.newHash),
+          trainingMetric("Score", cpuScore?.toFixed(2))
+        ])
+      });
+      setTimeout(runFrontendTrainingCycle, 0);
       return;
     }
     if (model) {

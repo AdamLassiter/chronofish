@@ -10,7 +10,7 @@ test("build output declares package version on the main page", async () => {
   const html = await readFile(path.join(root, "dist/index.html"), "utf8");
   const appVersion = await readFile(path.join(root, "dist/app-version.js"), "utf8");
 
-  assert.match(html, new RegExp(`Web v${escapeRegExp(packageJson.version)}`));
+  assert.match(html, new RegExp(`🌐 v${escapeRegExp(packageJson.version)}`));
   assert.equal(appVersion.trim(), `export const APP_VERSION = ${JSON.stringify(packageJson.version)};`);
 });
 

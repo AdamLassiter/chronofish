@@ -9,6 +9,7 @@ interface CpuAiRequest {
   nodes?: number;
   timeMs?: number;
   partitionIndex?: number;
+  parametersJson?: string;
 }
 
 interface CpuAiResult {
@@ -24,13 +25,17 @@ let enginePromise: Promise<ChronofishEngine> | null = null;
 let parametersPromise: Promise<void> | null = null;
 
 self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
-  const { id, game, depth = 1, nodes = 64, timeMs = 10_000, partitionIndex = 0 } = event.data;
+  const { id, game, depth = 1, nodes = 64, timeMs = 10_000, partitionIndex = 0, parametersJson } = event.data;
   try {
     if (!game) {
       throw new Error("CPU AI search requires a game snapshot.");
     }
     const engine = await cpuEngine();
-    await loadCpuParameters(engine);
+    if (parametersJson) {
+      loadCpuParametersJson(engine, parametersJson);
+    } else {
+      await loadCpuParameters(engine);
+    }
     loadSnapshot(engine, game);
     const ptr = engine.chronofish_ai_turn_timed_json(
       Math.max(1, depth),
@@ -67,16 +72,20 @@ function loadSnapshot(engine: ChronofishEngine, game: GameSnapshot): void {
 async function loadCpuParameters(engine: ChronofishEngine): Promise<void> {
   parametersPromise ??= fetchCpuParameters()
     .then((json) => {
-      const { ptr, len } = writeWasmString(engine, json);
-      try {
-        if (!engine.chronofish_load_ai_parameters_json(ptr, len)) {
-          throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-        }
-      } finally {
-        engine.chronofish_dealloc(ptr, len);
-      }
+      loadCpuParametersJson(engine, json);
     });
   return parametersPromise;
+}
+
+function loadCpuParametersJson(engine: ChronofishEngine, json: string): void {
+  const { ptr, len } = writeWasmString(engine, json);
+  try {
+    if (!engine.chronofish_load_ai_parameters_json(ptr, len)) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 async function fetchCpuParameters(): Promise<string> {

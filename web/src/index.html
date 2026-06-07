@@ -14,9 +14,6 @@
       <!-- The compact row remains visible when the larger HUD body collapses. -->
       <div class="hud-compact">
         <strong>Chronofish</strong>
-        <span id="app-status">🌐 v%CHRONOFISH_WEB_VERSION%</span>
-        <span id="wasm-status">🧠 loading</span>
-        <span id="server-status">🖥 loading</span>
         <button id="open-training" type="button" aria-controls="training-modal" aria-expanded="false" hidden>Training</button>
         <button id="toggle-hud" type="button" aria-controls="hud-panel" aria-expanded="true">Hide</button>
       </div>
@@ -108,13 +105,13 @@
           <label>
             Target
             <select id="training-target"
-              title="Training target. GPU Model trains the neural WebGPU bot. CPU Labels trains the GPU model from the restored CPU heuristic bot's choices. GPU vs CPU runs both sources so the GPU model learns from direct adversarial disagreement. Native CPU parameter tuning still uses the engine train binary."
+              title="GPU model training target. vs GPU uses WebGPU search, self-play, and distillation labels. vs CPU uses the restored CPU heuristic bot as the label source. vs Both runs both label sources and then adds a CPU-vs-GPU duel rollout batch."
               aria-describedby="training-target-help">
-              <option value="gpu" selected title="Train the compact neural model from GPU search, self-play, and distillation labels.">GPU Model</option>
-              <option value="cpuLabels" title="Use the restored CPU heuristic bot as the label source, then train the compact neural model against those choices.">CPU Labels</option>
-              <option value="adversarial" title="Collect both GPU and CPU heuristic choices from related positions so the GPU model can train against the CPU bot.">GPU vs CPU</option>
+              <option value="trainGpu" selected title="Train from GPU search, GPU self-play, and distillation labels.">vs GPU</option>
+              <option value="trainCpu" title="Train from CPU heuristic bot search labels.">vs CPU</option>
+              <option value="trainBoth" title="Train from CPU and GPU labels, then collect an extra CPU-vs-GPU duel rollout batch.">vs Both</option>
             </select>
-            <span id="training-target-help" class="field-help field-help-wide">GPU Model updates value-model.cfnn. CPU Labels and GPU vs CPU use the restored heuristic bot as a browser adversary; CPU parameter tuning is native.</span>
+            <span id="training-target-help" class="field-help field-help-wide">Selects which opponent source trains the compact GPU model.</span>
           </label>
           <label>
             Mode
@@ -236,10 +233,21 @@
         </div>
         <div class="training-tab-panel" id="training-cpu-panel" data-training-panel="cpu" hidden>
           <label>
+            CPU Target
+            <select id="training-cpu-target"
+              title="CPU heuristic training opponent. vs CPU scores mutations against the current CPU heuristic. vs GPU scores against the GPU search worker. vs Both scores against both targets."
+              aria-describedby="training-cpu-target-help">
+              <option value="vsCpu" selected title="Train CPU heuristic mutations against the current CPU heuristic baseline.">vs CPU</option>
+              <option value="vsGpu" title="Train CPU heuristic mutations against GPU search labels.">vs GPU</option>
+              <option value="vsBoth" title="Train CPU heuristic mutations against both CPU baseline and GPU search.">vs Both</option>
+            </select>
+            <span id="training-cpu-target-help" class="field-help field-help-wide">Selects which opponent scores CPU heuristic parameter mutations.</span>
+          </label>
+          <label>
             CPU Depth
             <input id="training-cpu-depth" type="number" min="1" max="16" step="1" value="4"
-              title="Depth for the restored CPU heuristic bot when it is used as an adversarial label source in browser training. Native CPU parameter training uses the engine train binary's --depth option.">
-            <span class="field-help">Heuristic search depth for CPU labels and adversarial comparisons.</span>
+              title="Depth for the restored CPU heuristic bot during frontend heuristic training and CPU label generation.">
+            <span class="field-help">Heuristic search depth for CPU labels, mutation scoring, and adversarial comparisons.</span>
           </label>
           <label>
             CPU Nodes
@@ -249,15 +257,15 @@
           </label>
           <label>
             CPU Workers
-            <input id="training-cpu-workers" type="number" min="1" max="32" step="1" value="4"
+            <input id="training-cpu-workers" type="number" min="1" max="32" step="1" value="16"
               title="Parallel CPU heuristic workers for CPU label and GPU-vs-CPU adversarial training. Each worker owns a wasm engine instance.">
             <span class="field-help">Parallel wasm heuristic workers for CPU label collection.</span>
           </label>
           <label>
             CPU Train Seconds
             <input id="training-cpu-seconds" type="number" min="1" max="86400" step="60" value="3600"
-              title="Suggested native CPU tuning budget for cargo run --manifest-path engine/Cargo.toml --bin train -- --train-cycle --max-seconds N.">
-            <span class="field-help">Native heuristic tuning budget for the engine train binary.</span>
+              title="Frontend CPU heuristic mutation budget hint. Larger values allow future longer CPU scoring loops; current browser training still caps each cycle to a bounded candidate batch.">
+            <span class="field-help">CPU heuristic tuning budget hint for frontend mutation scoring.</span>
           </label>
         </div>
         <div>
@@ -272,6 +280,9 @@
 
     <div class="bottom-message-bar" role="status" aria-live="polite">
       <span id="message">Configure the lobby, then start the game.</span>
+      <span class="bottom-version-status" id="app-status">🌐 v%CHRONOFISH_WEB_VERSION%</span>
+      <span class="bottom-version-status" id="wasm-status">🧠 loading</span>
+      <span class="bottom-version-status" id="server-status">🖥 loading</span>
     </div>
 
     <aside class="evaluation-bar" id="evaluation-bar" aria-label="Position evaluation">

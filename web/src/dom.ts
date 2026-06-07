@@ -57,6 +57,7 @@ export const elements = {
   trainingPatienceInput: queryElement<HTMLInputElement>("#training-patience"),
   trainingDecayInput: queryElement<HTMLInputElement>("#training-decay"),
   trainingCpuDepthInput: queryElement<HTMLInputElement>("#training-cpu-depth"),
+  trainingCpuTargetSelect: queryElement<HTMLSelectElement>("#training-cpu-target"),
   trainingCpuNodesInput: queryElement<HTMLInputElement>("#training-cpu-nodes"),
   trainingCpuWorkersInput: queryElement<HTMLInputElement>("#training-cpu-workers"),
   trainingCpuSecondsInput: queryElement<HTMLInputElement>("#training-cpu-seconds"),
