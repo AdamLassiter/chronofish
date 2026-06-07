@@ -4,8 +4,8 @@ async fn static_file(
     headers: HeaderMap,
     uri: axum::http::Uri,
 ) -> Response {
-    // Minimal static server for development: GET/HEAD only, no directory
-    // listings, and every resolved path must stay under web/ or be the built wasm.
+    // Minimal static server: GET/HEAD only, no directory listings, and every
+    // resolved frontend path must stay under the generated web/dist tree.
     if method != Method::GET && method != Method::HEAD {
         let mut response = (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -123,7 +123,7 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
 
-    let web_root = root.join("web");
+    let web_root = root.join("web/dist");
     let web_path = web_root.join(&requested);
     if is_safe_existing_path(&web_root, &web_path) {
         return Some(web_path);

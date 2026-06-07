@@ -1,0 +1,61 @@
+function queryElement<T extends Element>(selector: string): T {
+  const element = document.querySelector<T>(selector);
+  if (!element) {
+    throw new Error(`Missing required element ${selector}.`);
+  }
+  return element;
+}
+
+// Centralized DOM lookups keep main.js focused on engine/network state and make
+// the required index.html ids explicit.
+export const elements = {
+  multiverse: queryElement<HTMLElement>("#multiverse"),
+  timelineGrid: queryElement<HTMLElement>("#timeline-grid"),
+  evaluationBar: queryElement<HTMLElement>("#evaluation-bar"),
+  evaluationWhite: queryElement<HTMLElement>("#evaluation-white"),
+  evaluationScore: queryElement<HTMLElement>("#evaluation-score"),
+  message: queryElement<HTMLElement>("#message"),
+  appStatus: queryElement<HTMLElement>("#app-status"),
+  wasmStatus: queryElement<HTMLElement>("#wasm-status"),
+  serverStatus: queryElement<HTMLElement>("#server-status"),
+  hud: queryElement<HTMLElement>("#hud"),
+  toggleHudButton: queryElement<HTMLButtonElement>("#toggle-hud"),
+  openTrainingButton: queryElement<HTMLButtonElement>("#open-training"),
+  closeTrainingButton: queryElement<HTMLButtonElement>("#close-training"),
+  trainingModal: queryElement<HTMLElement>("#training-modal"),
+  resetButton: queryElement<HTMLButtonElement>("#reset-game"),
+  undoMoveButton: queryElement<HTMLButtonElement>("#undo-move"),
+  submitTurnButton: queryElement<HTMLButtonElement>("#submit-turn"),
+  concedeButton: queryElement<HTMLButtonElement>("#concede-game"),
+  roomInput: queryElement<HTMLInputElement>("#room-id"),
+  whitePlayerSelect: queryElement<HTMLSelectElement>("#white-player"),
+  blackPlayerSelect: queryElement<HTMLSelectElement>("#black-player"),
+  startGameButton: queryElement<HTMLButtonElement>("#start-game"),
+  joinWhiteButton: queryElement<HTMLButtonElement>("#join-white"),
+  joinBlackButton: queryElement<HTMLButtonElement>("#join-black"),
+  joinSpectatorButton: queryElement<HTMLButtonElement>("#join-spectator"),
+  multiplayerStatus: queryElement<HTMLElement>("#multiplayer-status"),
+  shareLink: queryElement<HTMLAnchorElement>("#share-link"),
+  trainingPanel: queryElement<HTMLElement>("#training-panel"),
+  trainingLabelModeSelect: queryElement<HTMLSelectElement>("#training-label-mode"),
+  trainingSamplesInput: queryElement<HTMLInputElement>("#training-samples"),
+  trainingSelfPlayWorkersInput: queryElement<HTMLInputElement>("#training-self-play-workers"),
+  trainingSearchWorkersInput: queryElement<HTMLInputElement>("#training-search-workers"),
+  trainingTemperatureInput: queryElement<HTMLInputElement>("#training-temperature"),
+  trainingDepthInput: queryElement<HTMLInputElement>("#training-depth"),
+  trainingNodesInput: queryElement<HTMLInputElement>("#training-nodes"),
+  trainingRateInput: queryElement<HTMLInputElement>("#training-rate"),
+  trainingEpochsInput: queryElement<HTMLInputElement>("#training-epochs"),
+  trainingBufferInput: queryElement<HTMLInputElement>("#training-buffer"),
+  trainingBatchInput: queryElement<HTMLInputElement>("#training-batch"),
+  trainingValidationInput: queryElement<HTMLInputElement>("#training-validation"),
+  trainingLossLogReplayInput: queryElement<HTMLInputElement>("#training-loss-log-replay"),
+  trainingValidationIntervalInput: queryElement<HTMLInputElement>("#training-validation-interval"),
+  trainingPatienceInput: queryElement<HTMLInputElement>("#training-patience"),
+  trainingDecayInput: queryElement<HTMLInputElement>("#training-decay"),
+  startTrainingButton: queryElement<HTMLButtonElement>("#start-training"),
+  stopTrainingButton: queryElement<HTMLButtonElement>("#stop-training"),
+  trainingStatus: queryElement<HTMLElement>("#training-status"),
+  trainingStatusView: queryElement<HTMLElement>("#training-status-view"),
+  trainingProgress: queryElement<HTMLElement>("#training-progress")
+};

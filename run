@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
 set -xeu
 
+npm --prefix web ci
+npm --prefix web run build
 cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
 exec cargo run --bin chronofish-server

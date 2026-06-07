@@ -14,6 +14,7 @@
       <!-- The compact row remains visible when the larger HUD body collapses. -->
       <div class="hud-compact">
         <strong>Chronofish</strong>
+        <span id="app-status">Web v%CHRONOFISH_WEB_VERSION%</span>
         <span id="wasm-status">Loading WASM</span>
         <span id="server-status">Loading server</span>
         <span id="message">Configure the lobby, then start the game.</span>
@@ -96,19 +97,19 @@
           <label>
             Mode
             <select id="training-label-mode"
-              title="Label source strategy. Mixed is the recommended default: it combines fresh GPU search labels, bounded GPU self-play outcomes, and low-weight distillation when a model exists."
+              title="Label source strategy. Mixed is the recommended default: it combines a small number of fresh GPU search labels, bounded GPU self-play outcomes, and distillation when a model exists."
               aria-describedby="training-label-mode-help">
-              <option value="mixed" selected title="Recommended. 60% GPU search labels, 40% GPU self-play outcome labels, plus low-weight distillation fallback when available.">Mixed</option>
+              <option value="mixed" selected title="Recommended. Runs expensive GPU Search on about 1/16 of Labels, Self-play on about 1/8 of Labels, plus distillation when available.">Mixed</option>
               <option value="search" title="Samples positions, runs GPU search, and trains from the selected move and search score. Best for tactical value/policy labels.">GPU Search</option>
               <option value="selfPlay" title="Runs bounded GPU self-play from the current position and backfills discounted outcome labels after royal captures.">Self-play</option>
               <option value="distill" title="Uses the current neural model as a low-weight bootstrap label source. Fast, but it cannot discover better play by itself.">Distill</option>
             </select>
-            <span id="training-label-mode-help" class="field-help field-help-wide">Mixed: search plus self-play, recommended. GPU Search: tactical search labels. Self-play: outcome labels. Distill: bootstrap from the current model only.</span>
+            <span id="training-label-mode-help" class="field-help field-help-wide">Mixed: small search and self-play sets plus distillation, recommended. GPU Search: tactical search labels. Self-play: outcome labels. Distill: bootstrap from the current model only.</span>
           </label>
           <label>
             Labels
             <input id="training-samples" type="number" min="1" max="65536" step="1024" value="1024"
-              title="New labeled samples collected before each training cycle. Higher values increase GPU search/self-play work and give each model update more fresh data."
+              title="Base label budget per cycle. In Mixed mode, expensive search uses about 1/16 of this value and self-play uses about 1/8; Distill can still use the full value when a model exists."
               aria-describedby="training-samples-help">
             <span id="training-samples-help" class="field-help">Fresh labels per cycle. Higher keeps GPU search busier and improves replay diversity.</span>
           </label>
@@ -214,8 +215,10 @@
         <div>
           <button id="start-training" type="button">Train</button>
           <button id="stop-training" type="button" disabled>Stop</button>
-          <span id="training-status">Training disabled</span>
+          <span id="training-status" class="sr-only" aria-live="polite">Training disabled</span>
         </div>
+        <div id="training-status-view" class="training-status-view" aria-hidden="true"></div>
+        <div id="training-progress" class="training-progress" hidden aria-label="Training sample progress"></div>
       </section>
     </div>
 

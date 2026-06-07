@@ -11,9 +11,10 @@ The project currently includes:
 
 - a Rust engine crate with game state, legal moves, turn submission, checkmate
   detection, alpha-beta bot search, and a native training harness;
-- a dependency-free JavaScript frontend for local play, online rooms,
-  spectators, bot-vs-human, and bot-vs-bot games;
-- a Rust `axum` server that serves `web/`, the built engine WASM, and room APIs;
+- a dependency-free JavaScript frontend npm package for local play, online
+  rooms, spectators, bot-vs-human, and bot-vs-bot games;
+- a Rust `axum` server that serves `web/dist`, the built engine WASM, and room
+  APIs;
 - a working rules reference in [`RULES.md`](RULES.md).
 
 ## Repository Layout
@@ -24,7 +25,10 @@ chronofish/
     src/ai/                AI search, evaluation, weights, and parameters
     src/training/          Native genetic training harness
   server/                  Rust static file and multiplayer room server
-  web/                     Browser frontend and WASM loader
+  web/                     Browser frontend npm project
+    src/                   Frontend source files
+    tests/                 Frontend functional tests
+    dist/                  Generated frontend bundle (ignored)
   RULES.md                 Rules reference
   run                      Build WASM and start the backend
   train                    Repeatedly run training/promotion cycles
@@ -51,8 +55,8 @@ Start the app:
 ```
 
 Then open <http://localhost:5173>. The script builds the engine for
-`wasm32-unknown-unknown` and starts the Rust server. Override the bind address
-for LAN play:
+`wasm32-unknown-unknown`, builds the frontend into `web/dist`, and starts the
+Rust server. Override the bind address for LAN play:
 
 ```sh
 HOST=0.0.0.0 PORT=5173 ./run
@@ -96,9 +100,9 @@ cargo fmt
 cargo test -q
 cargo clippy -- -D warnings
 cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
-node --check web/main.js
-node --check web/ai-worker.js
-node --check web/wasm-loader.js
+npm --prefix web run check
+npm --prefix web test
+npm --prefix web run build
 ```
 
 ## Playing

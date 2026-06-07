@@ -4,5 +4,7 @@ set -eu
 echo "Frontend WebGPU training is served by the dev server with training endpoints enabled."
 echo "Open the app and use the Neural training HUD panel."
 
+npm --prefix web ci
+npm --prefix web run build
 cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
 exec cargo run --features frontend-training --bin chronofish-server

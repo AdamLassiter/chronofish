@@ -7,8 +7,50 @@ import {
   sortedBoards,
   sortedTimelines
 } from "./board.js";
+import type { BoardSnapshot, GameSnapshot, MoveOrigin, Piece, Position, Timeline } from "./types.js";
 
-function boardStatus({ game, presentGame, timeline, board, currentPresentTime }) {
+type BoardStatus = "Inactive" | "Future" | "Latest" | "Past";
+type HighlightType = "arrived" | "move-source" | "move-target" | "check";
+type HighlightMap = Map<string, Set<HighlightType>>;
+
+interface Point {
+  x: number;
+  y: number;
+}
+
+interface Arrow {
+  from: Position;
+  to: Position;
+}
+
+interface MultiplayerState {
+  connected: boolean;
+  color: string;
+  roomId: string;
+}
+
+interface RenderElements {
+  timelineGrid: HTMLElement;
+}
+
+interface RenderGameOptions {
+  game: GameSnapshot;
+  presentGame: GameSnapshot;
+  selected: Position | null;
+  legalTargets: Position[];
+  multiplayer: MultiplayerState;
+  elements: RenderElements;
+  onSquareClick(position: Position): void;
+  setMultiplayerStatus(message: string): void;
+}
+
+function boardStatus({ game, presentGame, timeline, board, currentPresentTime }: {
+  game: GameSnapshot;
+  presentGame: GameSnapshot;
+  timeline: Timeline;
+  board: BoardSnapshot;
+  currentPresentTime: number;
+}): BoardStatus {
   // Status uses the committed snapshot so staged moves do not relabel boards as
   // past/future before the player submits the turn.
   if (!isActiveTimeline(game, timeline)) {
@@ -27,18 +69,18 @@ function boardStatus({ game, presentGame, timeline, board, currentPresentTime })
   return board.time === committedLatestTime ? "Latest" : "Past";
 }
 
-function highlightKey(position) {
+function highlightKey(position: Position): string {
   return `${position.timelineId}:${position.time}:${position.x}:${position.y}`;
 }
 
-function addHighlight(highlights, position, type) {
+function addHighlight(highlights: HighlightMap, position: Position, type: HighlightType): void {
   const key = highlightKey(position);
-  const existing = highlights.get(key) ?? new Set();
+  const existing = highlights.get(key) ?? new Set<HighlightType>();
   existing.add(type);
   highlights.set(key, existing);
 }
 
-function samePiece(left, right) {
+function samePiece(left: Piece | null, right: Piece | null): boolean {
   if (!left || !right) {
     return left === right;
   }
@@ -46,15 +88,19 @@ function samePiece(left, right) {
   return left.color === right.color && left.type === right.type;
 }
 
-function previousBoard(timeline, time) {
+function previousBoard(timeline: Timeline, time: number): BoardSnapshot | null {
   return timeline.boards.find((board) => board.time === time - 1) ?? null;
 }
 
-function addArrivalHighlights(highlights, timeline, board) {
+function hasMoveEndpoints(origin: MoveOrigin | null | undefined): origin is MoveOrigin & { from: Position; to: Position } {
+  return Boolean(origin?.from && origin.to);
+}
+
+function addArrivalHighlights(highlights: HighlightMap, timeline: Timeline, board: BoardSnapshot): void {
   const previous = previousBoard(timeline, board.time);
 
   if (!previous) {
-    if (board.origin && board.origin.type !== "source-advance") {
+    if (hasMoveEndpoints(board.origin) && board.origin.type !== "source-advance") {
       addHighlight(highlights, {
         timelineId: timeline.id,
         time: board.time,
@@ -67,24 +113,24 @@ function addArrivalHighlights(highlights, timeline, board) {
 
   for (let y = 0; y < 8; y += 1) {
     for (let x = 0; x < 8; x += 1) {
-      const piece = board.board[y][x];
-      if (piece && !samePiece(piece, previous.board[y][x])) {
+      const piece = board.board[y]?.[x] ?? null;
+      if (piece && !samePiece(piece, previous.board[y]?.[x] ?? null)) {
         addHighlight(highlights, { timelineId: timeline.id, time: board.time, x, y }, "arrived");
       }
     }
   }
 }
 
-function movementVisuals(game) {
-  const highlights = new Map();
-  const arrows = [];
+function movementVisuals(game: GameSnapshot): { highlights: HighlightMap; arrows: Arrow[] } {
+  const highlights: HighlightMap = new Map();
+  const arrows: Arrow[] = [];
 
   for (const timeline of game.timelines) {
     for (const board of timeline.boards) {
       const origin = board.origin;
       addArrivalHighlights(highlights, timeline, board);
 
-      if (origin && origin.type !== "source-advance") {
+      if (hasMoveEndpoints(origin) && origin.type !== "source-advance") {
         addHighlight(highlights, origin.from, "move-source");
         addHighlight(highlights, origin.to, "move-target");
         arrows.push({
@@ -102,9 +148,16 @@ function movementVisuals(game) {
   return { highlights, arrows };
 }
 
-function renderSquare({ position, board, selected, legalTargets, highlights, onSquareClick }) {
+function renderSquare({ position, board, selected, legalTargets, highlights, onSquareClick }: {
+  position: Position;
+  board: BoardSnapshot;
+  selected: Position | null;
+  legalTargets: Position[];
+  highlights: HighlightMap;
+  onSquareClick(position: Position): void;
+}): HTMLButtonElement {
   const square = document.createElement("button");
-  const piece = board.board[position.y][position.x];
+  const piece = board.board[position.y]?.[position.x] ?? null;
   const target = legalTargets.find((candidate) => samePosition(candidate, position));
   const squareHighlights = highlights.get(highlightKey(position));
 
@@ -112,7 +165,7 @@ function renderSquare({ position, board, selected, legalTargets, highlights, onS
   square.className = "square";
   square.dataset.light = String((position.x + position.y) % 2 === 1);
   square.dataset.positionKey = highlightKey(position);
-  square.ariaLabel = `${FILES[position.x]}${position.y + 1}`;
+  square.ariaLabel = `${FILES[position.x] ?? "?"}${position.y + 1}`;
 
   if (piece) {
     // Pieces are text glyphs; CSS handles color-specific shadow/glow contrast.
@@ -151,7 +204,17 @@ function renderSquare({ position, board, selected, legalTargets, highlights, onS
   return square;
 }
 
-function renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, highlights, onSquareClick }) {
+function renderBoard({ game, presentGame, timeline, board, currentPresentTime, selected, legalTargets, highlights, onSquareClick }: {
+  game: GameSnapshot;
+  presentGame: GameSnapshot;
+  timeline: Timeline;
+  board: BoardSnapshot;
+  currentPresentTime: number;
+  selected: Position | null;
+  legalTargets: Position[];
+  highlights: HighlightMap;
+  onSquareClick(position: Position): void;
+}): HTMLElement {
   const boardEl = document.createElement("article");
   const latest = isLatestBoard(game, timeline.id, board.time);
   const status = boardStatus({ game, presentGame, timeline, board, currentPresentTime });
@@ -190,13 +253,17 @@ function renderBoard({ game, presentGame, timeline, board, currentPresentTime, s
   return boardEl;
 }
 
-function measureSquareCenters(grid) {
+function measureSquareCenters(grid: HTMLElement): Map<string, Point> {
   const gridRect = grid.getBoundingClientRect();
-  const centers = new Map();
+  const centers = new Map<string, Point>();
 
-  for (const square of grid.querySelectorAll("[data-position-key]")) {
+  for (const square of grid.querySelectorAll<HTMLElement>("[data-position-key]")) {
     const squareRect = square.getBoundingClientRect();
-    centers.set(square.dataset.positionKey, {
+    const key = square.dataset.positionKey;
+    if (!key) {
+      continue;
+    }
+    centers.set(key, {
       x: squareRect.left - gridRect.left + squareRect.width / 2,
       y: squareRect.top - gridRect.top + squareRect.height / 2
     });
@@ -205,11 +272,11 @@ function measureSquareCenters(grid) {
   return centers;
 }
 
-function squareCenter(centers, position) {
+function squareCenter(centers: Map<string, Point>, position: Position): Point | null {
   return centers.get(highlightKey(position)) ?? null;
 }
 
-function appendArrowPath(svg, from, to, className) {
+function appendArrowPath(svg: SVGSVGElement, from: Point, to: Point, className: string): void {
   const pathData = arrowPath(from, to);
   if (!pathData) {
     return;
@@ -222,7 +289,7 @@ function appendArrowPath(svg, from, to, className) {
   svg.append(path);
 }
 
-function arrowPath(from, to) {
+function arrowPath(from: Point, to: Point): string {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const distance = Math.hypot(dx, dy);
@@ -244,7 +311,7 @@ function arrowPath(from, to) {
   return `M ${start.x.toFixed(1)} ${start.y.toFixed(1)} L ${end.x.toFixed(1)} ${end.y.toFixed(1)}`;
 }
 
-function renderMoveArrows(grid, arrows) {
+function renderMoveArrows(grid: HTMLElement, arrows: Arrow[]): void {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   const width = grid.scrollWidth;
   const height = grid.scrollHeight;
@@ -274,7 +341,17 @@ function renderMoveArrows(grid, arrows) {
   }
 }
 
-function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, highlights, onSquareClick }) {
+function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, highlights, onSquareClick }: {
+  game: GameSnapshot;
+  presentGame: GameSnapshot;
+  timeline: Timeline;
+  maxTime: number;
+  currentPresentTime: number;
+  selected: Position | null;
+  legalTargets: Position[];
+  highlights: HighlightMap;
+  onSquareClick(position: Position): void;
+}): HTMLElement {
   const row = document.createElement("div");
   row.className = "timeline-row";
   row.dataset.owner = timeline.owner;
@@ -301,7 +378,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   return row;
 }
 
-export function renderGame({ game, presentGame, selected, legalTargets, multiplayer, elements, onSquareClick, setMultiplayerStatus }) {
+export function renderGame({ game, presentGame, selected, legalTargets, multiplayer, elements, onSquareClick, setMultiplayerStatus }: RenderGameOptions): void {
   // The timeline grid is small enough that replacing DOM children is clearer than
   // incremental reconciliation.
   const maxTime = Math.max(0, ...game.timelines.flatMap((timeline) => timeline.boards.map((board) => board.time)));

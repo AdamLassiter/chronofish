@@ -1,0 +1,103 @@
+export type Color = "white" | "black";
+export type TimelineOwner = Color | "neutral";
+
+export type PieceType =
+  | "king"
+  | "commonKing"
+  | "queen"
+  | "royalQueen"
+  | "princess"
+  | "rook"
+  | "bishop"
+  | "unicorn"
+  | "dragon"
+  | "knight"
+  | "pawn"
+  | "brawn";
+
+export interface Piece {
+  color: Color;
+  type: PieceType;
+}
+
+export type BoardSquares = Array<Array<Piece | null>>;
+
+export interface EnPassantTarget {
+  x: number;
+  y: number;
+  capturedX: number;
+  capturedY: number;
+}
+
+export interface MoveOrigin {
+  type: string;
+  from?: Position;
+  to?: Position;
+}
+
+export interface BoardSnapshot {
+  time: number;
+  sideToMove: Color;
+  castling: number;
+  enPassant: EnPassantTarget | null;
+  origin: MoveOrigin | null;
+  board: BoardSquares;
+}
+
+export interface Timeline {
+  id: number;
+  row: number;
+  label: string;
+  owner: TimelineOwner;
+  boards: BoardSnapshot[];
+}
+
+export interface GameSnapshot {
+  turn: Color;
+  nextTimelineId: number;
+  nextBlackTimelineId: number;
+  checkedRoyals: Position[];
+  royalCaptureBy?: Color | null;
+  timelines: Timeline[];
+}
+
+export interface Position {
+  timelineId: number;
+  time: number;
+  x: number;
+  y: number;
+}
+
+export interface Move {
+  from: Position;
+  to: Position;
+}
+
+export interface WasmString {
+  ptr: number;
+  len: number;
+}
+
+export interface ChronofishEngine {
+  memory: WebAssembly.Memory;
+  chronofish_output_len(): number;
+  chronofish_alloc(length: number): number;
+  chronofish_dealloc(ptr: number, length: number): void;
+  chronofish_version(): number;
+  chronofish_reset(): void;
+  chronofish_snapshot_json(): number;
+  chronofish_last_message(): number;
+  chronofish_load_snapshot_json(ptr: number, length: number): number;
+  chronofish_apply_move(
+    fromTimelineId: number,
+    fromTime: number,
+    fromX: number,
+    fromY: number,
+    toTimelineId: number,
+    toTime: number,
+    toX: number,
+    toY: number
+  ): number;
+  chronofish_legal_targets_json(timelineId: number, time: number, x: number, y: number): number;
+  chronofish_submit_turn(): number;
+}

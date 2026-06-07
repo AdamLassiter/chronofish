@@ -1,4 +1,11 @@
-export function appendNotationLine({ submittedNotation, turnNotation }) {
+export interface BotLossLogPayload {
+  [key: string]: unknown;
+}
+
+export function appendNotationLine({ submittedNotation, turnNotation }: {
+  submittedNotation: string;
+  turnNotation: string;
+}): string {
   if (!turnNotation) {
     return submittedNotation;
   }
@@ -11,7 +18,7 @@ export function appendNotationLine({ submittedNotation, turnNotation }) {
   return nextNotation;
 }
 
-export function postMatchLog(roomId, notation = "") {
+export function postMatchLog(roomId: string, notation = ""): void {
   // Local games still have a generated room id, so the backend can write one log
   // file per game even when no multiplayer room was joined.
   fetch(`/api/logs/${encodeURIComponent(roomId)}`, {
@@ -23,7 +30,7 @@ export function postMatchLog(roomId, notation = "") {
   });
 }
 
-export function postBotLossLog(roomId, payload) {
+export function postBotLossLog(roomId: string, payload: BotLossLogPayload): void {
   fetch(`/api/training/loss-logs/${encodeURIComponent(roomId)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },

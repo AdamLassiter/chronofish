@@ -1,0 +1,622 @@
+use super::*;
+
+#[test]
+fn verbose_notation_writes_and_replays_turns() {
+    let mut game = Game::new();
+    assert_eq!(
+        game.apply_move(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 4,
+                y: 1,
+            },
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 4,
+                y: 3,
+            },
+        ),
+        1
+    );
+    assert_eq!(game.staged_turn_notation(), "T0L0e2Pe4");
+    assert_eq!(game.submit_turn(), 1);
+
+    assert_eq!(
+        game.apply_move(
+            Position {
+                timeline_id: 0,
+                time: 1,
+                x: 4,
+                y: 6,
+            },
+            Position {
+                timeline_id: 0,
+                time: 1,
+                x: 4,
+                y: 4,
+            },
+        ),
+        1
+    );
+    assert_eq!(game.staged_turn_notation(), "T1L0e7pe5");
+
+    let mut replay = Game::new();
+    replay
+        .load_notation(
+            "1. T0L0e2Pe4 [White pawn e4]\n\
+             2. T1L0e7pe5 [Black pawn e5]",
+        )
+        .expect("notation should replay");
+
+    assert_eq!(game.submit_turn(), 1);
+    assert_eq!(replay.to_json(), game.to_json());
+}
+
+#[test]
+fn royal_threat_highlights_but_only_capture_ends_game() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0g7pg6\n\
+         3. T2L0d1Qg4\n\
+         4. T3L0g8nf6\n\
+         5. T4L0f1Bc4\n\
+         6. T5L0d7pd5\n\
+         7. T6L0c4Bd5xp\n\
+         8. T7L0d8qd6\n\
+         9. T8L0g4Qc8xb+",
+    )
+    .expect("notation should replay to black in check");
+
+    assert_eq!(game.turn, Color::Black);
+    assert!(game.is_in_check(Color::Black));
+    assert!(game.to_json().contains(
+        "\"checkedRoyals\":[{\"timelineId\":0,\"time\":9,\"x\":4,\"y\":7}]"
+    ));
+    assert!(game.can_move_to(
+        Position {
+            timeline_id: 0,
+            time: 9,
+            x: 3,
+            y: 5,
+        },
+        Position {
+            timeline_id: 0,
+            time: 9,
+            x: 3,
+            y: 7,
+        },
+    ));
+    let mut blocked = game.clone_for_search();
+    assert_eq!(
+        blocked.apply_move(
+            Position {
+                timeline_id: 0,
+                time: 9,
+                x: 3,
+                y: 5,
+            },
+            Position {
+                timeline_id: 0,
+                time: 9,
+                x: 3,
+                y: 7,
+            },
+        ),
+        1
+    );
+    assert_eq!(blocked.submit_turn(), 1);
+    assert_ne!(blocked.last_message, "White wins by royal capture.");
+
+    assert_ne!(game.last_message, "White wins by royal capture.");
+}
+
+#[test]
+fn ai_uses_immediate_king_capture_to_escape_check() {
+    let mut game = Game::new();
+    let mut board = [[None; 8]; 8];
+    board[0][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::King,
+    });
+    board[6][4] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Rook,
+    });
+    board[7][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    game.turn = Color::Black;
+    game.timelines[0].boards = vec![snapshot(0, Color::Black, board)];
+
+    let expected = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 7,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 6,
+        },
+    };
+
+    assert_eq!(game.turn, Color::Black);
+    assert!(game.is_in_check(Color::Black));
+    assert!(game.can_move_to(expected.from, expected.to));
+
+    let result = game.best_ai_turn(2, 80_000, None);
+    assert_eq!(result.status, "ok");
+    assert_eq!(result.moves.first().copied(), Some(expected));
+
+    let mut replay = game.clone_for_search();
+    for movement in result.moves {
+        assert_eq!(replay.apply_move(movement.from, movement.to), 1);
+    }
+    assert_eq!(replay.submit_turn(), 1);
+    assert_ne!(replay.last_message, "White wins by checkmate.");
+}
+
+#[test]
+fn submit_detects_committed_branch_royal_capture() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0g7pg6\n\
+         3. T2L0d1Qg4\n\
+         4. T3L0g8nf6\n\
+         5. T4L0f1Bc4\n\
+         6. T5L0d7pd5\n\
+         7. T6L0c4Bd5xp\n\
+         8. T7L0d8qd6\n\
+         9. T8L0g4Qc8xb+\n\
+         10. T9L0d6qd8",
+    )
+    .expect("notation should replay before royal capture");
+
+    assert_eq!(
+        game.apply_move(
+            Position {
+                timeline_id: 0,
+                time: 10,
+                x: 2,
+                y: 7,
+            },
+            Position {
+                timeline_id: 0,
+                time: 6,
+                x: 4,
+                y: 7,
+            },
+        ),
+        1
+    );
+    assert_eq!(game.submit_turn(), 1);
+    assert_eq!(game.last_message, "White wins by royal capture.");
+}
+
+#[test]
+fn royal_capture_submit_wins_even_with_other_present_boards_pending() {
+    let mut game = Game::new();
+    let mut main_board = [[None; 8]; 8];
+    main_board[0][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::King,
+    });
+    main_board[0][4] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Rook,
+    });
+    main_board[7][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    game.timelines[0].boards = vec![snapshot(0, Color::White, main_board)];
+
+    let mut pending_board = [[None; 8]; 8];
+    pending_board[0][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::King,
+    });
+    pending_board[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    game.timelines.push(Timeline {
+        id: 1,
+        row: 1,
+        label: "L1".to_string(),
+        owner: TimelineOwner::White,
+        boards: vec![snapshot(0, Color::White, pending_board)],
+    });
+
+    assert_eq!(
+        game.apply_move(
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 4,
+                y: 0,
+            },
+            Position {
+                timeline_id: 0,
+                time: 0,
+                x: 4,
+                y: 7,
+            },
+        ),
+        1
+    );
+    assert!(game.has_pending_present_board(Color::White));
+    assert_eq!(game.submit_turn(), 1);
+    assert_eq!(game.last_message, "White wins by royal capture.");
+}
+
+#[test]
+fn evaluator_sees_one_move_temporal_royal_capture_setup() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0g7pg6\n\
+         3. T2L0d1Qg4\n\
+         4. T3L0g8nf6\n\
+         5. T4L0f1Bc4\n\
+         6. T5L0d7pd5\n\
+         7. T6L0c4Bd5xp\n\
+         8. T7L0d8qd6",
+    )
+    .expect("notation should replay before recurring queen tactic");
+
+    let weights = EvalWeights::default_tuned();
+    let setup_pressure = game.royal_capture_setup_pressure_for(Color::White, &weights);
+    assert!(
+        setup_pressure >= weights.royal_capture_setup,
+        "expected Qc8 to register as a one-move temporal royal-capture setup, got {setup_pressure}"
+    );
+}
+
+#[test]
+fn ai_timed_json_has_expected_shape() {
+    let game = Game::new();
+    let json = game.ai_turn_timed_json(3, 10_000, 250);
+
+    assert!(json.contains("\"moves\""));
+    assert!(json.contains("\"nodes\""));
+    assert!(json.contains("\"status\":\"ok\""));
+}
+
+#[test]
+fn ai_prefers_immediate_high_value_capture() {
+    let mut game = Game::new();
+    let mut board = empty_board_with_kings();
+    board[0][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Queen,
+    });
+    board[3][3] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Queen,
+    });
+    game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+    let result = game.best_ai_turn(1, 2_000, None);
+
+    assert_eq!(result.status, "ok");
+    assert!(result.moves.iter().any(|movement| {
+        movement.to.timeline_id == 0
+            && movement.to.time == 0
+            && movement.to.x == 3
+            && movement.to.y == 3
+    }));
+}
+
+#[test]
+fn submit_ignores_stale_historical_royal_capture() {
+    let mut game = Game::new();
+    let mut past = empty_board_with_kings();
+    past[4][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    let middle = empty_board_with_kings();
+    let mut latest = empty_board_with_kings();
+    latest[4][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Bishop,
+    });
+    latest[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+
+    game.turn = Color::Black;
+    game.timelines[0].boards = vec![
+        snapshot(0, Color::White, past),
+        snapshot(1, Color::Black, middle),
+        snapshot(2, Color::White, latest),
+    ];
+    game.staged_turn.push(game.checkpoint());
+
+    assert_eq!(game.submit_turn(), 1);
+    assert_eq!(game.last_message, "White to move.");
+}
+
+#[test]
+fn evaluation_rewards_temporal_royal_capture_trajectory() {
+    let mut game = Game::new();
+    let mut past = empty_board_with_kings();
+    past[4][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    let middle = empty_board_with_kings();
+    let mut latest = empty_board_with_kings();
+    latest[4][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Bishop,
+    });
+    latest[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    game.timelines[0].boards = vec![
+        snapshot(0, Color::White, past),
+        snapshot(1, Color::Black, middle),
+        snapshot(2, Color::White, latest),
+    ];
+
+    assert!(game.royal_capture_pressure_for(Color::White, &EvalWeights::default_tuned()) > 0);
+}
+
+#[test]
+fn evaluation_penalizes_exposed_royal_piece() {
+    let mut exposed = Game::new();
+    let mut board = empty_board_with_kings();
+    board[0][4] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::King,
+    });
+    board[7][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Rook,
+    });
+    board[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    exposed.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+    let safe = Game::new();
+    let weights = EvalWeights::default_tuned();
+
+    assert!(exposed.royal_safety_balance(Color::White, &weights) < safe.royal_safety_balance(Color::White, &weights));
+}
+
+#[test]
+fn evaluation_rewards_material_forks() {
+    let mut game = Game::new();
+    let mut board = empty_board_with_kings();
+    board[3][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Knight,
+    });
+    board[4][5] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Queen,
+    });
+    board[2][5] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Rook,
+    });
+    game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+
+    assert!(game.fork_pressure_for(Color::White, &EvalWeights::default_tuned()) > 0);
+}
+
+#[test]
+fn training_json_round_trips_tactical_weights() {
+    let weights = EvalWeights::default_tuned();
+    let json = weights.to_json();
+    let parsed = EvalWeights::from_json(&json).expect("weights should round-trip");
+
+    assert_eq!(parsed.royal_capture_threat, weights.royal_capture_threat);
+    assert_eq!(parsed.own_royal_exposure, weights.own_royal_exposure);
+    assert_eq!(parsed.fork_pressure, weights.fork_pressure);
+    assert_eq!(parsed.board_control, weights.board_control);
+    assert_eq!(parsed.timeline_economy, weights.timeline_economy);
+    assert_eq!(parsed.royal_shelter, weights.royal_shelter);
+    assert_eq!(parsed.space_advantage, weights.space_advantage);
+}
+
+#[test]
+fn evaluation_rewards_board_control_and_activity() {
+    let weights = EvalWeights::default_tuned();
+    let mut center = Game::new();
+    let mut center_board = empty_board_with_kings();
+    center_board[3][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Bishop,
+    });
+    center.timelines[0].boards = vec![snapshot(0, Color::White, center_board)];
+
+    let mut edge = Game::new();
+    let mut edge_board = empty_board_with_kings();
+    edge_board[0][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Bishop,
+    });
+    edge.timelines[0].boards = vec![snapshot(0, Color::White, edge_board)];
+
+    assert!(center.board_control_for(Color::White, &weights) > edge.board_control_for(Color::White, &weights));
+    assert!(center.piece_activity_for(Color::White, &weights) > edge.piece_activity_for(Color::White, &weights));
+}
+
+#[test]
+fn evaluation_rewards_healthier_pawn_structure() {
+    let weights = EvalWeights::default_tuned();
+    let mut healthy = Game::new();
+    let mut healthy_board = empty_board_with_kings();
+    healthy_board[4][4] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Pawn,
+    });
+    healthy_board[3][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Pawn,
+    });
+    healthy.timelines[0].boards = vec![snapshot(0, Color::White, healthy_board)];
+
+    let mut weak = Game::new();
+    let mut weak_board = empty_board_with_kings();
+    weak_board[1][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Pawn,
+    });
+    weak_board[2][0] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Pawn,
+    });
+    weak.timelines[0].boards = vec![snapshot(0, Color::White, weak_board)];
+
+    assert!(healthy.pawn_structure_for(Color::White, &weights) > weak.pawn_structure_for(Color::White, &weights));
+}
+
+#[test]
+fn evaluation_penalizes_inactive_owned_timelines() {
+    let weights = EvalWeights::default_tuned();
+    let mut inactive = Game::new();
+    inactive.timelines.push(Timeline {
+        id: 1,
+        row: 1,
+        label: "White T1".to_string(),
+        owner: TimelineOwner::White,
+        boards: vec![snapshot(0, Color::White, empty_board_with_kings())],
+    });
+    inactive.timelines.push(Timeline {
+        id: 2,
+        row: 2,
+        label: "White T2".to_string(),
+        owner: TimelineOwner::White,
+        boards: vec![snapshot(0, Color::White, empty_board_with_kings())],
+    });
+
+    let mut active = inactive.clone();
+    active.timelines.push(Timeline {
+        id: -1,
+        row: -1,
+        label: "Black T1".to_string(),
+        owner: TimelineOwner::Black,
+        boards: vec![snapshot(0, Color::Black, empty_board_with_kings())],
+    });
+
+    assert!(
+        active.timeline_economy_for(Color::White, &weights)
+            > inactive.timeline_economy_for(Color::White, &weights)
+    );
+}
+
+#[test]
+fn evaluator_prunes_inactive_timelines() {
+    let weights = EvalWeights::default_tuned();
+    let board = empty_board_with_kings();
+    let mut active_only = Game::new();
+    active_only.timelines = vec![
+        Timeline {
+            id: 0,
+            row: 0,
+            label: "Sacred T0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(0, Color::White, board)],
+        },
+        Timeline {
+            id: -1,
+            row: -1,
+            label: "Black T-1".to_string(),
+            owner: TimelineOwner::Black,
+            boards: vec![snapshot(0, Color::White, board)],
+        },
+    ];
+
+    let mut with_inactive = active_only.clone();
+    let mut inactive_board = board;
+    inactive_board[3][3] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Queen,
+    });
+    with_inactive.timelines.push(Timeline {
+        id: -2,
+        row: -2,
+        label: "Black T-2".to_string(),
+        owner: TimelineOwner::Black,
+        boards: vec![snapshot(0, Color::White, inactive_board)],
+    });
+
+    assert!(!with_inactive.is_active_timeline(-2));
+    assert_eq!(
+        active_only.evaluate_heuristic(Color::White, &weights),
+        with_inactive.evaluate_heuristic(Color::White, &weights)
+    );
+    assert!(with_inactive
+        .pruned_for_evaluation()
+        .timelines
+        .iter()
+        .all(|timeline| timeline.id != -2));
+}
+
+#[test]
+fn evaluation_rewards_royal_shelter() {
+    let weights = EvalWeights::default_tuned();
+    let mut sheltered = Game::new();
+    let mut sheltered_board = empty_board_with_kings();
+    for x in 3..=5 {
+        sheltered_board[1][x] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Pawn,
+        });
+    }
+    sheltered.timelines[0].boards = vec![snapshot(0, Color::White, sheltered_board)];
+
+    let mut exposed = Game::new();
+    exposed.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];
+
+    assert!(sheltered.royal_shelter_for(Color::White, &weights) > exposed.royal_shelter_for(Color::White, &weights));
+}
+
+#[test]
+fn training_mutation_is_seeded() {
+    let config = TrainerConfig {
+        effort: "expert".to_string(),
+        generations: 1,
+        population: 4,
+        depth: 1,
+        nodes: 5,
+        plies: 0,
+        seed: 7,
+        max_seconds: Some(1),
+        out: None,
+        score: None,
+        score_default: false,
+        train_cycle: false,
+        compare_seeds: vec![101, 202],
+        min_wins: 1,
+        min_total_delta: 1,
+        verify: "cargo test -q".to_string(),
+        ai_src: "engine/src/ai/parameters.json".to_string(),
+        hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
+        min_pairs: 3,
+        pair_batch: 1,
+        max_pairs: 3,
+        draw_window: 3,
+        draw_rate_limit: 0.8,
+        max_generations_without_candidate: 1,
+        finalist_count: 2,
+    };
+
+    assert_eq!(train_weights(&config).to_json(), train_weights(&config).to_json());
+}

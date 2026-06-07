@@ -330,6 +330,123 @@ button {
   color: #bfcac4;
 }
 
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+.training-status-view {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: 10px;
+  width: 100%;
+}
+
+.training-status-phase {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f1f4ef;
+  font-weight: 800;
+}
+
+.training-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #9fcfbd;
+}
+
+.training-status-view[data-tone="active"] .training-status-dot {
+  background: #72e58f;
+  box-shadow: 0 0 12px rgba(114, 229, 143, 0.7);
+}
+
+.training-status-view[data-tone="warn"] .training-status-dot {
+  background: #ffd36e;
+}
+
+.training-status-view[data-tone="error"] .training-status-dot {
+  background: #ff7a70;
+}
+
+.training-status-view[data-tone="ready"] .training-status-dot {
+  background: #95e4ad;
+}
+
+.training-status-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.training-status-metric {
+  min-width: 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 7px 9px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.training-status-metric-label {
+  display: block;
+  color: #9fcfbd;
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.training-status-metric-value {
+  display: block;
+  overflow: hidden;
+  color: #f1f4ef;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.training-progress {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.training-progress-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 140px) minmax(160px, 1fr) minmax(120px, auto);
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  color: #dce5df;
+  font-size: 0.9rem;
+}
+
+.training-progress-label {
+  font-weight: 800;
+}
+
+.training-progress-detail {
+  color: #9fcfbd;
+  text-align: right;
+}
+
+.training-progress-row progress {
+  width: 100%;
+  height: 12px;
+  accent-color: #72e58f;
+}
+
 #share-link a {
   color: #95e4ad;
 }
@@ -763,5 +880,17 @@ button {
   .evaluation-track {
     width: 26px;
     min-height: 180px;
+  }
+
+  .training-status-view {
+    grid-template-columns: 1fr;
+  }
+
+  .training-progress-row {
+    grid-template-columns: 1fr;
+  }
+
+  .training-progress-detail {
+    text-align: left;
   }
 }
