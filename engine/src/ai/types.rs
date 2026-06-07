@@ -2,33 +2,23 @@
 // training.rs so wasm gets a deterministic search surface without file or git
 // automation.
 const CHECKMATE_SCORE: i32 = 1_000_000;
-#[cfg(test)]
 const MAX_TURN_PLANS: usize = 32;
-#[cfg(test)]
 const MAX_MOVES_PER_NODE: usize = 24;
-#[cfg(test)]
 const REQUIRED_MOVES_PER_BOARD: usize = 4;
-#[cfg(test)]
 const MAX_QUIESCENCE_DEPTH: i32 = 2;
-#[cfg(test)]
 const ASPIRATION_WINDOW: i32 = 400;
-#[cfg(test)]
 const LATE_MOVE_REDUCTION_AFTER: usize = 8;
-#[cfg(test)]
 const HISTORY_BONUS: i32 = 32;
 
-#[cfg(test)]
 type SearchInstant = wasm_timer::Instant;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[cfg(test)]
 struct MoveStep {
     from: Position,
     to: Position,
 }
 
 #[derive(Clone)]
-#[cfg(test)]
 struct TurnPlan {
     moves: Vec<MoveStep>,
     game: Game,
@@ -36,7 +26,6 @@ struct TurnPlan {
 }
 
 #[derive(Clone)]
-#[cfg(test)]
 struct AiSearchResult {
     moves: Vec<MoveStep>,
     score: i32,
@@ -126,7 +115,6 @@ struct AttackSummary {
     time_count: i32,
 }
 
-#[cfg(test)]
 struct SearchContext {
     // The node budget is shared across iterative-deepening branches.
     weights: EvalWeights,
@@ -144,7 +132,6 @@ struct SearchContext {
 }
 
 #[derive(Clone, Copy)]
-#[cfg(test)]
 struct SearchEntry {
     depth: i32,
     score: i32,
@@ -152,7 +139,6 @@ struct SearchEntry {
 }
 
 #[derive(Clone, Copy)]
-#[cfg(test)]
 struct SearchOptions {
     tt_best_move: bool,
     killer_moves: bool,
@@ -165,7 +151,6 @@ struct SearchOptions {
 }
 
 #[derive(Clone, Copy, Default)]
-#[cfg(test)]
 struct SearchStats {
     expensive_order_probes: usize,
     turn_plan_cache_hits: usize,
@@ -176,7 +161,6 @@ struct SearchStats {
 }
 
 #[derive(Clone)]
-#[cfg(test)]
 struct SearchPerfSample {
     label: &'static str,
     elapsed_micros: u128,

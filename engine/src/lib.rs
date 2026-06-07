@@ -13,9 +13,23 @@ include!("notation_parser.rs");
 #[cfg(not(test))]
 include!("ai/types.rs");
 #[cfg(not(test))]
+include!("ai/effort.rs");
+#[cfg(not(test))]
+include!("ai/model.rs");
+#[cfg(not(test))]
+include!("ai/evaluator.rs");
+#[cfg(not(test))]
 include!("ai/weights.rs");
 #[cfg(not(test))]
 include!("ai/evaluation.rs");
+#[cfg(not(test))]
+include!("ai/search.rs");
+#[cfg(not(test))]
+include!("ai/search_plans.rs");
+#[cfg(not(test))]
+include!("ai/search_support.rs");
+#[cfg(not(test))]
+include!("ai/json.rs");
 
 #[cfg(test)]
 include!("ai.rs");
@@ -24,14 +38,8 @@ include!("gpu_snapshot.rs");
 #[cfg(test)]
 include!("notation_replay.rs");
 
-#[cfg(all(not(target_arch = "wasm32"), test))]
+#[cfg(not(target_arch = "wasm32"))]
 include!("training.rs");
-
-#[cfg(all(not(target_arch = "wasm32"), not(test)))]
-pub fn run_training_cli() {
-    eprintln!("Native CPU training is disabled; use the browser WebGPU training path.");
-    std::process::exit(1);
-}
 
 #[cfg(test)]
 include!("tests.rs");

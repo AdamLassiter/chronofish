@@ -15,6 +15,7 @@ await esbuild.build({
   entryPoints: [
     path.join(src, "main.ts"),
     path.join(src, "ai-worker.ts"),
+    path.join(src, "cpu-ai-worker.ts"),
     path.join(src, "training-worker.ts"),
     path.join(src, "training-label-worker.ts")
   ],

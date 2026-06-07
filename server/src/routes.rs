@@ -113,13 +113,21 @@ async fn training_status(State(state): State<AppState>) -> impl IntoResponse {
     let path = active_training_model_path(&state);
     let existing = std::fs::read(&path).ok();
     let metadata = std::fs::metadata(&path).ok();
+    let cpu_path = active_cpu_parameters_path(&state);
+    let cpu_existing = std::fs::read(&cpu_path).ok();
+    let cpu_metadata = std::fs::metadata(&cpu_path).ok();
     Json(json!({
         "enabled": true,
-        "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "modelPath": "engine/models/gpu-v1/value-model.cfnn",
         "resolvedModelPath": path.display().to_string(),
         "modelPresent": metadata.is_some(),
         "modelBytes": metadata.as_ref().map(|metadata| metadata.len()),
         "modelHash": existing.as_deref().map(training_model_hash),
+        "cpuParametersPath": "engine/models/cpu-v1/parameters.json",
+        "resolvedCpuParametersPath": cpu_path.display().to_string(),
+        "cpuParametersPresent": cpu_metadata.is_some(),
+        "cpuParametersBytes": cpu_metadata.as_ref().map(|metadata| metadata.len()),
+        "cpuParametersHash": cpu_existing.as_deref().map(training_model_hash),
         "updatedAt": metadata
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
@@ -177,7 +185,7 @@ async fn put_training_model(
         return Json(json!({
             "ok": true,
             "changed": false,
-            "modelPath": "engine/models/value-v1/value-model.cfnn",
+            "modelPath": "engine/models/gpu-v1/value-model.cfnn",
             "resolvedModelPath": path.display().to_string(),
             "modelBytes": body.len(),
             "oldHash": old_hash,
@@ -234,7 +242,117 @@ async fn put_training_model(
     Json(json!({
         "ok": true,
         "changed": true,
-        "modelPath": "engine/models/value-v1/value-model.cfnn",
+        "modelPath": "engine/models/gpu-v1/value-model.cfnn",
+        "resolvedModelPath": path.display().to_string(),
+        "modelBytes": body.len(),
+        "oldHash": old_hash,
+        "newHash": new_hash,
+        "diskHash": disk_hash,
+        "updatedAt": now_millis()
+    }))
+    .into_response()
+}
+
+#[cfg(feature = "frontend-training")]
+async fn get_training_cpu_parameters(State(state): State<AppState>) -> Response {
+    let path = active_cpu_parameters_path(&state);
+    match std::fs::read(&path).or_else(|_| std::fs::read(default_cpu_parameters_path(&state))) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to read CPU parameters: {error}"),
+                room: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "frontend-training")]
+async fn put_training_cpu_parameters(
+    State(state): State<AppState>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(error) = validate_cpu_parameters(&body) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody { error, room: None }),
+        )
+            .into_response();
+    }
+
+    let path = active_cpu_parameters_path(&state);
+    let existing = std::fs::read(&path).ok();
+    let old_hash = existing.as_deref().map(training_model_hash);
+    let new_hash = training_model_hash(&body);
+    if existing.as_deref() == Some(body.as_ref()) {
+        return Json(json!({
+            "ok": true,
+            "changed": false,
+            "modelPath": "engine/models/cpu-v1/parameters.json",
+            "resolvedModelPath": path.display().to_string(),
+            "modelBytes": body.len(),
+            "oldHash": old_hash,
+            "newHash": new_hash,
+            "reason": "uploaded CPU parameters match the active parameters on disk",
+            "updatedAt": now_millis()
+        }))
+        .into_response();
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("Failed to create CPU parameters directory: {error}"),
+                    room: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    if path.is_file() {
+        let backup = path.with_file_name(format!("parameters.{}.bak.json", now_millis()));
+        if let Err(error) = std::fs::copy(&path, &backup) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody {
+                    error: format!("Failed to back up active CPU parameters: {error}"),
+                    room: None,
+                }),
+            )
+                .into_response();
+        }
+    }
+
+    let tmp = path.with_file_name("parameters.tmp.json");
+    if let Err(error) = write_atomic(&tmp, &path, &body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to replace active CPU parameters: {error}"),
+                room: None,
+            }),
+        )
+            .into_response();
+    }
+    let disk_hash = std::fs::read(&path)
+        .ok()
+        .as_deref()
+        .map(training_model_hash);
+
+    Json(json!({
+        "ok": true,
+        "changed": true,
+        "modelPath": "engine/models/cpu-v1/parameters.json",
         "resolvedModelPath": path.display().to_string(),
         "modelBytes": body.len(),
         "oldHash": old_hash,
@@ -383,7 +501,17 @@ fn mutate_game_room(state: AppState, room_id: String, body: RoomBody, action: &s
 
 #[cfg(feature = "frontend-training")]
 fn active_training_model_path(state: &AppState) -> PathBuf {
-    state.root.join("engine/models/value-v1/value-model.cfnn")
+    state.root.join("engine/models/gpu-v1/value-model.cfnn")
+}
+
+#[cfg(feature = "frontend-training")]
+fn active_cpu_parameters_path(state: &AppState) -> PathBuf {
+    state.root.join("engine/models/cpu-v1/parameters.json")
+}
+
+#[cfg(feature = "frontend-training")]
+fn default_cpu_parameters_path(state: &AppState) -> PathBuf {
+    state.root.join("engine/src/ai/parameters.json")
 }
 
 #[cfg(feature = "frontend-training")]
@@ -402,6 +530,31 @@ fn validate_training_model(model: &[u8]) -> Result<(), String> {
     }
     if model.len() > 64 * 1024 * 1024 {
         return Err("Model is too large.".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "frontend-training")]
+fn validate_cpu_parameters(parameters: &[u8]) -> Result<(), String> {
+    if parameters.len() > 1024 * 1024 {
+        return Err("CPU parameters JSON is too large.".to_string());
+    }
+    let value: Value = serde_json::from_slice(parameters)
+        .map_err(|error| format!("CPU parameters must be valid JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "CPU parameters must be a JSON object.".to_string())?;
+    for required in [
+        "king",
+        "queen",
+        "pawn",
+        "mobility",
+        "royal_capture_threat",
+        "royal_capture_setup",
+    ] {
+        if !object.get(required).is_some_and(Value::is_number) {
+            return Err(format!("CPU parameters missing numeric field `{required}`."));
+        }
     }
     Ok(())
 }

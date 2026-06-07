@@ -19,7 +19,19 @@ const initialUrlHasRoom = initialSearchParams.has("room");
 
 type Phase = "lobby" | "game" | "review";
 type LobbyColor = Color | "spectator";
-type Assignment = "local" | "human" | "open" | "bot-fast" | "bot-balanced" | "bot-expert";
+type Assignment =
+  | "local"
+  | "human"
+  | "open"
+  | "bot-fast"
+  | "bot-balanced"
+  | "bot-expert"
+  | "bot-gpu-fast"
+  | "bot-gpu-balanced"
+  | "bot-gpu-expert"
+  | "bot-cpu-fast"
+  | "bot-cpu-balanced"
+  | "bot-cpu-expert";
 type Assignments = Record<Color, Assignment>;
 
 interface BotCredentials {
@@ -113,11 +125,47 @@ let aiEffortConfigs: BotEffortConfigs = {
   },
   expert: {
     label: "Bot: Expert",
-    displayNames: ["Kasparadox", "Deep Blue Shift", "Premovaru Checkamura"],
+    displayNames: ["Kasparadox", "Premovaru Checkamura", "Anandromeda"],
     depth: 5,
     nodes: 200_000,
     timeMs: 250_000
   }
+};
+
+const gpuBotDisplayNames: Record<BotEffortName, string[]> = {
+  fast: [
+    "Stockfish & Chips",
+    "Crafty Castler",
+    "Fritz Blitz"
+  ],
+  balanced: [
+    "Deep Blue Shift",
+    "Leela Timeline Zero",
+    "Komodo Chrono"
+  ],
+  expert: [
+    "AlphaZero Hour",
+    "Rybka in Time",
+    "Houdini's Horizon"
+  ]
+};
+
+const cpuBotDisplayNames: Record<BotEffortName, string[]> = {
+  fast: [
+    "Bullet Fischer",
+    "Speedrun Steinitz",
+    "Blitz Botvinnik"
+  ],
+  balanced: [
+    "Timeline Tal",
+    "Causality Capablanca",
+    "Multiverse Magnus"
+  ],
+  expert: [
+    "Kasparadox",
+    "Premovaru Checkamura",
+    "Anandromeda"
+  ]
 };
 let game = initialGame();
 // Last submitted snapshot. While a turn is staged, rendering compares against
@@ -184,7 +232,7 @@ const training = createTrainingController({
 });
 
 localStorage.setItem("chronofish.playerToken", multiplayer.token);
-elements.appStatus.textContent = `Web v${APP_VERSION}`;
+elements.appStatus.textContent = `🌐 v${APP_VERSION}`;
 elements.roomInput.value = multiplayer.roomId;
 elements.whitePlayerSelect.value = assignments.white;
 elements.blackPlayerSelect.value = assignments.black;
@@ -254,7 +302,13 @@ function normalizeAssignment(value: unknown, fallback: Assignment = "local"): As
     "open",
     "bot-fast",
     "bot-balanced",
-    "bot-expert"
+    "bot-expert",
+    "bot-gpu-fast",
+    "bot-gpu-balanced",
+    "bot-gpu-expert",
+    "bot-cpu-fast",
+    "bot-cpu-balanced",
+    "bot-cpu-expert"
   ].includes(value as Assignment) ? value as Assignment : fallback;
 }
 
@@ -264,7 +318,10 @@ function isBotAssignment(value: unknown): boolean {
 
 function botEffortName(value: unknown): BotEffortName {
   if (isBotAssignment(value)) {
-    const effort = String(value).slice("bot-".length);
+    const effort = String(value)
+      .slice("bot-".length)
+      .replace(/^gpu-/, "")
+      .replace(/^cpu-/, "");
     if (effort === "fast" || effort === "balanced" || effort === "expert") {
       return effort;
     }
@@ -274,6 +331,10 @@ function botEffortName(value: unknown): BotEffortName {
 
 function botEffort(value: unknown): BotEffortConfig {
   return aiEffortConfigs[botEffortName(value)] ?? aiEffortConfigs.balanced;
+}
+
+function botBackendName(value: unknown): "gpu" | "cpu" {
+  return typeof value === "string" && value.startsWith("bot-cpu-") ? "cpu" : "gpu";
 }
 
 function stableIndex(value: string, count: number): number {
@@ -286,10 +347,16 @@ function stableIndex(value: string, count: number): number {
 }
 
 function botDisplayName(color: Color): string {
+  const assignment = assignments[color];
   const effortName = botEffortName(assignments[color]);
-  const effort = botEffort(assignments[color]);
-  const names = effort.displayNames ?? [effort.label ?? "Bot"];
-  return names[stableIndex(`${multiplayer.roomId}:${color}:${effortName}`, names.length)] ?? effort.label;
+  const backend = botBackendName(assignment);
+  const effort = botEffort(assignment);
+  const names = backend === "cpu"
+    ? cpuBotDisplayNames[effortName]
+    : gpuBotDisplayNames[effortName];
+  return names[stableIndex(`${multiplayer.roomId}:${color}:${backend}:${effortName}`, names.length)]
+    ?? effort.label
+    ?? "Bot";
 }
 
 function playerDisplayName(color: Color): string {
@@ -1063,7 +1130,7 @@ async function loadWasmStatus(): Promise<void> {
     engine = instance.exports as unknown as ChronofishEngine;
     resetEngine();
     const restored = await restoreLocalGameState();
-    elements.wasmStatus.textContent = `Engine v${readWasmString(engine, engine.chronofish_version())}`;
+    elements.wasmStatus.textContent = `🧠 v${readWasmString(engine, engine.chronofish_version())}`;
     elements.wasmStatus.dataset.state = "ready";
     if (!restored) {
       elements.message.textContent = "Configure the lobby, then start the game.";
@@ -1074,7 +1141,7 @@ async function loadWasmStatus(): Promise<void> {
     }
   } catch (error) {
     console.error(error);
-    elements.wasmStatus.textContent = "WASM not built";
+    elements.wasmStatus.textContent = "🧠 missing";
     elements.wasmStatus.dataset.state = "error";
     elements.message.textContent = "Build the WASM engine first with `cargo build --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown`.";
     render();
@@ -1100,12 +1167,12 @@ async function loadServerStatus(): Promise<void> {
       aiEffortConfigs = await effortResponse.json() as BotEffortConfigs;
     }
 
-    elements.serverStatus.textContent = `Server v${payload.version}`;
+    elements.serverStatus.textContent = `🖥 v${payload.version}`;
     elements.serverStatus.dataset.state = "ready";
     await training.loadStatus();
   } catch (error) {
     console.error(error);
-    elements.serverStatus.textContent = "Server unavailable";
+    elements.serverStatus.textContent = "🖥 offline";
     elements.serverStatus.dataset.state = "error";
   }
 }

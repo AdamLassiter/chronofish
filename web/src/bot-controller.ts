@@ -5,6 +5,7 @@ const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
 
 type BotColor = Color;
 type AiStatus = "ok" | "noLegalTurn" | string;
+type BotBackend = "gpu" | "cpu";
 
 interface BotCredentials {
   color: BotColor;
@@ -23,6 +24,7 @@ interface AiChoice {
   depth?: number | null;
   nodes?: number | null;
   gpuSearch?: string | null;
+  cpuSearch?: string | null;
 }
 
 interface AiSearchResult {
@@ -33,6 +35,7 @@ interface AiSearchResult {
   nodes?: number | null;
   choices?: AiChoice[];
   gpuSearch?: string | null;
+  cpuSearch?: string | null;
   trainingDecision?: BotDecisionRecord | null;
 }
 
@@ -45,6 +48,7 @@ interface PendingResult {
 interface PendingSearch {
   id: number;
   botColor: BotColor;
+  backend: BotBackend;
   game: GameSnapshot;
   targetDepth: number;
   currentDepth: number;
@@ -74,6 +78,7 @@ interface RankedBotChoice {
   depth?: number | null | undefined;
   nodes?: number | null | undefined;
   gpuSearch?: string | null | undefined;
+  cpuSearch?: string | null | undefined;
   partitionIndex: number | null;
   selected: boolean;
 }
@@ -84,6 +89,7 @@ interface BotDecisionChoice {
   depth: number | null;
   nodes: number | null;
   gpuSearch: string | null;
+  cpuSearch: string | null;
 }
 
 interface BotDecisionRecord {
@@ -201,8 +207,8 @@ export function createBotController({
     return (["white", "black"] as BotColor[]).filter((color) => isBotAssignment(getAssignments()[color]));
   }
 
-  function createAiWorker(): Worker {
-    const worker = new Worker("./ai-worker.js", { type: "module" });
+  function createAiWorker(backend: BotBackend): Worker {
+    const worker = new Worker(backend === "cpu" ? "./cpu-ai-worker.js" : "./ai-worker.js", { type: "module" });
     worker.addEventListener("message", handleAiWorkerMessage);
     worker.addEventListener("error", handleAiWorkerError);
     worker.addEventListener("messageerror", handleAiWorkerError);
@@ -233,8 +239,8 @@ export function createBotController({
     bot.pendingSearch = null;
   }
 
-  function botSearchWorkerCount(effortName: string): number {
-    if (effortName !== "expert") {
+  function botSearchWorkerCount(effortName: string, backend: BotBackend): number {
+    if (backend === "cpu" || effortName !== "expert") {
       return 1;
     }
     const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 2);
@@ -298,14 +304,16 @@ export function createBotController({
     const id = ++aiRequestId;
     const botColor = getGame().turn;
     const effortName = botEffortName(getAssignments()[botColor]);
+    const backend = botBackend(getAssignments()[botColor]);
     const effort = botEffort(getAssignments()[botColor]);
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
-    const workerCount = botSearchWorkerCount(effortName);
+    const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
     bot.thinking = true;
     bot.pendingSearch = {
       id,
       botColor,
+      backend,
       game: cloneGame(getGame()),
       targetDepth: Math.max(1, effort.depth ?? 1),
       currentDepth: 0,
@@ -345,7 +353,7 @@ export function createBotController({
     const workerTimeMs = botWorkerSearchTimeMs(remainingMs);
     for (let partitionIndex = 0; partitionIndex < pending.workerCount; partitionIndex += 1) {
       try {
-        createAiWorker().postMessage({
+        createAiWorker(pending.backend).postMessage({
           id,
           game: getGame(),
           depth: nextDepth,
@@ -384,6 +392,10 @@ export function createBotController({
 
   function botGpuMode(): "full" | "hybrid" {
     return localStorage.getItem(GPU_MODE_STORAGE_KEY) === "full" ? "full" : "hybrid";
+  }
+
+  function botBackend(value: unknown): BotBackend {
+    return typeof value === "string" && value.startsWith("bot-cpu-") ? "cpu" : "gpu";
   }
 
   function handleBotTimeout(id: number, botColor: BotColor, timeMs: number): void {
@@ -455,8 +467,8 @@ export function createBotController({
     logBotSearchChoices(pending, bestResult, reason);
     if (!bestResult && pending.errors.length > 0) {
       terminateAiWorkers();
-      message.textContent = `${botDisplayName(pending.botColor)} search failed: ${pending.errors[0] ?? "unknown error"}`;
-      render();
+      message.textContent = `${botDisplayName(pending.botColor)} search failed and conceded: ${pending.errors[0] ?? "unknown error"}`;
+      void completeBotTurn(pending.botColor, { status: "noLegalTurn", moves: [] });
       return;
     }
     if (bestResult) {
@@ -520,7 +532,7 @@ export function createBotController({
       depth: choice.depth ?? "",
       nodes: choice.nodes ?? "",
       worker: choice.partitionIndex ?? "",
-      search: choice.gpuSearch ?? ""
+      search: choice.cpuSearch ?? choice.gpuSearch ?? ""
     })));
     if (pending.errors.length) {
       console.info("Bot search worker errors", pending.errors);
@@ -536,7 +548,7 @@ export function createBotController({
       const rawChoices = Array.isArray(result.choices) && result.choices.length
         ? result.choices
         : result.moves.length
-          ? [{ moves: result.moves, score: result.score, depth: result.depth, nodes: result.nodes, gpuSearch: result.gpuSearch }]
+          ? [{ moves: result.moves, score: result.score, depth: result.depth, nodes: result.nodes, gpuSearch: result.gpuSearch, cpuSearch: result.cpuSearch }]
           : [];
       for (const choice of rawChoices) {
         const moves = choice.moves ?? [];
@@ -551,6 +563,7 @@ export function createBotController({
           depth: choice.depth ?? result.depth,
           nodes: choice.nodes ?? result.nodes,
           gpuSearch: choice.gpuSearch ?? result.gpuSearch,
+          cpuSearch: choice.cpuSearch ?? result.cpuSearch,
           partitionIndex: entry.partitionIndex,
           selected: key === selectedKey
         };
@@ -590,7 +603,8 @@ export function createBotController({
         score: choice.score ?? null,
         depth: choice.depth ?? null,
         nodes: choice.nodes ?? null,
-        gpuSearch: choice.gpuSearch ?? null
+        gpuSearch: choice.gpuSearch ?? null,
+        cpuSearch: choice.cpuSearch ?? null
       }))
     };
   }
@@ -672,7 +686,7 @@ export function createBotController({
 
     if (result.status !== "ok" || result.moves.length === 0) {
       message.textContent = `${botDisplayName(botColor)} found no legal turn and conceded.`;
-      concede(botColor, botMoveCredentials(botColor));
+      await concede(botColor, botMoveCredentials(botColor));
       return;
     }
 
@@ -680,7 +694,7 @@ export function createBotController({
     const before = turnSignature();
     for (const move of result.moves) {
       if (!(await applyEngineMove(move.from, move.to))) {
-        concede(botColor, botMoveCredentials(botColor));
+        await concede(botColor, botMoveCredentials(botColor));
         return;
       }
     }
@@ -691,7 +705,7 @@ export function createBotController({
 
     const turnMessage = await submitVisibleTurn(botColor);
     if (!turnMessage) {
-      concede(botColor, botMoveCredentials(botColor));
+      await concede(botColor, botMoveCredentials(botColor));
       return;
     }
 
@@ -700,10 +714,10 @@ export function createBotController({
     persistLocalGameState();
     render();
     if (isMatchOverMessage(turnMessage)) {
-      enterPostMatchReview(turnMessage, botMoveCredentials(botColor));
+      await enterPostMatchReview(turnMessage, botMoveCredentials(botColor));
       return;
     }
-    syncState("state", botMessage, botMoveCredentials(botColor));
+    await syncState("state", botMessage, botMoveCredentials(botColor));
     maybeStartBotTurn();
   }
 

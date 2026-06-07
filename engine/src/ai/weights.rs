@@ -1,10 +1,22 @@
 #[allow(dead_code)]
 impl EvalWeights {
     fn default_tuned() -> Self {
-        // Committed training data lives in a dedicated JSON include target so
-        // the trainer never edits this type definition.
-        serde_json::from_str(include_str!("parameters.json"))
+        serde_json::from_str(&active_parameters_json())
             .expect("committed AI parameters should be valid JSON")
+    }
+
+    fn active_tuned() -> Self {
+        ACTIVE_EVAL_WEIGHTS
+            .with(|weights| *weights.borrow())
+            .unwrap_or_else(Self::default_tuned)
+    }
+
+    fn set_active_from_json(json: &str) -> Result<(), String> {
+        let weights: Self = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        ACTIVE_EVAL_WEIGHTS.with(|active| {
+            *active.borrow_mut() = Some(weights);
+        });
+        Ok(())
     }
 
     fn piece_value(self, piece_type: PieceType) -> i32 {
@@ -23,6 +35,20 @@ impl EvalWeights {
             PieceType::Brawn => self.brawn,
         }
     }
+}
+
+thread_local! {
+    static ACTIVE_EVAL_WEIGHTS: RefCell<Option<EvalWeights>> = const { RefCell::new(None) };
+}
+
+fn active_parameters_json() -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if let Ok(json) = std::fs::read_to_string("engine/models/cpu-v1/parameters.json") {
+            return json;
+        }
+    }
+    include_str!("parameters.json").to_string()
 }
 
 #[allow(dead_code)]

@@ -1,8 +1,14 @@
 #!/usr/bin/env sh
 set -eu
 
+if [ "${1:-}" = "cpu" ]; then
+  shift
+  exec cargo run --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@"
+fi
+
 echo "Frontend WebGPU training is served by the dev server with training endpoints enabled."
-echo "Open the app and use the Neural training HUD panel."
+echo "Open the app and use the Neural training modal."
+echo "For native heuristic CPU training, run: ./train cpu --max-seconds 3600"
 
 npm --prefix web ci
 npm --prefix web run build

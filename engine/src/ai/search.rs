@@ -64,7 +64,7 @@ impl Game {
         let started = SearchInstant::now();
         let depth = max_depth.max(1);
         let nodes = max_nodes.max(1) as usize;
-        let weights = EvalWeights::default_tuned();
+        let weights = EvalWeights::active_tuned();
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
         context.options = options;
         context.evaluator = evaluator;
@@ -175,7 +175,7 @@ impl Game {
     ) -> AiSearchResult {
         let depth = max_depth.max(1);
         let nodes = max_nodes.max(1) as usize;
-        let weights = EvalWeights::default_tuned();
+        let weights = EvalWeights::active_tuned();
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
         context.options = SearchOptions::optimized();
         context.evaluator = evaluator;

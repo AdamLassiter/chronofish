@@ -12,6 +12,8 @@ services:
     volumes:
       # Match logs are written under /app/logs in the container.
       - chronofish-logs:/app/logs
+      # CPU heuristic parameters are stored at /app/engine/models/cpu-v1.
+      - chronofish-cpu-models:/app/engine/models/cpu-v1
 
   chronofish-training:
     profiles:
@@ -28,10 +30,18 @@ services:
     volumes:
       # Training loss replay logs are stored at /app/logs/training-losses.
       - chronofish-logs:/app/logs
-      - chronofish-models:/app/engine/models/value-v1
+      # Compact GPU value model is stored at /app/engine/models/gpu-v1.
+      - chronofish-models:/app/engine/models/gpu-v1
+      # CPU heuristic parameters are stored at /app/engine/models/cpu-v1.
+      - chronofish-cpu-models:/app/engine/models/cpu-v1
 
 volumes:
   # Contains regular match logs plus frontend-training loss logs in
   # logs/training-losses inside the container.
   chronofish-logs:
+  # Persists frontend-trained GPU value models under
+  # /app/engine/models/gpu-v1/value-model.cfnn.
   chronofish-models:
+  # Persists CPU heuristic parameters under
+  # /app/engine/models/cpu-v1/parameters.json.
+  chronofish-cpu-models:

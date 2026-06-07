@@ -47,6 +47,7 @@ interface TrainingGpuProfileConfig {
 }
 
 interface TrainingConfig {
+  trainingTarget: string;
   labelMode: string;
   samples: number;
   selfPlayWorkers: number;
@@ -64,6 +65,10 @@ interface TrainingConfig {
   patience: number;
   weightDecay: number;
   labelWorkers: number;
+  cpuDepth: number;
+  cpuNodes: number;
+  cpuWorkers: number;
+  cpuTrainSeconds: number;
 }
 
 interface TrainingMetric {
@@ -173,6 +178,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const trainingStatus = requireElement(elements.trainingStatus, "training-status");
   const trainingStatusView = requireElement(elements.trainingStatusView, "training-status-view");
   const trainingProgress = requireElement(elements.trainingProgress, "training-progress");
+  const trainingTargetSelect = requireElement(elements.trainingTargetSelect, "training-target");
   const labelModeSelect = requireElement(elements.trainingLabelModeSelect, "training-label-mode");
   const samplesInput = requireElement(elements.trainingSamplesInput, "training-samples");
   const selfPlayWorkersInput = requireElement(elements.trainingSelfPlayWorkersInput, "training-self-play-workers");
@@ -189,6 +195,10 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const validationIntervalInput = requireElement(elements.trainingValidationIntervalInput, "training-validation-interval");
   const patienceInput = requireElement(elements.trainingPatienceInput, "training-patience");
   const decayInput = requireElement(elements.trainingDecayInput, "training-decay");
+  const cpuDepthInput = requireElement(elements.trainingCpuDepthInput, "training-cpu-depth");
+  const cpuNodesInput = requireElement(elements.trainingCpuNodesInput, "training-cpu-nodes");
+  const cpuWorkersInput = requireElement(elements.trainingCpuWorkersInput, "training-cpu-workers");
+  const cpuSecondsInput = requireElement(elements.trainingCpuSecondsInput, "training-cpu-seconds");
 
   let trainingWorker: Worker | null = null;
   let trainingRequestId = 0;
@@ -198,6 +208,10 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   let trainingGpuProfile: TrainingGpuProfile | null = null;
   let trainingGpuProfileApplied = false;
   const trainingProgressState = new Map<LabelKind, TrainingProgressEntry>();
+
+  elements.trainingTabButtons.forEach((button) => {
+    button.addEventListener("click", () => selectTrainingTab(button.dataset.trainingTab ?? "gpu"));
+  });
 
   function ensureTrainingWorker(): Worker {
     if (!trainingWorker) {
@@ -214,7 +228,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
         throw new Error("Training endpoints disabled");
       }
       const payload = await response.json() as TrainingStatusPayload;
-      if (payload.enabled !== true || payload.modelPath !== "engine/models/value-v1/value-model.cfnn") {
+      if (payload.enabled !== true || payload.modelPath !== "engine/models/gpu-v1/value-model.cfnn") {
         throw new Error("Training endpoints disabled");
       }
       trainingEnabled = true;
@@ -243,7 +257,9 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
 
   function trainingConfig(): TrainingConfig {
     const caps = trainingGpuProfile?.config;
+    const cpuWorkerMax = Math.max(1, Math.min(navigator.hardwareConcurrency ?? 4, 32));
     return {
+      trainingTarget: trainingTargetSelect.value,
       labelMode: labelModeSelect.value,
       samples: clampNumber(samplesInput.value, 1, caps?.maxSamples ?? 512, caps?.samples ?? 64),
       selfPlayWorkers: clampNumber(selfPlayWorkersInput.value, 1, caps?.maxSelfPlayWorkers ?? 8, caps?.selfPlayWorkers ?? 2),
@@ -260,8 +276,22 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       validationInterval: clampNumber(validationIntervalInput.value, 16, caps?.maxValidationInterval ?? 4096, caps?.validationInterval ?? 256),
       patience: clampNumber(patienceInput.value, 1, 64, 12),
       weightDecay: clampNumber(decayInput.value, 0, 0.01, 0.00001),
-      labelWorkers: autoTrainingWorkers()
+      labelWorkers: autoTrainingWorkers(),
+      cpuDepth: clampNumber(cpuDepthInput.value, 1, 16, 4),
+      cpuNodes: clampNumber(cpuNodesInput.value, 1, 131072, 16384),
+      cpuWorkers: clampNumber(cpuWorkersInput.value, 1, cpuWorkerMax, Math.min(Math.ceil(cpuWorkerMax / 2), 16)),
+      cpuTrainSeconds: clampNumber(cpuSecondsInput.value, 1, 86400, 3600)
     };
+  }
+
+  function selectTrainingTab(name: string): void {
+    const selected = name === "cpu" ? "cpu" : "gpu";
+    for (const button of elements.trainingTabButtons) {
+      button.setAttribute("aria-pressed", button.dataset.trainingTab === selected ? "true" : "false");
+    }
+    for (const panel of elements.trainingTabPanels) {
+      panel.hidden = panel.dataset.trainingPanel !== selected;
+    }
   }
 
   function autoTrainingWorkers(): number {
@@ -462,22 +492,23 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   }
 
   function trainingProgressOrder(labelKind: LabelKind): number {
-    return { search: 0, outcome: 1, distilled: 2 }[labelKind] ?? 3;
+    return { search: 0, cpu: 1, outcome: 2, distilled: 3 }[labelKind] ?? 4;
   }
 
   function trainingProgressLabel(labelKind: LabelKind): string {
     return {
       search: "GPU Search",
+      cpu: "CPU Heuristic",
       outcome: "Self-play",
       distilled: "Distill"
     }[labelKind] ?? capitalize(labelKind);
   }
 
   function trainingProgressPhase(entry: TrainingProgressEntry): string {
-    if (entry.labelKind === "search" && entry.labelPhase === "positions") {
+    if ((entry.labelKind === "search" || entry.labelKind === "cpu") && entry.labelPhase === "positions") {
       return "positions";
     }
-    if (entry.labelKind === "search") {
+    if (entry.labelKind === "search" || entry.labelKind === "cpu") {
       return "labels";
     }
     return "samples";
@@ -519,6 +550,17 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       tone: "active",
       metrics: filterMetrics([trainingMetric("Run", cycle)])
     });
+    if (config.trainingTarget === "cpuLabels") {
+      setTrainingStatus({
+        title: "CPU Labels",
+        tone: "active",
+        metrics: filterMetrics([
+          trainingMetric("Depth", config.cpuDepth),
+          trainingMetric("Nodes", config.cpuNodes),
+          trainingMetric("Workers", config.cpuWorkers)
+        ])
+      });
+    }
     resetTrainingProgress();
     try {
       const id = ++trainingRequestId;

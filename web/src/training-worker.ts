@@ -24,6 +24,7 @@ const pipelineCache = new Map<string, GPUComputePipeline>();
 
 type TrainingLabelMode = "mixed" | "search" | "selfPlay" | "distill";
 type TrainingLabelKind = "search" | "outcome" | "distilled" | string;
+type TrainingTarget = "gpu" | "cpuLabels" | "adversarial";
 
 interface WorkerScope {
   addEventListener(type: "message", listener: (event: MessageEvent<TrainingWorkerRequest>) => void | Promise<void>): void;
@@ -46,6 +47,7 @@ type ProgressMessage = Record<string, unknown>;
 type ProgressCallback = (message: ProgressMessage) => void;
 
 interface NormalizedTrainingConfig extends GpuTrainingConfig {
+  trainingTarget: TrainingTarget;
   labelMode: TrainingLabelMode;
   runSeed: number;
   samples: number;
@@ -56,6 +58,10 @@ interface NormalizedTrainingConfig extends GpuTrainingConfig {
   nodes: number;
   maxBuffer: number;
   lossLogReplay: number;
+  cpuDepth: number;
+  cpuNodes: number;
+  cpuWorkers: number;
+  cpuTrainSeconds: number;
   labelWorkers?: number;
   metrics?: TrainingRunMetrics | null;
 }
@@ -89,6 +95,8 @@ interface LabelWorkerSample extends TrainingSample {
 interface AiSearchResult {
   moves?: Move[];
   score?: number;
+  cpuSearch?: string | null;
+  gpuSearch?: string | null;
 }
 
 interface AiWorkerStatus {
@@ -231,6 +239,7 @@ workerSelf.addEventListener("message", async (event) => {
 function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {}): NormalizedTrainingConfig {
   return {
     ...config,
+    trainingTarget: isTrainingTarget(config.trainingTarget) ? config.trainingTarget : "gpu",
     labelMode: isTrainingLabelMode(config.labelMode) ? config.labelMode : "mixed",
     runSeed: randomRunSeed(),
     learningRate: clampNumber(config.learningRate, 0.0001, 0.1, 0.01),
@@ -247,7 +256,11 @@ function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {})
     validationInterval: clampInteger(config.validationInterval, 16, 4096, 256),
     patience: clampInteger(config.patience, 1, 64, DEFAULT_PATIENCE),
     weightDecay: clampNumber(config.weightDecay, 0, 0.01, DEFAULT_WEIGHT_DECAY),
-    lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4)
+    lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4),
+    cpuDepth: clampInteger(config.cpuDepth, 1, 16, 4),
+    cpuNodes: clampInteger(config.cpuNodes, 1, 131072, 8192),
+    cpuWorkers: clampInteger(config.cpuWorkers, 1, 32, 4),
+    cpuTrainSeconds: clampInteger(config.cpuTrainSeconds, 1, 86400, 3600)
   };
 }
 
@@ -260,6 +273,10 @@ function createTrainingMetrics(): TrainingRunMetrics {
 
 function isTrainingLabelMode(value: unknown): value is TrainingLabelMode {
   return value === "mixed" || value === "search" || value === "selfPlay" || value === "distill";
+}
+
+function isTrainingTarget(value: unknown): value is TrainingTarget {
+  return value === "gpu" || value === "cpuLabels" || value === "adversarial";
 }
 
 async function timed<T>(metrics: TrainingRunMetrics | null | undefined, name: string, fn: () => Promise<T> | T): Promise<T> {
@@ -318,13 +335,18 @@ async function collectTrainingSamples(
     throw new Error("Training requires a game snapshot.");
   }
   const collectors: Array<() => Promise<TrainingSample[]>> = [];
-  if (config.labelMode === "mixed" || config.labelMode === "search") {
+  if (config.trainingTarget === "cpuLabels") {
+    collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
+  } else if (config.trainingTarget === "adversarial") {
+    collectors.push(() => collectSearchSamples(game, config, progress));
+    collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
+  } else if (config.labelMode === "mixed" || config.labelMode === "search") {
     collectors.push(() => collectSearchSamples(game, config, progress));
   }
-  if (config.labelMode === "mixed" || config.labelMode === "selfPlay") {
+  if (config.trainingTarget !== "cpuLabels" && (config.labelMode === "mixed" || config.labelMode === "selfPlay")) {
     collectors.push(() => timed(metrics, "outcomeLabels", () => collectOutcomeSamples(game, config, progress)));
   }
-  if (config.labelMode === "mixed" || config.labelMode === "distill") {
+  if (config.trainingTarget !== "cpuLabels" && (config.labelMode === "mixed" || config.labelMode === "distill")) {
     collectors.push(() => timed(metrics, "distillLabels", () => collectDistilledSamples(game, config, activeModel, progress)));
   }
 
@@ -338,7 +360,7 @@ async function collectTrainingSamples(
   if (activeModel?.outputWeights?.length && config.labelMode !== "distill") {
     return collectDistilledSamples(game, config, activeModel, progress);
   }
-  throw new Error("No GPU training labels were collected.");
+  throw new Error("No training labels were collected.");
 }
 
 async function collectSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
@@ -402,6 +424,65 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
         policy: policyBucket(result.moves[0]),
         labelKind: "search",
         labelWeight: 1.0,
+        pseudo: false
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
+  const target = mixedLabelTarget(config, config.trainingTarget === "adversarial" ? 8 : 1);
+  const positions = await timed(config.metrics, "cpuPositions", () => collectGpuPositions(game, config, target, progress, "cpu"));
+  const workerCount = Math.min(positions.length, Math.max(1, config.cpuWorkers ?? 1));
+  const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
+  let nextPosition = 0;
+  let collected = 0;
+  progress({ sampleCount: positions.length, labelWorkers: workerCount, labelKind: "cpu", labelPhase: "labels" });
+  await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runCpuWorker(workerIndex)));
+  return samples.filter((sample): sample is TrainingSample => Boolean(sample));
+
+  async function runCpuWorker(workerIndex: number): Promise<void> {
+    const ai = new Worker("./cpu-ai-worker.js", { type: "module" });
+    try {
+      while (nextPosition < positions.length) {
+        const index = nextPosition;
+        nextPosition += 1;
+        const position = positions[index];
+        if (!position) {
+          continue;
+        }
+        samples[index] = await cpuSearchLabelSample(ai, position, index, workerIndex);
+        collected += samples[index] ? 1 : 0;
+        progress({ collected, sampleCount: positions.length, labelWorkers: workerCount, labelKind: "cpu", labelPhase: "labels" });
+      }
+    } finally {
+      ai.terminate();
+    }
+  }
+
+  async function cpuSearchLabelSample(ai: Worker, position: EncodedPosition, index: number, workerIndex: number): Promise<TrainingSample | null> {
+    try {
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: position.game,
+        depth: config.cpuDepth,
+        nodes: config.cpuNodes,
+        timeMs: workerSearchTimeMs({ nodes: config.cpuNodes }),
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed("cpu", index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ 0xc911_0001))
+      }, workerRequestTimeout({ nodes: config.cpuNodes }));
+      const result = response.result;
+      if (!result?.moves?.length) {
+        return null;
+      }
+      return {
+        ...position.sample,
+        label: normalizeSearchScore(result.score ?? 0),
+        policy: policyBucket(result.moves[0]),
+        labelKind: "cpu",
+        labelWeight: config.trainingTarget === "adversarial" ? 1.1 : 1.0,
         pseudo: false
       };
     } catch {

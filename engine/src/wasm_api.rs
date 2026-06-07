@@ -60,6 +60,25 @@ pub unsafe extern "C" fn chronofish_load_snapshot_json(ptr: *const u8, len: usiz
     }
 }
 
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON in this WASM instance
+/// for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_load_ai_parameters_json(ptr: *const u8, len: usize) -> i32 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let bytes = std::slice::from_raw_parts(ptr, len);
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return set_last_message("AI parameters are not valid UTF-8.");
+    };
+    match EvalWeights::set_active_from_json(text) {
+        Ok(()) => 1,
+        Err(error) => set_last_message(&format!("Invalid AI parameters: {error}")),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn chronofish_snapshot_json() -> *const u8 {
     let json = with_game(|game| game.to_json());
@@ -123,6 +142,22 @@ pub extern "C" fn chronofish_submit_turn() -> i32 {
 #[no_mangle]
 pub extern "C" fn chronofish_undo_staged_move() -> i32 {
     with_game_mut(Game::undo_staged_move)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_ai_turn_json(max_depth: i32, max_nodes: i32) -> *const u8 {
+    let json = with_game(|game| game.ai_turn_json(max_depth, max_nodes));
+    set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_ai_turn_timed_json(
+    max_depth: i32,
+    max_nodes: i32,
+    millis: i32,
+) -> *const u8 {
+    let json = with_game(|game| game.ai_turn_timed_json(max_depth, max_nodes, millis));
+    set_output(json)
 }
 
 #[no_mangle]

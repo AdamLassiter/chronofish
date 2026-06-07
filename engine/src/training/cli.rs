@@ -50,7 +50,7 @@ impl TrainerConfig {
             min_wins: 0,
             min_total_delta: 0,
             verify: "cargo test -q".to_string(),
-            ai_src: "engine/src/ai/parameters.json".to_string(),
+            ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
             hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
             min_pairs: 12,
             pair_batch: 4,

@@ -48,6 +48,9 @@ fn promote_weights(weights: EvalWeights, ai_src: &str) {
     // Runtime weights live in a small JSON include file. Overwriting the whole
     // file is less clever than field patching and avoids ever touching types.
     let json = serde_json::to_string_pretty(&weights).expect("EvalWeights should serialize");
+    if let Some(parent) = std::path::Path::new(ai_src).parent() {
+        std::fs::create_dir_all(parent).expect("failed to create AI parameters directory");
+    }
     std::fs::write(ai_src, format!("{json}\n")).expect("failed to write AI parameters");
 }
 

@@ -74,7 +74,7 @@ Build and run the training-enabled container:
 ```sh
 docker build -f Dockerfile.training -t chronofish-training .
 docker volume create chronofish-models
-docker run --rm -p 5173:5173 -v chronofish-models:/app/engine/models/value-v1 chronofish-training
+docker run --rm -p 5173:5173 -v chronofish-models:/app/engine/models/gpu-v1 chronofish-training
 ```
 
 The training image exposes the frontend model replacement endpoints by compiling
@@ -134,8 +134,9 @@ shared without exposing a broad crate API:
   move ordering, and turn-plan generation;
 - `ai/evaluation.rs` scores material, timelines, safety, tactics, and 5D
   strategic features;
-- `ai/parameters.json` contains the committed tuned evaluation weights and is
-  also served to the frontend at `/ai/parameters.json`;
+- `engine/models/cpu-v1/parameters.json` contains the active CPU heuristic
+  evaluation weights. `/ai/parameters.json` serves that runtime file when
+  present and falls back to the committed seed at `engine/src/ai/parameters.json`;
 - `wasm_api.rs` exposes the C ABI consumed by the frontend.
 
 The default setup still uses orthodox pieces, but the engine models the variant
@@ -144,13 +145,19 @@ the representation.
 
 ## Training
 
-Run a continuous training cycle with:
+Run the frontend GPU training server with:
 
 ```sh
 ./train
 ```
 
-The trainer is native-only and lives under `engine/src/training/`. It mutates
+Run native CPU heuristic tuning with:
+
+```sh
+./train cpu --max-seconds 3600
+```
+
+The CPU trainer is native-only and lives under `engine/src/training/`. It mutates
 the evaluation weights, scores candidates in short self-play matches, verifies a
 candidate against the committed baseline, and only promotes it when paired match
 evidence clears the configured confidence thresholds.
@@ -164,8 +171,9 @@ bounded rather than time bounded by default: it runs comparison pairs until a
 candidate is promoted, rejected, or marked inconclusive because it hit the pair
 or draw-stagnation caps. Set `TRAIN_MAX_SECONDS` for an optional wall-clock
 safety limit. If a candidate is promoted, the trainer rewrites
-`engine/src/ai/parameters.json`, appends the candidate to the hall of fame, runs
-verification, and commits the updated data.
+`engine/models/cpu-v1/parameters.json`, appends the candidate to the hall of
+fame, runs verification, and commits the updated data. Training-mode servers also
+expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
 Training uses the shared AI effort presets from `engine/src/ai/effort.json`.
 `./train` defaults to `expert`; set `TRAIN_CONFIG=fast`, `TRAIN_CONFIG=balanced`,

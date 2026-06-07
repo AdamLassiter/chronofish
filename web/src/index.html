@@ -14,10 +14,9 @@
       <!-- The compact row remains visible when the larger HUD body collapses. -->
       <div class="hud-compact">
         <strong>Chronofish</strong>
-        <span id="app-status">Web v%CHRONOFISH_WEB_VERSION%</span>
-        <span id="wasm-status">Loading WASM</span>
-        <span id="server-status">Loading server</span>
-        <span id="message">Configure the lobby, then start the game.</span>
+        <span id="app-status">🌐 v%CHRONOFISH_WEB_VERSION%</span>
+        <span id="wasm-status">🧠 loading</span>
+        <span id="server-status">🖥 loading</span>
         <button id="open-training" type="button" aria-controls="training-modal" aria-expanded="false" hidden>Training</button>
         <button id="toggle-hud" type="button" aria-controls="hud-panel" aria-expanded="true">Hide</button>
       </div>
@@ -39,9 +38,12 @@
             <select id="white-player">
               <option value="local">Local</option>
               <option value="human">Online</option>
-              <option value="bot-fast">Bot: Fast</option>
-              <option value="bot-balanced">Bot: Balanced</option>
-              <option value="bot-expert">Bot: Expert</option>
+              <option value="bot-gpu-fast">GPU Bot: Fast</option>
+              <option value="bot-gpu-balanced">GPU Bot: Balanced</option>
+              <option value="bot-gpu-expert">GPU Bot: Expert</option>
+              <option value="bot-cpu-fast">CPU Bot: Fast</option>
+              <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
+              <option value="bot-cpu-expert">CPU Bot: Expert</option>
               <option value="open">Open</option>
             </select>
           </label>
@@ -50,9 +52,12 @@
             <select id="black-player">
               <option value="local">Local</option>
               <option value="human">Online</option>
-              <option value="bot-fast">Bot: Fast</option>
-              <option value="bot-balanced">Bot: Balanced</option>
-              <option value="bot-expert">Bot: Expert</option>
+              <option value="bot-gpu-fast">GPU Bot: Fast</option>
+              <option value="bot-gpu-balanced">GPU Bot: Balanced</option>
+              <option value="bot-gpu-expert">GPU Bot: Expert</option>
+              <option value="bot-cpu-fast">CPU Bot: Fast</option>
+              <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
+              <option value="bot-cpu-expert">CPU Bot: Expert</option>
               <option value="open">Open</option>
             </select>
           </label>
@@ -91,9 +96,26 @@
           <div>
             <p class="eyebrow">Neural Training</p>
           </div>
-          <button id="close-training" type="button" aria-label="Close training controls">Close</button>
+          <div class="training-modal-actions">
+            <nav class="training-tabs" aria-label="Training parameter groups">
+              <button class="training-tab" id="training-tab-gpu" type="button" data-training-tab="gpu" aria-pressed="true">GPU Model</button>
+              <button class="training-tab" id="training-tab-cpu" type="button" data-training-tab="cpu" aria-pressed="false">CPU Heuristic</button>
+            </nav>
+            <button id="close-training" type="button" aria-label="Close training controls">Close</button>
+          </div>
         </header>
-        <div>
+        <div class="training-tab-panel" id="training-gpu-panel" data-training-panel="gpu">
+          <label>
+            Target
+            <select id="training-target"
+              title="Training target. GPU Model trains the neural WebGPU bot. CPU Labels trains the GPU model from the restored CPU heuristic bot's choices. GPU vs CPU runs both sources so the GPU model learns from direct adversarial disagreement. Native CPU parameter tuning still uses the engine train binary."
+              aria-describedby="training-target-help">
+              <option value="gpu" selected title="Train the compact neural model from GPU search, self-play, and distillation labels.">GPU Model</option>
+              <option value="cpuLabels" title="Use the restored CPU heuristic bot as the label source, then train the compact neural model against those choices.">CPU Labels</option>
+              <option value="adversarial" title="Collect both GPU and CPU heuristic choices from related positions so the GPU model can train against the CPU bot.">GPU vs CPU</option>
+            </select>
+            <span id="training-target-help" class="field-help field-help-wide">GPU Model updates value-model.cfnn. CPU Labels and GPU vs CPU use the restored heuristic bot as a browser adversary; CPU parameter tuning is native.</span>
+          </label>
           <label>
             Mode
             <select id="training-label-mode"
@@ -212,6 +234,32 @@
             <span id="training-decay-help" class="field-help">L2 regularization. Keep small unless validation overfits badly.</span>
           </label>
         </div>
+        <div class="training-tab-panel" id="training-cpu-panel" data-training-panel="cpu" hidden>
+          <label>
+            CPU Depth
+            <input id="training-cpu-depth" type="number" min="1" max="16" step="1" value="4"
+              title="Depth for the restored CPU heuristic bot when it is used as an adversarial label source in browser training. Native CPU parameter training uses the engine train binary's --depth option.">
+            <span class="field-help">Heuristic search depth for CPU labels and adversarial comparisons.</span>
+          </label>
+          <label>
+            CPU Nodes
+            <input id="training-cpu-nodes" type="number" min="1" max="131072" step="256" value="8192"
+              title="Node budget for the restored CPU heuristic bot when browser training asks it for move labels.">
+            <span class="field-help">CPU heuristic node budget per label.</span>
+          </label>
+          <label>
+            CPU Workers
+            <input id="training-cpu-workers" type="number" min="1" max="32" step="1" value="4"
+              title="Parallel CPU heuristic workers for CPU label and GPU-vs-CPU adversarial training. Each worker owns a wasm engine instance.">
+            <span class="field-help">Parallel wasm heuristic workers for CPU label collection.</span>
+          </label>
+          <label>
+            CPU Train Seconds
+            <input id="training-cpu-seconds" type="number" min="1" max="86400" step="60" value="3600"
+              title="Suggested native CPU tuning budget for cargo run --manifest-path engine/Cargo.toml --bin train -- --train-cycle --max-seconds N.">
+            <span class="field-help">Native heuristic tuning budget for the engine train binary.</span>
+          </label>
+        </div>
         <div>
           <button id="start-training" type="button">Train</button>
           <button id="stop-training" type="button" disabled>Stop</button>
@@ -220,6 +268,10 @@
         <div id="training-status-view" class="training-status-view" aria-hidden="true"></div>
         <div id="training-progress" class="training-progress" hidden aria-label="Training sample progress"></div>
       </section>
+    </div>
+
+    <div class="bottom-message-bar" role="status" aria-live="polite">
+      <span id="message">Configure the lobby, then start the game.</span>
     </div>
 
     <aside class="evaluation-bar" id="evaluation-bar" aria-label="Position evaluation">
