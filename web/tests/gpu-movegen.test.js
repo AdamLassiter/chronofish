@@ -6,7 +6,7 @@ import test from "node:test";
 const root = path.resolve(import.meta.dirname, "..");
 
 test("GPU move generation permits historical branch mutation", async () => {
-  const shader = await readFile(path.join(root, "src/ai-shaders.ts"), "utf8");
+  const shader = await readFile(path.join(root, "src/shaders/mutate.wgsl"), "utf8");
 
   assert.doesNotMatch(shader, /STATUS_UNSUPPORTED_HISTORICAL_BRANCH/);
   assert.doesNotMatch(shader, /!same_board\s*&&\s*!target_latest/);

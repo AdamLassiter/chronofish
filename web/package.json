@@ -9,6 +9,8 @@
     "test": "npm run build && node --test \"tests/**/*.test.js\""
   },
   "devDependencies": {
+    "esbuild": "^0.28.0",
+    "esbuild-plugin-glsl": "^1.4.1",
     "typescript": "^6.0.3"
   }
 }

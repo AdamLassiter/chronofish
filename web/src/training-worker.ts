@@ -235,7 +235,7 @@ function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {})
     runSeed: randomRunSeed(),
     learningRate: clampNumber(config.learningRate, 0.0001, 0.1, 0.01),
     samples: clampInteger(config.samples, 1, 1024, 64),
-    selfPlayWorkers: clampInteger(config.selfPlayWorkers, 1, 8, 2),
+    selfPlayWorkers: clampInteger(config.selfPlayWorkers, 1, 16, 2),
     searchWorkers: clampInteger(config.searchWorkers, 1, 16, 2),
     explorationTemperature: clampNumber(config.explorationTemperature, 0, 2, 0.25),
     depth: clampInteger(config.depth, 1, 8, 5),
@@ -411,7 +411,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
 }
 
 async function collectOutcomeSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
-  const target = mixedLabelTarget(config, 8);
+  const target = mixedLabelTarget(config, 16);
   if (target <= 0) {
     return [];
   }

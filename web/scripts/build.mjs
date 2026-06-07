@@ -1,6 +1,7 @@
-import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { spawn } from "node:child_process";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { glsl } from "esbuild-plugin-glsl";
 import path from "node:path";
+import * as esbuild from "esbuild";
 
 const root = process.cwd();
 const src = path.join(root, "src");
@@ -9,49 +10,71 @@ const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(dist, { recursive: true });
-await copyTree(src, dist);
-await run("npx", ["tsc"]);
-await writeFile(
-  path.join(dist, "app-version.js"),
-  `export const APP_VERSION = ${JSON.stringify(packageJson.version)};\n`,
-  "utf8"
-);
 
-async function copyTree(from, to) {
-  await mkdir(to, { recursive: true });
-  for (const entry of await readdir(from)) {
-    const source = path.join(from, entry);
-    const target = path.join(to, entry);
-    const info = await stat(source);
-    if (info.isDirectory()) {
-      await copyTree(source, target);
-      continue;
-    }
-    if (entry.endsWith(".ts")) {
-      continue;
-    }
-    let contents = await readFile(source);
-    if (entry === "index.html") {
-      contents = Buffer.from(
-        contents
-          .toString("utf8")
-          .replace("%CHRONOFISH_WEB_VERSION%", packageJson.version),
-        "utf8"
-      );
-    }
-    await writeFile(target, contents);
-  }
+await esbuild.build({
+  entryPoints: [
+    path.join(src, "main.ts"),
+    path.join(src, "ai-worker.ts"),
+    path.join(src, "training-worker.ts"),
+    path.join(src, "training-label-worker.ts")
+  ],
+  outdir: dist,
+  bundle: true,
+  format: "esm",
+  target: "es2022",
+  sourcemap: true,
+  splitting: true,
+  chunkNames: "chunks/[name]-[hash]",
+  entryNames: "[dir]/[name]",
+  platform: "browser",
+  plugins: [
+    appVersionPlugin(),
+    glsl()
+  ],
+  logLevel: "info"
+});
+
+await Promise.all([
+  copyHtml(),
+  copyCss(),
+  writeFile(
+    path.join(dist, "app-version.js"),
+    `export const APP_VERSION = ${JSON.stringify(packageJson.version)};\n`,
+    "utf8"
+  )
+]);
+
+async function copyHtml() {
+  const html = await readFile(path.join(src, "index.html"), "utf8");
+  await writeFile(
+    path.join(dist, "index.html"),
+    html.replace("%CHRONOFISH_WEB_VERSION%", packageJson.version),
+    "utf8"
+  );
 }
 
-function run(command, args) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit", shell: process.platform === "win32" });
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(`${command} ${args.join(" ")} exited with ${code}`));
-      }
-    });
-  });
+async function copyCss() {
+  await writeFile(
+    path.join(dist, "styles.css"),
+    await readFile(path.join(src, "styles.css")),
+    "utf8"
+  );
+}
+
+function appVersionPlugin() {
+  const appVersionPath = path.join(src, "app-version.ts");
+  return {
+    name: "chronofish-app-version",
+    setup(build) {
+      build.onLoad({ filter: /app-version\.ts$/ }, (args) => {
+        if (path.normalize(args.path) !== path.normalize(appVersionPath)) {
+          return null;
+        }
+        return {
+          loader: "ts",
+          contents: `export const APP_VERSION = ${JSON.stringify(packageJson.version)};\n`
+        };
+      });
+    }
+  };
 }

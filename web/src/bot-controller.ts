@@ -39,13 +39,22 @@ interface AiSearchResult {
 interface PendingResult {
   result: AiSearchResult;
   partitionIndex: number | null;
+  depth: number;
 }
 
 interface PendingSearch {
   id: number;
   botColor: BotColor;
   game: GameSnapshot;
-  expected: number;
+  targetDepth: number;
+  currentDepth: number;
+  workerCount: number;
+  nodes: number;
+  timeMs: number;
+  depthExpected: number;
+  depthReceived: number;
+  depthResults: PendingResult[];
+  bestByDepth: Map<number, AiSearchResult>;
   deadlineAt: number;
   results: PendingResult[];
   errors: string[];
@@ -258,8 +267,10 @@ export function createBotController({
       return;
     }
     const remainingMs = Math.max(0, pending.deadlineAt - Date.now());
-    const workerText = `${pending.expected} worker${pending.expected === 1 ? "" : "s"}`;
-    message.textContent = `${botDisplayName(pending.botColor)} thinking across ${workerText}. ${formatBotTimeLimit(remainingMs)} left.`;
+    const workerText = `${pending.workerCount} worker${pending.workerCount === 1 ? "" : "s"}`;
+    const bestDepth = deepestStoredDepth(pending);
+    const bestText = bestDepth > 0 ? ` Best depth ${bestDepth}.` : "";
+    message.textContent = `${botDisplayName(pending.botColor)} searching depth ${pending.currentDepth}/${pending.targetDepth} across ${workerText}. ${formatBotTimeLimit(remainingMs)} left.${bestText}`;
   }
 
   async function seatBot(color: BotColor): Promise<void> {
@@ -289,7 +300,6 @@ export function createBotController({
     const effortName = botEffortName(getAssignments()[botColor]);
     const effort = botEffort(getAssignments()[botColor]);
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
-    const workerTimeMs = botWorkerSearchTimeMs(timeMs);
     const workerCount = botSearchWorkerCount(effortName);
     terminateAiWorkers();
     bot.thinking = true;
@@ -297,7 +307,15 @@ export function createBotController({
       id,
       botColor,
       game: cloneGame(getGame()),
-      expected: 0,
+      targetDepth: Math.max(1, effort.depth ?? 1),
+      currentDepth: 0,
+      workerCount,
+      nodes: Math.max(1, effort.nodes ?? 64),
+      timeMs,
+      depthExpected: 0,
+      depthReceived: 0,
+      depthResults: [],
+      bestByDepth: new Map(),
       deadlineAt: Date.now() + timeMs,
       results: [],
       errors: []
@@ -305,26 +323,46 @@ export function createBotController({
     clearBotTimeout();
     bot.timeoutId = setTimeout(() => handleBotTimeout(id, botColor, timeMs), timeMs);
     bot.countdownId = setInterval(() => updateBotCountdownMessage(id), 250);
-    for (let partitionIndex = 0; partitionIndex < workerCount; partitionIndex += 1) {
+    launchNextBotDepth(id);
+    updateBotCountdownMessage(id);
+  }
+
+  function launchNextBotDepth(id: number): void {
+    const pending = bot.pendingSearch;
+    if (!bot.thinking || !pending || pending.id !== id) {
+      return;
+    }
+    const nextDepth = pending.currentDepth + 1;
+    if (nextDepth > pending.targetDepth || Date.now() >= pending.deadlineAt) {
+      finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
+      return;
+    }
+    pending.currentDepth = nextDepth;
+    pending.depthExpected = 0;
+    pending.depthReceived = 0;
+    pending.depthResults = [];
+    const remainingMs = Math.max(1, pending.deadlineAt - Date.now());
+    const workerTimeMs = botWorkerSearchTimeMs(remainingMs);
+    for (let partitionIndex = 0; partitionIndex < pending.workerCount; partitionIndex += 1) {
       try {
         createAiWorker().postMessage({
           id,
           game: getGame(),
-          depth: effort.depth,
-          nodes: effort.nodes,
+          depth: nextDepth,
+          nodes: pending.nodes,
           timeMs: workerTimeMs,
           gpuMode: botGpuMode(),
           partitionIndex,
-          partitionCount: workerCount
+          partitionCount: pending.workerCount
         });
-        bot.pendingSearch.expected += 1;
+        pending.depthExpected += 1;
       } catch (error: unknown) {
         console.error(error);
-        bot.pendingSearch.errors.push(errorMessage(error));
+        pending.errors.push(errorMessage(error));
       }
     }
-    if (bot.pendingSearch.expected === 0) {
-      bot.pendingSearch.expected = 1;
+    if (pending.depthExpected === 0) {
+      pending.depthExpected = 1;
       setTimeout(() => {
         handleAiWorkerMessage({
           data: {
@@ -354,22 +392,16 @@ export function createBotController({
     }
 
     const pending = bot.pendingSearch;
-    const bestResult = selectBestAiResult(pending?.results.map((entry) => entry.result) ?? []);
-    aiRequestId += 1;
-    bot.thinking = false;
-    clearBotTimeout();
-    if (bestResult) {
-      logBotSearchChoices(pending, bestResult, "timeout");
-      bestResult.trainingDecision = buildBotDecisionRecord(pending, bestResult);
+    if (pending) {
+      finishBotSearch(pending, "timeout");
+    } else {
+      aiRequestId += 1;
+      bot.thinking = false;
+      clearBotTimeout();
       terminateAiWorkers();
-      message.textContent = `${botDisplayName(botColor)} used the best move found in ${formatBotTimeLimit(timeMs)}.`;
-      void completeBotTurn(botColor, bestResult);
-      return;
+      message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
+      void completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
     }
-
-    terminateAiWorkers();
-    message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
-    void completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
   }
 
   function handleAiWorkerMessage(event: MessageEvent<AiWorkerResponse>): void {
@@ -383,32 +415,57 @@ export function createBotController({
       return;
     }
 
+    pending.depthReceived += 1;
     if (ok && result) {
-      pending.results.push({ result, partitionIndex: partitionIndex ?? null });
+      const receivedDepth = pending.currentDepth;
+      const depthResult = { ...result, depth: receivedDepth };
+      const entry = { result: depthResult, partitionIndex: partitionIndex ?? null, depth: receivedDepth };
+      pending.results.push(entry);
+      pending.depthResults.push(entry);
     } else {
       pending.errors.push(error ?? "AI worker returned no result.");
     }
 
-    if (pending.results.length + pending.errors.length < pending.expected) {
+    if (pending.depthReceived < pending.depthExpected) {
       return;
     }
 
+    const depthBest = selectBestAiResult(pending.depthResults.map((entry) => entry.result));
+    if (depthBest) {
+      pending.bestByDepth.set(pending.currentDepth, depthBest);
+    }
+
+    if (pending.currentDepth >= pending.targetDepth || Date.now() >= pending.deadlineAt) {
+      finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
+      return;
+    }
+
+    launchNextBotDepth(pending.id);
+  }
+
+  function finishBotSearch(pending: PendingSearch, reason: "complete" | "timeout"): void {
+    if (pending.id !== aiRequestId || !bot.thinking) {
+      return;
+    }
+    const bestResult = selectDeepestStoredResult(pending)
+      ?? selectBestAiResult(pending.results.map((entry) => entry.result));
+    aiRequestId += 1;
     bot.thinking = false;
     clearBotTimeout();
-
-    const bestResult = selectBestAiResult(pending.results.map((entry) => entry.result));
-    logBotSearchChoices(pending, bestResult, "complete");
+    logBotSearchChoices(pending, bestResult, reason);
     if (!bestResult && pending.errors.length > 0) {
       terminateAiWorkers();
       message.textContent = `${botDisplayName(pending.botColor)} search failed: ${pending.errors[0] ?? "unknown error"}`;
       render();
       return;
     }
-
     if (bestResult) {
       bestResult.trainingDecision = buildBotDecisionRecord(pending, bestResult);
     }
     terminateAiWorkers();
+    if (bestResult && reason === "timeout") {
+      message.textContent = `${botDisplayName(pending.botColor)} used depth ${bestResult.depth ?? deepestStoredDepth(pending)} after ${formatBotTimeLimit(pending.timeMs)}.`;
+    }
     void completeBotTurn(pending.botColor, bestResult ?? { status: "noLegalTurn", moves: [] });
   }
 
@@ -416,16 +473,30 @@ export function createBotController({
     return results
       .filter((result) => result.status === "ok" && result.moves.length > 0)
       .sort((left, right) => {
-        const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
-        if (score !== 0) {
-          return score;
-        }
         const depth = (right.depth ?? 0) - (left.depth ?? 0);
         if (depth !== 0) {
           return depth;
         }
+        const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
+        if (score !== 0) {
+          return score;
+        }
         return (right.nodes ?? 0) - (left.nodes ?? 0);
       })[0] ?? null;
+  }
+
+  function selectDeepestStoredResult(pending: PendingSearch): AiSearchResult | null {
+    for (let depth = pending.targetDepth; depth >= 1; depth -= 1) {
+      const result = pending.bestByDepth.get(depth);
+      if (result) {
+        return result;
+      }
+    }
+    return null;
+  }
+
+  function deepestStoredDepth(pending: PendingSearch): number {
+    return Math.max(0, ...pending.bestByDepth.keys());
   }
 
   function logBotSearchChoices(pending: PendingSearch | null, selectedResult: AiSearchResult | null, reason: string): void {

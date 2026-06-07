@@ -144,6 +144,10 @@ button {
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.22);
 }
 
+#app-status {
+  color: #95e4ad;
+}
+
 #wasm-status[data-state="ready"] {
   color: #95e4ad;
 }

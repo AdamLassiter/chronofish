@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtemp } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { initialGame } from "../dist/initial-game.js";
-import { GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK } from "../dist/ai-layout.js";
-import { buildGpuCandidateInputs, snapshotWithGpuChildBoards } from "../dist/ai-snapshot.js";
+import { pathToFileURL } from "node:url";
+import * as esbuild from "esbuild";
+
+const root = path.resolve(import.meta.dirname, "..");
+const modules = await buildTestModules();
+const { initialGame } = await import(modules.initialGame);
+const { GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK } = await import(modules.aiLayout);
+const { buildGpuCandidateInputs, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
 
 test("initial position encodes GPU move candidates", () => {
   const inputs = buildGpuCandidateInputs(initialGame(), "white");
@@ -73,4 +81,26 @@ function writeMutationBoard(records, offset, { timelineId, time, sideToMove }) {
   records[offset + 7] = -1;
   records[offset + 8] = -1;
   records[offset + 9] = 1;
+}
+
+async function buildTestModules() {
+  const outdir = await mkdtemp(path.join(os.tmpdir(), "chronofish-web-test-"));
+  await esbuild.build({
+    entryPoints: [
+      path.join(root, "src/initial-game.ts"),
+      path.join(root, "src/ai-layout.ts"),
+      path.join(root, "src/ai-snapshot.ts")
+    ],
+    outdir,
+    bundle: false,
+    format: "esm",
+    platform: "node",
+    target: "es2022",
+    logLevel: "silent"
+  });
+  return {
+    initialGame: pathToFileURL(path.join(outdir, "initial-game.js")).href,
+    aiLayout: pathToFileURL(path.join(outdir, "ai-layout.js")).href,
+    aiSnapshot: pathToFileURL(path.join(outdir, "ai-snapshot.js")).href
+  };
 }
