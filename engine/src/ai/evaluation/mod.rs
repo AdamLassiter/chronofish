@@ -1,0 +1,22 @@
+use super::*;
+
+include!("core.rs");
+include!("present_progress.rs");
+include!("mobility.rs");
+include!("strategic_balance.rs");
+include!("board_control.rs");
+include!("piece_activity.rs");
+include!("pawn_structure.rs");
+include!("timeline_economy.rs");
+include!("present_tempo.rs");
+include!("royal_shelter.rs");
+include!("space_advantage.rs");
+include!("royal_capture_pressure.rs");
+include!("royal_capture_setup.rs");
+include!("temporal_royal_corridor.rs");
+include!("royal_safety.rs");
+include!("fork_pressure.rs");
+include!("forcing_pressure.rs");
+include!("timeline_coordination.rs");
+include!("extended_multiverse_balance.rs");
+include!("support.rs");

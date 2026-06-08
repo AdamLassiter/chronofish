@@ -64,8 +64,7 @@ impl SearchOptions {
         }
     }
 
-    #[cfg(test)]
-    fn baseline() -> Self {
+    fn minimal() -> Self {
         Self {
             tt_best_move: false,
             killer_moves: false,
@@ -76,6 +75,11 @@ impl SearchOptions {
             capture_sanity: false,
             turn_plan_cache: false,
         }
+    }
+
+    #[cfg(test)]
+    fn baseline() -> Self {
+        Self::minimal()
     }
 }
 

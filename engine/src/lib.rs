@@ -10,28 +10,29 @@ include!("game.rs");
 include!("movegen.rs");
 include!("notation.rs");
 include!("notation_parser.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/types.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/effort.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/model.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/evaluator.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/weights.rs");
-#[cfg(not(test))]
-include!("ai/evaluation.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
+#[path = "ai/evaluation/mod.rs"]
+mod evaluation;
+#[cfg(not(any(test, doctest)))]
 include!("ai/search.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/search_plans.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/search_support.rs");
-#[cfg(not(test))]
+#[cfg(not(any(test, doctest)))]
 include!("ai/json.rs");
 
-#[cfg(test)]
+#[cfg(any(test, doctest))]
 include!("ai.rs");
 #[cfg(test)]
 include!("gpu_snapshot.rs");

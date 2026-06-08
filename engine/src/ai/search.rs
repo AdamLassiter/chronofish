@@ -131,7 +131,21 @@ impl Game {
             }
         }
 
-        best.nodes = context.nodes;
+        if best.status == "noLegalTurn" {
+            let mut fallback = SearchContext::new(weights, self.turn, nodes.max(MAX_TURN_PLANS), None);
+            fallback.options = SearchOptions::minimal();
+            if let Some(plan) = self.legal_turn_plans_with_context(&mut fallback).into_iter().next() {
+                best = AiSearchResult {
+                    moves: plan.moves,
+                    score: plan.score_hint,
+                    depth: 1,
+                    nodes: context.nodes + fallback.nodes,
+                    status: "ok",
+                };
+            }
+        }
+
+        best.nodes = best.nodes.max(context.nodes);
         let sample = label.map(|label| SearchPerfSample {
             label,
             elapsed_micros: SearchInstant::now().duration_since(started).as_micros(),

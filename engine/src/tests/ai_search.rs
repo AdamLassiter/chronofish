@@ -432,6 +432,14 @@ fn training_json_round_trips_tactical_weights() {
     assert_eq!(parsed.timeline_economy, weights.timeline_economy);
     assert_eq!(parsed.royal_shelter, weights.royal_shelter);
     assert_eq!(parsed.space_advantage, weights.space_advantage);
+    assert_eq!(parsed.mandatory_move_burden, weights.mandatory_move_burden);
+    assert_eq!(parsed.turn_completion_safety, weights.turn_completion_safety);
+    assert_eq!(parsed.present_zugzwang, weights.present_zugzwang);
+    assert_eq!(parsed.weakest_royal_safety, weights.weakest_royal_safety);
+    assert_eq!(parsed.branch_payload, weights.branch_payload);
+    assert_eq!(parsed.temporal_pin, weights.temporal_pin);
+    assert_eq!(parsed.mate_net_depth_1_2, weights.mate_net_depth_1_2);
+    assert_eq!(parsed.board_importance_weight, weights.board_importance_weight);
 }
 
 #[test]

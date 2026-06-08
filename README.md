@@ -154,7 +154,7 @@ Run the frontend GPU training server with:
 Run native CPU heuristic tuning with:
 
 ```sh
-./train cpu --max-seconds 3600
+./train-cpu --max-seconds 3600
 ```
 
 The CPU trainer is native-only and lives under `engine/src/training/`. It mutates
@@ -166,7 +166,7 @@ Candidate scoring and seed comparisons use Rayon parallel iterators, so training
 uses available CPU cores without launching extra trainer processes. Fitness uses
 paired candidate/baseline matches from identical seeded starts, mixes in tactical
 mate-training positions, tracks win-rate confidence and Elo-style estimates, and
-keeps recent promoted weights in a JSONL hall of fame. `./train` is evidence
+keeps recent promoted weights in a JSONL hall of fame. `./train-cpu` is evidence
 bounded rather than time bounded by default: it runs comparison pairs until a
 candidate is promoted, rejected, or marked inconclusive because it hit the pair
 or draw-stagnation caps. Set `TRAIN_MAX_SECONDS` for an optional wall-clock
@@ -205,7 +205,9 @@ weights generally make the bot care more about that feature. Some fields are
 piece values, while others scale positional, tactical, or multiverse-specific
 terms.
 
-| Field | Meaning |
+### Basic Parameters
+
+| Heuristic | Meaning |
 | --- | --- |
 | `king` | Material value for a royal king. Kept extremely high so king capture dominates normal material. |
 | `common_king` | Material value for a non-royal common king variant. |
@@ -231,6 +233,11 @@ terms.
 | `attacked_piece` | Penalty when a live piece is attacked. |
 | `hanging_piece` | Extra penalty when an attacked piece has no defenders. |
 | `royal_threat` | Extra value for attacks or controlled squares near royal pieces. |
+
+### Intermediate Parameters
+
+| Heuristic | Meaning |
+| --- | --- |
 | `temporal_threat` | Extra value for threats that cross time or timelines. |
 | `pincer_threat` | Rewards multiple attackers converging on one target. |
 | `timeline_pincer` | Rewards threats arriving from multiple timelines. |
@@ -253,6 +260,48 @@ terms.
 | `present_tempo` | Rewards favorable side-to-move tempo relative to spread across active timelines. |
 | `royal_shelter` | Rewards pawn cover around royal pieces and penalizes missing shelter. |
 | `space_advantage` | Rewards advanced space, weighted more heavily for pawns/brawns. |
+
+### Advanced Parameters
+
+| Heuristic | Meaning |
+| --- | --- |
+| `mandatory_move_burden` | Penalise positions where you must make many awkward moves before the Present passes back. Reward positions where the opponent has many present-board obligations. |
+| `turn_completion_safety` | Estimate how many legal full-turn completion sequences exist. A side with only one or two safe ways to finish its turn is close to tactical collapse. |
+| `present_zugzwang` | Penalise active present boards where every legal move worsens royal safety, loses material, or opens a temporal tactic. |
+| `weakest_royal_safety` | Use a soft-min over all royal pieces rather than an average. In 5D, one doomed king/royal queen can lose the game even if the other royals are safe. |
+| `royal_liability_count` | Slightly penalise having many exposed royal pieces. Extra timelines can mean extra kings/royal queens to defend, not just extra material. |
+| `multi_royal_attack` | Reward threats that attack two or more royal pieces across different boards/timelines, especially when no single reply can cover all of them. |
+| `defensive_bandwidth` | Estimate how many independent threats a side can answer during its current turn. This is the defensive counterpart to forcing pressure. |
+| `threat_overload` | Reward positions where the opponent has more urgent threats than mandatory/available moves to address them. |
+| `active_branch_capacity` | Reward having the ability to create another active timeline before your own branches become inactive; penalise being branch-saturated. Inactive timelines are explicitly a balance mechanism and do not affect the Present. |
+| `latent_timeline_reactivation` | Penalise inactive enemy timelines that could become active again if timeline counts change. They may be optional now but dangerous later. |
+| `inactive_material_quality` | Score material/threats on inactive timelines at a discounted value, but increase the discount if they are close to becoming active. |
+| `branch_payload` | For a branch/time-travel move, evaluate the quality of the newly created frontier: material, royal safety, threats, and whether the moved piece lands with purpose. |
+| `branch_waste` | Penalise branches that create a new timeline but do not create threats, improve safety, win material, or shift Present pressure. |
+| `timeline_compaction` | Reward having threats concentrated on the timelines that actually matter to the Present; penalise useful-looking pieces stranded on irrelevant branches. |
+| `frontier_material` | Evaluate material only on latest/playable boards separately from historical material. Old-board material may be tactically relevant, but frontier material is what can move now. |
+| `historical_access` | Reward pieces that can reach important past boards, especially past boards containing vulnerable royals, promotion paths, or branchable tactical positions. |
+| `temporal_lane_control` | Reward open lanes along T/L axes and temporal diagonals for rooks, bishops, unicorns, dragons, queens, and royal queens. |
+| `temporal_pin` | Detect pieces pinned through time/timelines because moving them would expose a royal to capture on another board. |
+| `temporal_skewer` | Reward attacks where a high-value or royal piece is behind another piece along a temporal ray. |
+| `causal_battery` | Reward two-piece batteries that line up through time/timeline dimensions, especially queen/unicorn/dragon batteries aimed at royal fronts. |
+| `arrival_square_safety` | For temporal moves, evaluate whether the destination board square is safe after arrival. Time-travel attacks can look strong but simply strand a piece. |
+| `source_board_abandonment` | Penalise temporal moves that remove a key defender from the source frontier, especially if that source board still matters this turn. |
+| `piece_temporal_flexibility` | Reward pieces that have useful moves in both spatial and temporal dimensions, not merely many legal moves. |
+| `dimension_coverage_balance` | Reward armies that control x/y/T/L threats in a balanced way. A side with only spatial pressure may be blind to temporal tactics. |
+| `promotion_timeline_choice` | Reward pawns/brawns whose advancement creates multiple promotion or branching options across timelines, not just rank progress. |
+| `promotion_with_check` | Extra reward for promotions that immediately create royal threats across time or timelines. |
+| `past_royal_vulnerability` | Penalise royal pieces sitting on historical boards that are reachable by enemy time travel, even if they are not threatened on the current frontier. |
+| `safe_haven_boards` | Reward having boards/timelines where a royal can retreat or branch defensively without creating a losing inactive timeline. |
+| `escape_branch_potential` | Reward legal time-travel/branch moves that can rescue a royal from a future attack. |
+| `mate_net_depth_1_2` | A shallow specialised search feature: count whether the side has one-turn or two-turn royal-capture nets, even if the static attack map undervalues them. |
+| `anti_mate_resources` | Count defensive resources against known 5D mate patterns: capture attacker, move royal, block temporal ray, branch away, or shift Present. |
+| `checking_move_quality` | Separate good checks from bad checks. Penalise checks that create useless branches or lose timeline economy; reward checks that reduce legal full-turn completions. |
+| `search_volatility` | Mark positions with many royal threats, branch moves, or timeline activations as tactically volatile, encouraging deeper/quiescence search there. |
+| `timeline_repetition_risk` | Penalise positions likely to create aimless branch proliferation without progress, especially if your evaluation otherwise overvalues material copies. |
+| `phase_by_multiverse_size` | Taper weights based on number of active timelines/frontier boards, not just material. Opening-like development matters less once temporal tactics dominate. |
+| `royal_distance_in_4d` | Tropism-style distance from attacking pieces to enemy royals using 4D movement distance, piece-specific. This is broader than “near royal squares”. |
+| `board_importance_weight` | Weight each board by active/inactive status, present distance, side to move, royal presence, and tactical volatility before summing local features. |
 
 ## Rules Reference
 
