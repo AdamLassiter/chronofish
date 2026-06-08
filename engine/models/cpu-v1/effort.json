@@ -9,9 +9,9 @@
     "depth": 3,
     "nodes": 20000,
     "timeMs": 10000,
-    "trainingDepth": 1,
-    "trainingNodes": 400,
-    "trainingPlies": 2
+    "trainingDepth": 3,
+    "trainingNodes": 20000,
+    "trainingPlies": 4
   },
   "balanced": {
     "label": "Bot: Balanced",
@@ -23,9 +23,9 @@
     "depth": 4,
     "nodes": 80000,
     "timeMs": 50000,
-    "trainingDepth": 1,
-    "trainingNodes": 800,
-    "trainingPlies": 4
+    "trainingDepth": 4,
+    "trainingNodes": 80000,
+    "trainingPlies": 8
   },
   "expert": {
     "label": "Bot: Expert",
@@ -37,8 +37,8 @@
     "depth": 5,
     "nodes": 200000,
     "timeMs": 250000,
-    "trainingDepth": 2,
-    "trainingNodes": 1600,
-    "trainingPlies": 6
+    "trainingDepth": 5,
+    "trainingNodes": 200000,
+    "trainingPlies": 12
   }
 }

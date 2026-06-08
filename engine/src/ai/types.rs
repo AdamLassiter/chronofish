@@ -222,7 +222,7 @@ struct EvalWeights {
 
 #[allow(dead_code)]
 fn default_royal_weight() -> i32 {
-    i32::MAX / 2
+    i16::MAX as i32
 }
 
 #[allow(dead_code)]

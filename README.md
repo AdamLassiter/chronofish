@@ -132,11 +132,10 @@ shared without exposing a broad crate API:
   timeline axes;
 - `ai/search.rs` implements iterative deepening, alpha-beta, quiescence search,
   move ordering, and turn-plan generation;
-- `ai/evaluation.rs` scores material, timelines, safety, tactics, and 5D
+- `ai/evaluation/` scores material, timelines, safety, tactics, and 5D
   strategic features;
 - `engine/models/cpu-v1/parameters.json` contains the active CPU heuristic
-  evaluation weights. `/ai/parameters.json` serves that runtime file when
-  present and falls back to the committed seed at `engine/src/ai/parameters.json`;
+  evaluation weights, and `/ai/parameters.json` serves that same file;
 - `wasm_api.rs` exposes the C ABI consumed by the frontend.
 
 The default setup still uses orthodox pieces, but the engine models the variant
@@ -175,7 +174,7 @@ safety limit. If a candidate is promoted, the trainer rewrites
 fame, runs verification, and commits the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
-Training uses the shared AI effort presets from `engine/src/ai/effort.json`.
+Training uses the shared AI effort presets from `engine/models/cpu-v1/effort.json`.
 `./train` defaults to `expert`; set `TRAIN_CONFIG=fast`, `TRAIN_CONFIG=balanced`,
 or pass `--config fast|balanced|expert` to run another preset.
 
@@ -189,7 +188,7 @@ cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
 
 ## AI Effort Presets
 
-`engine/src/ai/effort.json` is shared by the Rust engine/trainer and the
+`engine/models/cpu-v1/effort.json` is shared by the Rust engine/trainer and the
 frontend via `/ai/effort.json`.
 
 | Preset | Runtime purpose | Training purpose |
@@ -200,7 +199,7 @@ frontend via `/ai/effort.json`.
 
 ## AI Parameters
 
-`engine/src/ai/parameters.json` is deserialized into an `EvalWeights` value. Larger positive
+`engine/models/cpu-v1/parameters.json` is deserialized into an `EvalWeights` value. Larger positive
 weights generally make the bot care more about that feature. Some fields are
 piece values, while others scale positional, tactical, or multiverse-specific
 terms.

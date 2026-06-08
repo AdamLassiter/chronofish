@@ -615,7 +615,7 @@ fn training_mutation_is_seeded() {
         min_wins: 1,
         min_total_delta: 1,
         verify: "cargo test -q".to_string(),
-        ai_src: "engine/src/ai/parameters.json".to_string(),
+        ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
         hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
         min_pairs: 3,
         pair_batch: 1,

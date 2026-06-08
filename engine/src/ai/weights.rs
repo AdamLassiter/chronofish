@@ -44,11 +44,13 @@ thread_local! {
 fn active_parameters_json() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        if let Ok(json) = std::fs::read_to_string("engine/models/cpu-v1/parameters.json") {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("models/cpu-v1/parameters.json");
+        if let Ok(json) = std::fs::read_to_string(&path) {
             return json;
         }
     }
-    include_str!("parameters.json").to_string()
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/models/cpu-v1/parameters.json")).to_string()
 }
 
 #[allow(dead_code)]

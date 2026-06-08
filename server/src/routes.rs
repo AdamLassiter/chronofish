@@ -256,7 +256,7 @@ async fn put_training_model(
 #[cfg(feature = "frontend-training")]
 async fn get_training_cpu_parameters(State(state): State<AppState>) -> Response {
     let path = active_cpu_parameters_path(&state);
-    match std::fs::read(&path).or_else(|_| std::fs::read(default_cpu_parameters_path(&state))) {
+    match std::fs::read(&path) {
         Ok(bytes) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
@@ -507,11 +507,6 @@ fn active_training_model_path(state: &AppState) -> PathBuf {
 #[cfg(feature = "frontend-training")]
 fn active_cpu_parameters_path(state: &AppState) -> PathBuf {
     state.root.join("engine/models/cpu-v1/parameters.json")
-}
-
-#[cfg(feature = "frontend-training")]
-fn default_cpu_parameters_path(state: &AppState) -> PathBuf {
-    state.root.join("engine/src/ai/parameters.json")
 }
 
 #[cfg(feature = "frontend-training")]

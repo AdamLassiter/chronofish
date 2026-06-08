@@ -114,16 +114,12 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
     }
 
     if requested == Path::new("ai/parameters.json") {
-        return [
-            root.join("engine/models/cpu-v1/parameters.json"),
-            root.join("engine/src/ai/parameters.json"),
-        ]
-        .into_iter()
-        .find(|path| path.is_file());
+        let path = root.join("engine/models/cpu-v1/parameters.json");
+        return path.is_file().then_some(path);
     }
 
     if requested == Path::new("ai/effort.json") {
-        let path = root.join("engine/src/ai/effort.json");
+        let path = root.join("engine/models/cpu-v1/effort.json");
         return path.is_file().then_some(path);
     }
 
