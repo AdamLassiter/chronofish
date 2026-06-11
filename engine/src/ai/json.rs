@@ -1,5 +1,12 @@
 use super::*;
 
+impl Game {
+    pub(crate) fn evaluation_json(&self) -> String {
+        let score = self.evaluate_heuristic(Color::White, &EvalWeights::active_tuned());
+        format!("{{\"score\":{score},\"source\":\"engine heuristic\"}}")
+    }
+}
+
 impl AiSearchResult {
     pub(crate) fn to_json(&self) -> String {
         format!(

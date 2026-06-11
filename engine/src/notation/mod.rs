@@ -38,11 +38,13 @@ impl Game {
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
 
         format!(
-            "{{\"turn\":\"{}\",\"timelines\":[{}],\"nextTimelineId\":{},\"nextBlackTimelineId\":{},\"checkedRoyals\":[{}]}}",
+            "{{\"turn\":\"{}\",\"presentTime\":{},\"timelines\":[{}],\"nextTimelineId\":{},\"nextBlackTimelineId\":{},\"checkedRoyals\":[{}],\"result\":{}}}",
             self.turn.as_str(),
+            self.present_time()
+                .map_or_else(|| "null".to_string(), |time| time.to_string()),
             timelines
                 .iter()
-                .map(Timeline::to_json)
+                .map(|timeline| timeline.to_json(self.is_active_timeline(timeline.id)))
                 .collect::<Vec<_>>()
                 .join(","),
             self.next_timeline_id,
@@ -51,7 +53,8 @@ impl Game {
                 .iter()
                 .map(|position| position_json(*position))
                 .collect::<Vec<_>>()
-                .join(",")
+                .join(","),
+            self.result.map_or_else(|| "null".to_string(), GameResult::to_json)
         )
     }
 
@@ -114,18 +117,56 @@ impl Game {
     }
 }
 
+impl GameResult {
+    pub(crate) fn to_json(self) -> String {
+        let outcome = if self.winner.is_some() { "win" } else { "draw" };
+        let winner = self.winner.map_or_else(
+            || "null".to_string(),
+            |color| format!("\"{}\"", color.as_str()),
+        );
+        format!(
+            "{{\"terminal\":true,\"outcome\":\"{outcome}\",\"winner\":{winner},\"reason\":\"{}\"}}",
+            self.reason.as_str()
+        )
+    }
+
+    pub(crate) fn message(self) -> String {
+        match (self.winner, self.reason) {
+            (Some(winner), GameResultReason::RoyalCapture) => {
+                format!("{} wins by royal capture.", winner.capitalized())
+            }
+            (None, GameResultReason::ThreefoldRepetition) => {
+                "Stalemate by threefold repetition.".to_string()
+            }
+            (None, GameResultReason::Stalemate) => "Stalemate.".to_string(),
+            _ => "Game over.".to_string(),
+        }
+    }
+}
+
+impl GameResultReason {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::RoyalCapture => "royal-capture",
+            Self::ThreefoldRepetition => "threefold-repetition",
+            Self::Stalemate => "stalemate",
+        }
+    }
+}
+
 impl Timeline {
     #[allow(dead_code)]
-    pub(crate) fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self, active: bool) -> String {
         let mut boards = self.boards.clone();
         boards.sort_by_key(|board| board.time);
 
         format!(
-            "{{\"id\":{},\"row\":{},\"label\":\"{}\",\"owner\":\"{}\",\"boards\":[{}]}}",
+            "{{\"id\":{},\"row\":{},\"label\":\"{}\",\"owner\":\"{}\",\"active\":{},\"boards\":[{}]}}",
             self.id,
             self.row,
             escape_json(&self.label),
             self.owner.as_str(),
+            active,
             boards
                 .iter()
                 .map(|board| board.to_json(self.id))

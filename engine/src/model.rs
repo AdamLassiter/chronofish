@@ -74,7 +74,7 @@ pub(crate) struct Timeline {
 
 // Owned timelines can become inactive when one side has branched more than the
 // opponent can answer. Neutral T0 always remains active.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TimelineOwner {
     Neutral,
     White,
@@ -103,8 +103,22 @@ pub(crate) struct Game {
     pub(crate) staged_turn: Vec<GameCheckpoint>,
     pub(crate) staged_notation: Vec<String>,
     pub(crate) staged_royal_capture_by: Option<Color>,
+    pub(crate) result: Option<GameResult>,
     pub(crate) last_message: String,
     pub(crate) position_hash: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GameResult {
+    pub(crate) winner: Option<Color>,
+    pub(crate) reason: GameResultReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GameResultReason {
+    RoyalCapture,
+    ThreefoldRepetition,
+    Stalemate,
 }
 
 // Whole-state checkpoints are simpler and safer than trying to reverse 5D moves.

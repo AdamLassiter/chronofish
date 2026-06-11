@@ -1,4 +1,13 @@
 use super::*;
+use crate::wasm_api::parse_game_snapshot;
+
+fn wasm_output(pointer: *const u8) -> String {
+    let bytes =
+        unsafe { std::slice::from_raw_parts(pointer, crate::wasm_api::chronofish_output_len()) };
+    std::str::from_utf8(bytes)
+        .expect("WASM output is UTF-8")
+        .to_string()
+}
 
 #[test]
 fn standard_move_advances_main_timeline() {
@@ -26,6 +35,47 @@ fn standard_move_advances_main_timeline() {
     assert_eq!(game.submit_turn(), 1);
     assert_eq!(game.turn.as_str(), "black");
     assert!(game.board(0, 1).expect("new board").board[1][4].is_none());
+}
+
+#[test]
+fn browser_wasm_contract_round_trips_engine_behavior() {
+    crate::wasm_api::chronofish_reset();
+
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&wasm_output(crate::wasm_api::chronofish_snapshot_json()))
+            .expect("snapshot JSON");
+    assert_eq!(snapshot["turn"], "white");
+    assert_eq!(snapshot["presentTime"], 0);
+    assert_eq!(snapshot["timelines"][0]["active"], true);
+
+    let selection: serde_json::Value = serde_json::from_str(&wasm_output(
+        crate::wasm_api::chronofish_legal_selection_json(0, 0, 4, 1),
+    ))
+    .expect("selection JSON");
+    assert_eq!(selection["source"]["piece"]["type"], "pawn");
+    assert_eq!(selection["targets"].as_array().map(Vec::len), Some(2));
+
+    assert_eq!(
+        crate::wasm_api::chronofish_apply_move(0, 0, 4, 1, 0, 0, 4, 3),
+        1
+    );
+    assert_eq!(
+        wasm_output(crate::wasm_api::chronofish_staged_turn_notation()),
+        "T0L0e2Pe4"
+    );
+
+    let evaluation: serde_json::Value =
+        serde_json::from_str(&wasm_output(crate::wasm_api::chronofish_evaluation_json()))
+            .expect("evaluation JSON");
+    assert!(evaluation["score"].is_i64());
+    assert_eq!(evaluation["source"], "engine heuristic");
+
+    assert_eq!(crate::wasm_api::chronofish_submit_turn(), 1);
+    let submitted: serde_json::Value =
+        serde_json::from_str(&wasm_output(crate::wasm_api::chronofish_snapshot_json()))
+            .expect("submitted snapshot JSON");
+    assert_eq!(submitted["turn"], "black");
+    assert_eq!(submitted["timelines"][0]["boards"][1]["time"], 1);
 }
 
 #[test]
@@ -59,6 +109,123 @@ fn active_timelines_are_nearest_to_zero() {
     assert!(game.is_active_timeline(0));
     assert!(game.is_active_timeline(-1));
     assert!(!game.is_active_timeline(-2));
+}
+
+#[test]
+fn browser_snapshot_exposes_rust_derived_timeline_state() {
+    let mut game = Game::new();
+    let board = empty_board_with_kings();
+    game.timelines = vec![
+        Timeline {
+            id: 0,
+            row: 0,
+            label: "Sacred T0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(3, Color::White, board)],
+        },
+        Timeline {
+            id: -1,
+            row: -1,
+            label: "Black T-1".to_string(),
+            owner: TimelineOwner::Black,
+            boards: vec![snapshot(2, Color::White, board)],
+        },
+        Timeline {
+            id: -2,
+            row: -2,
+            label: "Black T-2".to_string(),
+            owner: TimelineOwner::Black,
+            boards: vec![snapshot(1, Color::White, board)],
+        },
+    ];
+
+    let json: serde_json::Value = serde_json::from_str(&game.to_json()).expect("valid snapshot");
+    assert_eq!(json["presentTime"], 2);
+    assert_eq!(json["timelines"][0]["active"], false);
+    assert_eq!(json["timelines"][1]["active"], true);
+    assert_eq!(json["timelines"][2]["active"], true);
+}
+
+#[test]
+fn browser_evaluation_uses_engine_heuristics() {
+    let game = Game::new();
+    let evaluation: serde_json::Value =
+        serde_json::from_str(&game.evaluation_json()).expect("valid evaluation");
+
+    assert!(evaluation["score"].is_i64());
+    assert_eq!(evaluation["source"], "engine heuristic");
+    assert_eq!(
+        evaluation["score"].as_i64(),
+        Some(game.evaluate_heuristic(Color::White, &EvalWeights::active_tuned()) as i64)
+    );
+}
+
+#[test]
+fn browser_legal_selection_is_decided_by_the_engine() {
+    let game = Game::new();
+    let white_pawn: serde_json::Value =
+        serde_json::from_str(&game.legal_selection_json(Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 1,
+        }))
+        .expect("valid legal selection");
+    assert_eq!(white_pawn["source"]["piece"]["color"], "white");
+    assert_eq!(white_pawn["source"]["piece"]["type"], "pawn");
+    assert_eq!(white_pawn["targets"].as_array().map(Vec::len), Some(2));
+
+    let black_pawn: serde_json::Value =
+        serde_json::from_str(&game.legal_selection_json(Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 6,
+        }))
+        .expect("valid rejected selection");
+    assert!(black_pawn["source"].is_null());
+    assert_eq!(black_pawn["targets"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn terminal_result_round_trips_through_browser_snapshot() {
+    let mut game = Game::new();
+    game.result = Some(GameResult {
+        winner: Some(Color::Black),
+        reason: GameResultReason::RoyalCapture,
+    });
+    game.last_message = game.result.expect("result").message();
+
+    let json = game.to_json();
+    let restored = parse_game_snapshot(&json).expect("terminal snapshot parses");
+    assert_eq!(restored.result, game.result);
+    assert_eq!(restored.last_message, "Black wins by royal capture.");
+    assert_eq!(
+        restored.terminal_score(Color::White),
+        Some(-CHECKMATE_SCORE)
+    );
+    assert_eq!(restored.terminal_score(Color::Black), Some(CHECKMATE_SCORE));
+
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid snapshot JSON");
+    assert_eq!(value["result"]["terminal"], true);
+    assert_eq!(value["result"]["outcome"], "win");
+    assert_eq!(value["result"]["winner"], "black");
+    assert_eq!(value["result"]["reason"], "royal-capture");
+}
+
+#[test]
+fn browser_snapshot_rejects_inconsistent_terminal_result() {
+    let snapshot = Game::new().to_json().replace(
+        "\"result\":null",
+        "\"result\":{\"terminal\":true,\"outcome\":\"draw\",\"winner\":null,\"reason\":\"royal-capture\"}",
+    );
+
+    assert_eq!(
+        parse_game_snapshot(&snapshot)
+            .err()
+            .expect("invalid result rejected"),
+        "Snapshot result winner does not match its reason."
+    );
 }
 
 #[test]

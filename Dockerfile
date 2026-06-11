@@ -34,9 +34,9 @@ ENV PORT=5173
 COPY --from=builder /app/target/release/chronofish-server /usr/local/bin/chronofish-server
 COPY --from=builder /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm
 COPY --from=builder /app/web/dist /app/web/dist
-COPY engine/src/ai/parameters.json /app/engine/src/ai/parameters.json
-COPY engine/models/cpu-v1/parameters.json /app/engine/models/cpu-v1/parameters.json
-COPY engine/src/ai/effort.json /app/engine/src/ai/effort.json
+
+RUN mkdir -p /app/engine/models/gpu-v1 /app/engine/models/cpu-v1
+VOLUME ["/app/engine/models/gpu-v1", "/app/engine/models/cpu-v1"]
 
 EXPOSE 5173
 

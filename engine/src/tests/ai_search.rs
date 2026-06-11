@@ -313,6 +313,13 @@ fn submit_detects_committed_branch_royal_capture() {
     );
     assert_eq!(game.submit_turn(), 1);
     assert_eq!(game.last_message, "White wins by royal capture.");
+    assert_eq!(
+        game.result,
+        Some(GameResult {
+            winner: Some(Color::White),
+            reason: GameResultReason::RoyalCapture,
+        })
+    );
 }
 
 #[test]

@@ -30,8 +30,11 @@ export function sortedBoards(timeline: Timeline) {
 }
 
 export function isActiveTimeline(game: GameSnapshot, timeline: Timeline): boolean {
-  // Mirror the Rust active-timeline rule so labels can be rendered without a
-  // round-trip through WASM.
+  if (typeof timeline.active === "boolean") {
+    return timeline.active;
+  }
+
+  // GPU-originated snapshots do not yet carry Rust's derived metadata.
   if (timeline.owner === "neutral") {
     return true;
   }
@@ -45,7 +48,11 @@ export function isActiveTimeline(game: GameSnapshot, timeline: Timeline): boolea
 }
 
 export function presentTime(game: GameSnapshot): number {
-  // Present time is the earliest latest board among active timelines.
+  if (Number.isInteger(game.presentTime)) {
+    return game.presentTime as number;
+  }
+
+  // Keep the WebGPU snapshot path independent from the CPU WASM state.
   const activeLatestTimes = game.timelines
     .filter((timeline) => isActiveTimeline(game, timeline))
     .map((timeline) => getLatestBoard(game, timeline.id)?.time)

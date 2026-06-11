@@ -139,7 +139,7 @@ interface BotControllerOptions {
   concede(color: BotColor, credentials?: BotCredentials): void;
   persistLocalGameState(): void;
   render(): void;
-  isMatchOverMessage(message: string): boolean;
+  isMatchOver(): boolean;
   enterPostMatchReview(message: string, credentials?: BotCredentials): void;
   syncState(action: string, message: string, credentials?: BotCredentials): void;
 }
@@ -177,7 +177,7 @@ export function createBotController({
   concede,
   persistLocalGameState,
   render,
-  isMatchOverMessage,
+  isMatchOver,
   enterPostMatchReview,
   syncState
 }: BotControllerOptions): BotController {
@@ -713,7 +713,7 @@ export function createBotController({
     message.textContent = botMessage;
     persistLocalGameState();
     render();
-    if (isMatchOverMessage(turnMessage)) {
+    if (isMatchOver()) {
       await enterPostMatchReview(turnMessage, botMoveCredentials(botColor));
       return;
     }

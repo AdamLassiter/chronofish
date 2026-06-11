@@ -1,5 +1,5 @@
 import { elements } from "./dom.js";
-import { capitalize, getBoard, getLatestBoard, isActiveTimeline, isLatestBoard, presentTime, samePosition } from "./board.js";
+import { capitalize, getLatestBoard, isActiveTimeline, presentTime, samePosition } from "./board.js";
 import { renderGame } from "./render.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { appendNotationLine, postMatchLog, postBotLossLog } from "./match-log.js";
@@ -7,7 +7,6 @@ import { readWasmString, writeWasmString } from "./engine-io.js";
 import { createTrainingController } from "./training-ui.js";
 import { createBotController } from "./bot-controller.js";
 import { createEvaluationUi } from "./evaluation-ui.js";
-import { initialGame } from "./initial-game.js";
 import { wireMainEvents } from "./main-events.js";
 import { APP_VERSION } from "./app-version.js";
 import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, Position } from "./types.js";
@@ -167,7 +166,13 @@ const cpuBotDisplayNames: Record<BotEffortName, string[]> = {
     "Anandromeda"
   ]
 };
-let game = initialGame();
+let game: GameSnapshot = {
+  turn: "white",
+  nextTimelineId: 1,
+  nextBlackTimelineId: -1,
+  checkedRoyals: [],
+  timelines: []
+};
 // Last submitted snapshot. While a turn is staged, rendering compares against
 // this so the present line and board status labels do not jump before Submit.
 let committedGame = game;
@@ -218,12 +223,20 @@ const botController = createBotController({
   concede,
   persistLocalGameState,
   render,
-  isMatchOverMessage,
+  isMatchOver,
   enterPostMatchReview,
   syncState
 });
 const evaluationUi = createEvaluationUi({
-  getGame: () => game
+  getEvaluation: () => {
+    if (!engine || !game.timelines.length) {
+      return null;
+    }
+    return JSON.parse(readWasmString(engine, engine.chronofish_evaluation_json())) as {
+      score: number;
+      source: string;
+    };
+  }
 });
 const training = createTrainingController({
   getEngine: () => engine,
@@ -489,18 +502,8 @@ function lobbyPayload(): RoomGamePayload {
   };
 }
 
-function clientTurnNotation(moves: Move[] = stagedMoves): string {
-  return moves
-    .map((move) => `${positionNotation(move.from)}-${positionNotation(move.to)}`)
-    .join(" ");
-}
-
-function positionNotation(position: Position): string {
-  return `T${position.time}L${position.timelineId}${String.fromCharCode(97 + position.x)}${position.y + 1}`;
-}
-
-function isMatchOverMessage(message: string): boolean {
-  return /\bwins\b/i.test(message);
+function isMatchOver(): boolean {
+  return phase === "review" || game.result?.terminal === true;
 }
 
 function activeEngine(): ChronofishEngine {
@@ -512,8 +515,10 @@ function activeEngine(): ChronofishEngine {
 
 function resetEngine(): void {
   // Engine reset clears both visible and committed state plus all local history.
-  engine?.chronofish_reset?.();
-  game = initialGame();
+  if (engine) {
+    engine.chronofish_reset();
+    game = engineSnapshot();
+  }
   committedGame = game;
   selected = null;
   legalTargets = [];
@@ -532,6 +537,11 @@ function engineSnapshot(): GameSnapshot {
 function engineLastMessage(): string {
   const wasm = activeEngine();
   return readWasmString(wasm, wasm.chronofish_last_message());
+}
+
+function engineStagedTurnNotation(): string {
+  const wasm = activeEngine();
+  return readWasmString(wasm, wasm.chronofish_staged_turn_notation());
 }
 
 function syncEngineSnapshot(snapshot: GameSnapshot = game): void {
@@ -602,29 +612,17 @@ function targetFor(position: Position): Position | undefined {
   return legalTargets.find((target) => samePosition(target, position));
 }
 
-function pieceAt(position: Position): Piece | null {
-  return getBoard(game, position.timelineId, position.time)?.board[position.y]?.[position.x] ?? null;
-}
-
 function legalTargetsFor(position: Position): Promise<LegalTargetSelection> {
   if (!engine) {
     return Promise.resolve({ source: null, targets: [] });
   }
   syncEngineSnapshot(game);
-  const piece = pieceAt(position);
-  const board = getBoard(game, position.timelineId, position.time);
-  const selectable = piece?.color === game.turn
-    && board?.sideToMove === game.turn
-    && isLatestBoard(game, position.timelineId, position.time);
-  return Promise.resolve({
-    source: selectable ? { ...position, piece } : null,
-    targets: JSON.parse(readWasmString(engine, engine.chronofish_legal_targets_json(
-      position.timelineId,
-      position.time,
-      position.x,
-      position.y
-    )))
-  });
+  return Promise.resolve(JSON.parse(readWasmString(engine, engine.chronofish_legal_selection_json(
+    position.timelineId,
+    position.time,
+    position.x,
+    position.y
+  ))) as LegalTargetSelection);
 }
 
 async function applyEngineMove(from: Position, to: Position): Promise<string | null> {
@@ -687,7 +685,7 @@ async function submitVisibleTurn(actor: Color): Promise<string | null> {
     return null;
   }
 
-  const turnNotation = clientTurnNotation();
+  const turnNotation = engineStagedTurnNotation();
   const submitted = stagedMoves.map(cloneMove);
   game = engineSnapshot();
   committedGame = game;
@@ -888,6 +886,12 @@ function applyRemoteRoom(room: RoomState, message = ""): void {
     stagedMoves = [];
   }
 
+  if (engine && game.timelines.length) {
+    syncEngineSnapshot(game);
+    game = engineSnapshot();
+    committedGame = game;
+  }
+
   selected = null;
   legalTargets = [];
   updateShareLink();
@@ -980,7 +984,7 @@ async function syncState(action: string, message: string, credentials: BotCreden
 }
 
 function showMatchDialog(message: string): void {
-  if (!isMatchOverMessage(message) || lastMatchAlertMessage === message) {
+  if (!isMatchOver() || lastMatchAlertMessage === message) {
     return;
   }
   lastMatchAlertMessage = message;
@@ -1027,6 +1031,9 @@ function recordBotLossLog(message: string): void {
 }
 
 function winnerFromMatchMessage(message: string): Color | null {
+  if (game.result?.winner) {
+    return game.result.winner;
+  }
   const normalized = String(message ?? "").toLowerCase();
   if (/\bwhite\b.*\bwins\b/.test(normalized)) {
     return "white";
@@ -1193,7 +1200,7 @@ wireMainEvents({
   cloneMove,
   rebuildStagedClientState,
   submitVisibleTurn,
-  isMatchOverMessage,
+  isMatchOver,
   enterPostMatchReview,
   syncState,
   maybeStartBotTurn: () => botController.maybeStartTurn(),

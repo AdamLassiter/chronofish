@@ -1,6 +1,4 @@
-import { getLatestBoard, isActiveTimeline } from "./board.js";
 import { elements } from "./dom.js";
-import type { BoardSnapshot, GameSnapshot, PieceType } from "./types.js";
 
 export interface EvaluationUiController {
   renderEvaluationBar(): void;
@@ -19,14 +17,14 @@ interface Evaluation {
   source: string;
 }
 
-export function createEvaluationUi({ getGame }: { getGame: () => GameSnapshot }): EvaluationUiController {
+export function createEvaluationUi({ getEvaluation }: { getEvaluation: () => Evaluation | null }): EvaluationUiController {
   let lastScrolledPresentTime: number | null = null;
 
   function renderEvaluationBar(): void {
     if (!elements.evaluationBar || !elements.evaluationWhite || !elements.evaluationScore) {
       return;
     }
-    const evaluation = evaluateClientPosition(getGame());
+    const evaluation = getEvaluation();
     if (!evaluation) {
       elements.evaluationBar.hidden = true;
       return;
@@ -40,47 +38,6 @@ export function createEvaluationUi({ getGame }: { getGame: () => GameSnapshot })
     elements.evaluationBar.dataset.leader = score >= 0 ? "white" : "black";
     elements.evaluationBar.title = `White ${formatSignedPawns(score)}. Source: ${source}.`;
     elements.evaluationBar.hidden = false;
-  }
-
-  function evaluateClientPosition(position: GameSnapshot): Evaluation | null {
-    if (!position.timelines.length) {
-      return null;
-    }
-    let score = 0;
-    let boardCount = 0;
-    for (const timeline of position.timelines) {
-      if (!isActiveTimeline(position, timeline)) {
-        continue;
-      }
-      const board = getLatestBoard(position, timeline.id);
-      if (!board?.board) {
-        continue;
-      }
-      boardCount += 1;
-      score += evaluateBoardMaterial(board);
-      score += board.sideToMove === "white" ? 12 : -12;
-    }
-    if (boardCount === 0) {
-      return null;
-    }
-    return {
-      score: Math.round(score / boardCount),
-      source: "client material"
-    };
-  }
-
-  function evaluateBoardMaterial(board: BoardSnapshot): number {
-    let score = 0;
-    for (const row of board.board) {
-      for (const piece of row) {
-        if (!piece) {
-          continue;
-        }
-        const value = pieceValue(piece.type);
-        score += piece.color === "white" ? value : -value;
-      }
-    }
-    return score;
   }
 
   function scrollMultiverseToPresent(): void {
@@ -122,23 +79,6 @@ export function createEvaluationUi({ getGame }: { getGame: () => GameSnapshot })
     renderEvaluationBar,
     maybeScrollToPresent
   };
-}
-
-function pieceValue(type: PieceType): number {
-  return {
-    king: 20000,
-    commonKing: 10000,
-    queen: 900,
-    royalQueen: 20000,
-    princess: 700,
-    rook: 500,
-    bishop: 330,
-    unicorn: 500,
-    dragon: 900,
-    knight: 320,
-    pawn: 100,
-    brawn: 130
-  }[type] ?? 0;
 }
 
 function formatEvaluation(score: number): string {

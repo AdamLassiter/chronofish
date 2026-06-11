@@ -96,6 +96,12 @@ pub extern "C" fn chronofish_staged_turn_notation() -> *const u8 {
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_evaluation_json() -> *const u8 {
+    let json = with_game(Game::evaluation_json);
+    set_output(json)
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_legal_targets_json(
     from_timeline_id: i32,
     from_time: i32,
@@ -109,6 +115,23 @@ pub extern "C" fn chronofish_legal_targets_json(
         y: from_y,
     };
     let json = with_game(|game| game.legal_targets_json(from));
+    set_output(json)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_legal_selection_json(
+    from_timeline_id: i32,
+    from_time: i32,
+    from_x: i32,
+    from_y: i32,
+) -> *const u8 {
+    let from = Position {
+        timeline_id: from_timeline_id,
+        time: from_time,
+        x: from_x,
+        y: from_y,
+    };
+    let json = with_game(|game| game.legal_selection_json(from));
     set_output(json)
 }
 
@@ -238,6 +261,11 @@ pub(crate) fn parse_game_snapshot(text: &str) -> Result<Game, String> {
         .unwrap_or_else(|| next_timeline_id_for(&timelines, Color::White));
     let next_black_timeline_id = optional_i32(object.get("nextBlackTimelineId"))
         .unwrap_or_else(|| next_timeline_id_for(&timelines, Color::Black));
+    let result = parse_game_result(object.get("result"))?;
+    let last_message = result.map_or_else(
+        || format!("{} to move.", turn.capitalized()),
+        GameResult::message,
+    );
     let mut game = Game {
         turn,
         timelines,
@@ -246,11 +274,39 @@ pub(crate) fn parse_game_snapshot(text: &str) -> Result<Game, String> {
         staged_turn: Vec::new(),
         staged_notation: Vec::new(),
         staged_royal_capture_by: None,
-        last_message: format!("{} to move.", turn.capitalized()),
+        result,
+        last_message,
         position_hash: 0,
     };
     game.position_hash = game.recompute_position_hash();
     Ok(game)
+}
+
+fn parse_game_result(value: Option<&serde_json::Value>) -> Result<Option<GameResult>, String> {
+    let Some(object) = value.and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    if object.get("terminal").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Ok(None);
+    }
+    let winner = match object.get("winner").and_then(serde_json::Value::as_str) {
+        Some("white") => Some(Color::White),
+        Some("black") => Some(Color::Black),
+        Some(_) => return Err("Snapshot result winner must be white, black, or null.".to_string()),
+        None => None,
+    };
+    let reason = match object.get("reason").and_then(serde_json::Value::as_str) {
+        Some("royal-capture") => GameResultReason::RoyalCapture,
+        Some("threefold-repetition") => GameResultReason::ThreefoldRepetition,
+        Some("stalemate") => GameResultReason::Stalemate,
+        _ => return Err("Snapshot result has an unsupported reason.".to_string()),
+    };
+    match (winner, reason) {
+        (Some(_), GameResultReason::RoyalCapture)
+        | (None, GameResultReason::ThreefoldRepetition | GameResultReason::Stalemate) => {}
+        _ => return Err("Snapshot result winner does not match its reason.".to_string()),
+    }
+    Ok(Some(GameResult { winner, reason }))
 }
 
 fn parse_timeline(value: &serde_json::Value) -> Result<Timeline, String> {

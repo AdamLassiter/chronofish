@@ -413,6 +413,7 @@ pub(crate) fn fitness_until_with_opponent_limit(
     report
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn play_match_until(
     start: Game,
     weights: EvalWeights,

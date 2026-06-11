@@ -59,6 +59,7 @@ impl Game {
             staged_turn: Vec::new(),
             staged_notation: Vec::new(),
             staged_royal_capture_by: None,
+            result: None,
             last_message: "Select a white piece on a latest board.".to_string(),
             position_hash: 0,
         };
@@ -234,6 +235,38 @@ impl Game {
         format!("[{}]", targets.join(","))
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn legal_selection_json(&self, from: Position) -> String {
+        let source = self
+            .board(from.timeline_id, from.time)
+            .and_then(|board| {
+                let piece = self.piece_at(from)?;
+                (self.is_present_source_board(from)
+                    && self.is_latest_board(from.timeline_id, from.time)
+                    && board.side_to_move == self.turn
+                    && piece.color == self.turn)
+                    .then_some(piece)
+            })
+            .map_or_else(
+                || "null".to_string(),
+                |piece| {
+                    format!(
+                        "{{\"timelineId\":{},\"time\":{},\"x\":{},\"y\":{},\"piece\":{}}}",
+                        from.timeline_id,
+                        from.time,
+                        from.x,
+                        from.y,
+                        piece_json(&Some(piece))
+                    )
+                },
+            );
+
+        format!(
+            "{{\"source\":{source},\"targets\":{}}}",
+            self.legal_targets_json(from)
+        )
+    }
+
     pub(crate) fn is_present_source_board(&self, from: Position) -> bool {
         self.present_time() == Some(from.time)
     }
@@ -333,6 +366,10 @@ impl Game {
             self.staged_turn.clear();
             self.staged_notation.clear();
             self.staged_royal_capture_by = None;
+            self.result = Some(GameResult {
+                winner: Some(winner),
+                reason: GameResultReason::RoyalCapture,
+            });
             self.last_message = format!("{} wins by royal capture.", winner.capitalized());
             return 1;
         }
@@ -349,11 +386,19 @@ impl Game {
         self.staged_royal_capture_by = None;
 
         if self.has_threefold_repetition() {
+            self.result = Some(GameResult {
+                winner: None,
+                reason: GameResultReason::ThreefoldRepetition,
+            });
             self.last_message = "Stalemate by threefold repetition.".to_string();
             return 1;
         }
 
         if self.is_classic_stalemate(self.turn) {
+            self.result = Some(GameResult {
+                winner: None,
+                reason: GameResultReason::Stalemate,
+            });
             self.last_message = "Stalemate.".to_string();
             return 1;
         }

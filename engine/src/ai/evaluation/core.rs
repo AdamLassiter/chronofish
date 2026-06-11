@@ -104,6 +104,13 @@ impl Game {
     }
 
     pub(crate) fn terminal_score(&self, color: Color) -> Option<i32> {
+        if let Some(result) = self.result {
+            return match result.winner {
+                Some(winner) if winner == color => Some(CHECKMATE_SCORE),
+                Some(_) => Some(-CHECKMATE_SCORE),
+                None => Some(0),
+            };
+        }
         if self.staged_royal_capture_by == Some(color) {
             Some(CHECKMATE_SCORE)
         } else if self.staged_royal_capture_by == Some(color.opposite()) {

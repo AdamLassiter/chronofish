@@ -22,7 +22,7 @@ interface MainEventOptions {
   cloneMove(move: Move): Move;
   rebuildStagedClientState(moves: Move[]): Promise<void>;
   submitVisibleTurn(actor: Color): Promise<string | null>;
-  isMatchOverMessage(message: string): boolean;
+  isMatchOver(): boolean;
   enterPostMatchReview(message: string): void;
   syncState(kind: string, message: string): void;
   maybeStartBotTurn(): void;
@@ -49,7 +49,7 @@ export function wireMainEvents({
   cloneMove,
   rebuildStagedClientState,
   submitVisibleTurn,
-  isMatchOverMessage,
+  isMatchOver,
   enterPostMatchReview,
   syncState,
   maybeStartBotTurn,
@@ -140,7 +140,7 @@ export function wireMainEvents({
     }
 
     render();
-    if (isMatchOverMessage(turnMessage)) {
+    if (isMatchOver()) {
       enterPostMatchReview(turnMessage);
       return;
     }

@@ -49,16 +49,26 @@ export interface Timeline {
   row: number;
   label: string;
   owner: TimelineOwner;
+  active?: boolean;
   boards: BoardSnapshot[];
 }
 
 export interface GameSnapshot {
   turn: Color;
+  presentTime?: number;
   nextTimelineId: number;
   nextBlackTimelineId: number;
   checkedRoyals: Position[];
   royalCaptureBy?: Color | null;
+  result?: GameResult | null;
   timelines: Timeline[];
+}
+
+export interface GameResult {
+  terminal: true;
+  outcome: "win" | "draw";
+  winner: Color | null;
+  reason: "royal-capture" | "threefold-repetition" | "stalemate";
 }
 
 export interface Position {
@@ -86,6 +96,8 @@ export interface ChronofishEngine {
   chronofish_version(): number;
   chronofish_reset(): void;
   chronofish_snapshot_json(): number;
+  chronofish_staged_turn_notation(): number;
+  chronofish_evaluation_json(): number;
   chronofish_last_message(): number;
   chronofish_load_snapshot_json(ptr: number, length: number): number;
   chronofish_load_ai_parameters_json(ptr: number, length: number): number;
@@ -100,6 +112,7 @@ export interface ChronofishEngine {
     toY: number
   ): number;
   chronofish_legal_targets_json(timelineId: number, time: number, x: number, y: number): number;
+  chronofish_legal_selection_json(timelineId: number, time: number, x: number, y: number): number;
   chronofish_submit_turn(): number;
   chronofish_ai_turn_json(maxDepth: number, maxNodes: number): number;
   chronofish_ai_turn_timed_json(maxDepth: number, maxNodes: number, millis: number): number;

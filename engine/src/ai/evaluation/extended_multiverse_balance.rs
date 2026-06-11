@@ -684,10 +684,9 @@ impl Game {
                     if !cleared.attacks_square(piece, from, *royal_position) {
                         continue;
                     }
-                    if pin_mode {
-                        score += 1;
-                    } else if weights.piece_value(royal_piece.piece_type)
-                        > weights.piece_value(victim.piece_type)
+                    if pin_mode
+                        || weights.piece_value(royal_piece.piece_type)
+                            > weights.piece_value(victim.piece_type)
                     {
                         score += 1;
                     }

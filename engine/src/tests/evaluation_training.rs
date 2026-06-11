@@ -358,6 +358,13 @@ fn submit_marks_threefold_repetition_as_stalemate() {
     );
     assert_eq!(game.submit_turn(), 1);
     assert_eq!(game.last_message, "Stalemate by threefold repetition.");
+    assert_eq!(
+        game.result,
+        Some(GameResult {
+            winner: None,
+            reason: GameResultReason::ThreefoldRepetition,
+        })
+    );
     assert_eq!(game.terminal_score(Color::White), Some(0));
     assert_eq!(game.terminal_score(Color::Black), Some(0));
 }
@@ -437,6 +444,13 @@ fn submit_marks_classic_stalemate() {
     assert_eq!(game.submit_turn(), 1);
     assert_eq!(game.turn, Color::Black);
     assert_eq!(game.last_message, "Stalemate.");
+    assert_eq!(
+        game.result,
+        Some(GameResult {
+            winner: None,
+            reason: GameResultReason::Stalemate,
+        })
+    );
     assert_eq!(game.terminal_score(Color::White), Some(0));
     assert_eq!(game.terminal_score(Color::Black), Some(0));
 }

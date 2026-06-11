@@ -8,7 +8,6 @@ import * as esbuild from "esbuild";
 
 const root = path.resolve(import.meta.dirname, "..");
 const modules = await buildTestModules();
-const { initialGame } = await import(modules.initialGame);
 const { GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK } = await import(modules.aiLayout);
 const { buildGpuCandidateInputs, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
 
@@ -72,6 +71,28 @@ function emptyGpuBoard({ timelineId, time, sideToMove, latest }) {
   };
 }
 
+function initialGame() {
+  const board = Array.from({ length: 8 }, () => Array(8).fill(null));
+  const backRank = ["rook", "knight", "bishop", "queen", "king", "bishop", "knight", "rook"];
+  for (let x = 0; x < 8; x += 1) {
+    board[0][x] = { color: "white", type: backRank[x] };
+    board[1][x] = { color: "white", type: "pawn" };
+    board[6][x] = { color: "black", type: "pawn" };
+    board[7][x] = { color: "black", type: backRank[x] };
+  }
+  return {
+    turn: "white",
+    nextTimelineId: 1,
+    nextBlackTimelineId: -1,
+    timelines: [{
+      id: 0,
+      row: 0,
+      owner: "neutral",
+      boards: [{ time: 0, sideToMove: "white", castling: 15, enPassant: null, board }]
+    }]
+  };
+}
+
 function writeMutationBoard(records, offset, { timelineId, time, sideToMove }) {
   records[offset + 1] = timelineId;
   records[offset + 2] = time;
@@ -87,7 +108,6 @@ async function buildTestModules() {
   const outdir = await mkdtemp(path.join(os.tmpdir(), "chronofish-web-test-"));
   await esbuild.build({
     entryPoints: [
-      path.join(root, "src/initial-game.ts"),
       path.join(root, "src/ai-layout.ts"),
       path.join(root, "src/ai-snapshot.ts")
     ],
@@ -99,7 +119,6 @@ async function buildTestModules() {
     logLevel: "silent"
   });
   return {
-    initialGame: pathToFileURL(path.join(outdir, "initial-game.js")).href,
     aiLayout: pathToFileURL(path.join(outdir, "ai-layout.js")).href,
     aiSnapshot: pathToFileURL(path.join(outdir, "ai-snapshot.js")).href
   };
