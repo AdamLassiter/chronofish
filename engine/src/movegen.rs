@@ -1,7 +1,9 @@
+use crate::*;
+
 impl Game {
     // Check is evaluated over the latest board of every timeline because royal
     // pieces may exist on multiple active branch fronts.
-    fn is_in_check(&self, color: Color) -> bool {
+    pub(crate) fn is_in_check(&self, color: Color) -> bool {
         let royal_pieces = self.royal_piece_positions(color);
         royal_pieces
             .iter()
@@ -9,7 +11,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn checked_royal_positions(&self) -> Vec<Position> {
+    pub(crate) fn checked_royal_positions(&self) -> Vec<Position> {
         let Some(present_time) = self.present_time() else {
             return Vec::new();
         };
@@ -26,7 +28,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn is_checkmate(&self, color: Color) -> bool {
+    pub(crate) fn is_checkmate(&self, color: Color) -> bool {
         if !self.is_in_check(color) {
             return false;
         }
@@ -36,7 +38,7 @@ impl Game {
         !search.has_legal_turn_completion(color)
     }
 
-    fn is_classic_stalemate(&self, color: Color) -> bool {
+    pub(crate) fn is_classic_stalemate(&self, color: Color) -> bool {
         if self.royal_piece_positions(color).is_empty() || self.is_in_check(color) {
             return false;
         }
@@ -47,7 +49,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn royal_capture_available(&self, color: Color) -> bool {
+    pub(crate) fn royal_capture_available(&self, color: Color) -> bool {
         let mut search = self.clone_for_search();
         search.turn = color;
 
@@ -71,7 +73,10 @@ impl Game {
                                 x,
                                 y,
                             };
-                            if !search.piece_at(from).is_some_and(|piece| piece.color == color) {
+                            if !search
+                                .piece_at(from)
+                                .is_some_and(|piece| piece.color == color)
+                            {
                                 continue;
                             }
                             if search.legal_move_kind(from, target).is_some() {
@@ -87,7 +92,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn has_legal_turn_completion(&self, color: Color) -> bool {
+    pub(crate) fn has_legal_turn_completion(&self, color: Color) -> bool {
         // Escaping check may require a whole-turn sequence, not just one move, so
         // mate search follows staged moves until the present line changes color.
         let max_depth = self
@@ -100,7 +105,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn has_legal_turn_completion_at_depth(
+    pub(crate) fn has_legal_turn_completion_at_depth(
         &self,
         color: Color,
         depth: usize,
@@ -131,7 +136,10 @@ impl Game {
                             x,
                             y,
                         };
-                        if !self.piece_at(from).is_some_and(|piece| piece.color == color) {
+                        if !self
+                            .piece_at(from)
+                            .is_some_and(|piece| piece.color == color)
+                        {
                             continue;
                         }
 
@@ -174,7 +182,7 @@ impl Game {
         false
     }
 
-    fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
+    pub(crate) fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
         self.royal_pieces(color)
             .into_iter()
             .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
@@ -182,7 +190,7 @@ impl Game {
             .collect()
     }
 
-    fn royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
+    pub(crate) fn royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
         let mut positions = Vec::new();
         for timeline in &self.timelines {
             for board in &timeline.boards {
@@ -210,7 +218,7 @@ impl Game {
         positions
     }
 
-    fn is_square_attacked(&self, target: Position, by_color: Color) -> bool {
+    pub(crate) fn is_square_attacked(&self, target: Position, by_color: Color) -> bool {
         self.timelines.iter().any(|timeline| {
             timeline.boards.iter().any(|board| {
                 self.is_latest_board(timeline.id, board.time)
@@ -235,7 +243,7 @@ impl Game {
         })
     }
 
-    fn attacks_square(&self, piece: Piece, from: Position, target: Position) -> bool {
+    pub(crate) fn attacks_square(&self, piece: Piece, from: Position, target: Position) -> bool {
         if !Self::in_bounds(target.x, target.y)
             || from.timeline_id == target.timeline_id
                 && from.time == target.time
@@ -269,7 +277,12 @@ impl Game {
         )
     }
 
-    fn move_kind_for(&self, piece: Piece, from: Position, to: Position) -> Option<MoveKind> {
+    pub(crate) fn move_kind_for(
+        &self,
+        piece: Piece,
+        from: Position,
+        to: Position,
+    ) -> Option<MoveKind> {
         let delta = self.movement_delta(from, to);
         let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
         let (non_zero, non_zero_len) = Self::non_zero_distances(distances);
@@ -304,7 +317,7 @@ impl Game {
         }
     }
 
-    fn pawn_move_kind(
+    pub(crate) fn pawn_move_kind(
         &self,
         piece: Piece,
         from: Position,
@@ -389,7 +402,7 @@ impl Game {
         .then_some(MoveKind::Branch)
     }
 
-    fn brawn_move_kind(
+    pub(crate) fn brawn_move_kind(
         &self,
         piece: Piece,
         from: Position,
@@ -403,17 +416,19 @@ impl Game {
         if destination.is_some_and(|target| target.color != piece.color)
             && Self::is_brawn_capture(piece, delta)
         {
-            return Some(if from.timeline_id == to.timeline_id && from.time == to.time {
-                MoveKind::Standard
-            } else {
-                MoveKind::Branch
-            });
+            return Some(
+                if from.timeline_id == to.timeline_id && from.time == to.time {
+                    MoveKind::Standard
+                } else {
+                    MoveKind::Branch
+                },
+            );
         }
 
         self.pawn_move_kind(piece, from, to, delta)
     }
 
-    fn piece_attacks(
+    pub(crate) fn piece_attacks(
         &self,
         piece: Piece,
         from: Position,
@@ -451,28 +466,22 @@ impl Game {
         }
     }
 
-    fn is_royal_piece(piece_type: PieceType) -> bool {
+    pub(crate) fn is_royal_piece(piece_type: PieceType) -> bool {
         matches!(piece_type, PieceType::King | PieceType::RoyalQueen)
     }
 
-    fn is_pawn_capture(piece: Piece, delta: Delta) -> bool {
+    pub(crate) fn is_pawn_capture(piece: Piece, delta: Delta) -> bool {
         let forward = if piece.color == Color::White { 1 } else { -1 };
         let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
         (delta.x.abs() == 1 && delta.y == forward && delta.t == 0 && delta.l == 0)
-            || (delta.t.abs() == 1
-                && delta.l == timeline_forward
-                && delta.x == 0
-                && delta.y == 0)
+            || (delta.t.abs() == 1 && delta.l == timeline_forward && delta.x == 0 && delta.y == 0)
     }
 
-    fn is_brawn_capture(piece: Piece, delta: Delta) -> bool {
+    pub(crate) fn is_brawn_capture(piece: Piece, delta: Delta) -> bool {
         let forward = if piece.color == Color::White { 1 } else { -1 };
         let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
         let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
-        let non_zero = distances
-            .iter()
-            .filter(|distance| **distance > 0)
-            .count();
+        let non_zero = distances.iter().filter(|distance| **distance > 0).count();
 
         non_zero >= 2
             && distances.iter().all(|distance| *distance <= 1)
@@ -481,42 +490,42 @@ impl Game {
             && delta.l != -timeline_forward
     }
 
-    fn is_knight_move(mut distances: [i32; 4]) -> bool {
+    pub(crate) fn is_knight_move(mut distances: [i32; 4]) -> bool {
         distances.sort_by(|a, b| b.cmp(a));
         distances[0] == 2 && distances[1] == 1 && distances[2] == 0 && distances[3] == 0
     }
 
-    fn is_king_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_king_move(non_zero: &[i32]) -> bool {
         non_zero.iter().all(|distance| *distance == 1)
     }
 
-    fn is_rook_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_rook_move(non_zero: &[i32]) -> bool {
         non_zero.len() == 1
     }
 
-    fn is_bishop_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_bishop_move(non_zero: &[i32]) -> bool {
         non_zero.len() == 2 && Self::same_distance(non_zero)
     }
 
-    fn is_unicorn_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_unicorn_move(non_zero: &[i32]) -> bool {
         non_zero.len() == 3 && Self::same_distance(non_zero)
     }
 
-    fn is_dragon_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_dragon_move(non_zero: &[i32]) -> bool {
         non_zero.len() == 4 && Self::same_distance(non_zero)
     }
 
-    fn is_queen_move(non_zero: &[i32]) -> bool {
+    pub(crate) fn is_queen_move(non_zero: &[i32]) -> bool {
         !non_zero.is_empty() && Self::same_distance(non_zero)
     }
 
-    fn same_distance(non_zero: &[i32]) -> bool {
+    pub(crate) fn same_distance(non_zero: &[i32]) -> bool {
         non_zero
             .first()
             .is_some_and(|distance| non_zero.iter().all(|other| other == distance))
     }
 
-    fn non_zero_distances(distances: [i32; 4]) -> ([i32; 4], usize) {
+    pub(crate) fn non_zero_distances(distances: [i32; 4]) -> ([i32; 4], usize) {
         let mut non_zero = [0; 4];
         let mut len = 0;
         for distance in distances {
@@ -528,7 +537,7 @@ impl Game {
         (non_zero, len)
     }
 
-    fn castle_kind(
+    pub(crate) fn castle_kind(
         &self,
         piece: Piece,
         from: Position,
@@ -594,7 +603,7 @@ impl Game {
         })
     }
 
-    fn is_path_clear(&self, piece: Piece, from: Position, to: Position) -> bool {
+    pub(crate) fn is_path_clear(&self, piece: Piece, from: Position, to: Position) -> bool {
         // Path walking follows timeline rows rather than ids. Ids encode
         // ownership/notation; rows encode geometry.
         let delta = self.movement_delta(from, to);
@@ -644,7 +653,7 @@ impl Game {
         true
     }
 
-    fn axis_delta(&self, from: Position, to: Position) -> Delta {
+    pub(crate) fn axis_delta(&self, from: Position, to: Position) -> Delta {
         let from_row = self
             .timeline(from.timeline_id)
             .map_or(0, |timeline| timeline.row);
@@ -660,7 +669,7 @@ impl Game {
         }
     }
 
-    fn movement_delta(&self, from: Position, to: Position) -> Delta {
+    pub(crate) fn movement_delta(&self, from: Position, to: Position) -> Delta {
         let mut delta = self.axis_delta(from, to);
         // Cross-board time movement advances every other board because legal
         // destinations are restricted to boards where the mover was to play.

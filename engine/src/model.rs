@@ -2,7 +2,7 @@
 // rules, AI search, and training harness all explore speculative states by
 // copying board snapshots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Color {
+pub(crate) enum Color {
     White,
     Black,
 }
@@ -12,7 +12,7 @@ enum Color {
 // one shared representation before variant setup is exposed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
-enum PieceType {
+pub(crate) enum PieceType {
     King,
     CommonKing,
     Queen,
@@ -28,28 +28,28 @@ enum PieceType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Piece {
-    color: Color,
-    piece_type: PieceType,
+pub(crate) struct Piece {
+    pub(crate) color: Color,
+    pub(crate) piece_type: PieceType,
 }
 
 // Board snapshots are append-only history. Moves create a later snapshot rather
 // than mutating the old one, which is what makes historical time-travel targets
 // available.
 #[derive(Clone)]
-struct BoardSnapshot {
-    time: i32,
-    side_to_move: Color,
-    board: [[Option<Piece>; 8]; 8],
-    castling: CastlingRights,
-    en_passant: Option<EnPassant>,
-    origin: Origin,
+pub(crate) struct BoardSnapshot {
+    pub(crate) time: i32,
+    pub(crate) side_to_move: Color,
+    pub(crate) board: [[Option<Piece>; 8]; 8],
+    pub(crate) castling: CastlingRights,
+    pub(crate) en_passant: Option<EnPassant>,
+    pub(crate) origin: Origin,
 }
 
 // Render/debug metadata explaining how a snapshot came to exist. The rules never
 // depend on Origin.
 #[derive(Clone)]
-enum Origin {
+pub(crate) enum Origin {
     None,
     #[allow(dead_code)]
     Move {
@@ -63,19 +63,19 @@ enum Origin {
 // timelines count upward, and black-made timelines count downward. row is the
 // geometric L-axis used by movement and rendering.
 #[derive(Clone)]
-struct Timeline {
-    id: i32,
-    row: i32,
+pub(crate) struct Timeline {
+    pub(crate) id: i32,
+    pub(crate) row: i32,
     #[allow(dead_code)]
-    label: String,
-    owner: TimelineOwner,
-    boards: Vec<BoardSnapshot>,
+    pub(crate) label: String,
+    pub(crate) owner: TimelineOwner,
+    pub(crate) boards: Vec<BoardSnapshot>,
 }
 
 // Owned timelines can become inactive when one side has branched more than the
 // opponent can answer. Neutral T0 always remains active.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum TimelineOwner {
+pub(crate) enum TimelineOwner {
     Neutral,
     White,
     Black,
@@ -84,74 +84,85 @@ enum TimelineOwner {
 // A position identifies one square on one board on one timeline. The frontend
 // serializes the same logical shape as timelineId/time/x/y.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Position {
-    timeline_id: i32,
-    time: i32,
-    x: i32,
-    y: i32,
+pub(crate) struct Position {
+    pub(crate) timeline_id: i32,
+    pub(crate) time: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
 }
 
 // Game is the authoritative engine state. staged_turn holds undo checkpoints for
 // the current unsubmitted turn; the frontend separately tracks submitted turns
 // for replay and multiplayer sync.
 #[derive(Clone)]
-struct Game {
-    turn: Color,
-    timelines: Vec<Timeline>,
-    next_timeline_id: i32,
-    next_black_timeline_id: i32,
-    staged_turn: Vec<GameCheckpoint>,
-    staged_notation: Vec<String>,
-    staged_royal_capture_by: Option<Color>,
-    last_message: String,
+pub(crate) struct Game {
+    pub(crate) turn: Color,
+    pub(crate) timelines: Vec<Timeline>,
+    pub(crate) next_timeline_id: i32,
+    pub(crate) next_black_timeline_id: i32,
+    pub(crate) staged_turn: Vec<GameCheckpoint>,
+    pub(crate) staged_notation: Vec<String>,
+    pub(crate) staged_royal_capture_by: Option<Color>,
+    pub(crate) last_message: String,
+    pub(crate) position_hash: u64,
 }
 
 // Whole-state checkpoints are simpler and safer than trying to reverse 5D moves.
 // Turns are short enough that copying the visible game state is acceptable.
 #[derive(Clone)]
 #[allow(dead_code)]
-struct GameCheckpoint {
-    turn: Color,
-    timelines: Vec<Timeline>,
-    next_timeline_id: i32,
-    next_black_timeline_id: i32,
-    staged_notation: Vec<String>,
-    staged_royal_capture_by: Option<Color>,
-    last_message: String,
+pub(crate) struct GameCheckpoint {
+    pub(crate) turn: Color,
+    pub(crate) timelines: Vec<Timeline>,
+    pub(crate) next_timeline_id: i32,
+    pub(crate) next_black_timeline_id: i32,
+    pub(crate) staged_notation: Vec<String>,
+    pub(crate) staged_royal_capture_by: Option<Color>,
+    pub(crate) last_message: String,
+    pub(crate) position_hash: u64,
+}
+
+pub(crate) struct SearchUndo {
+    pub(crate) timeline_count: usize,
+    pub(crate) board_lengths: Vec<(i32, usize)>,
+    pub(crate) next_timeline_id: i32,
+    pub(crate) next_black_timeline_id: i32,
+    pub(crate) staged_royal_capture_by: Option<Color>,
+    pub(crate) position_hash: u64,
 }
 
 // Castling rights belong to a snapshot and are carried forward on each new board.
 // Moving a king/rook, or capturing a rook on its home square, clears rights.
 #[derive(Clone, Copy)]
-struct CastlingRights {
-    white_kingside: bool,
-    white_queenside: bool,
-    black_kingside: bool,
-    black_queenside: bool,
+pub(crate) struct CastlingRights {
+    pub(crate) white_kingside: bool,
+    pub(crate) white_queenside: bool,
+    pub(crate) black_kingside: bool,
+    pub(crate) black_queenside: bool,
 }
 
 // En-passant is snapshot-local because the capture is legal only on the next
 // viable board for that side.
 #[derive(Clone, Copy)]
-struct EnPassant {
-    x: i32,
-    y: i32,
-    captured_x: i32,
-    captured_y: i32,
+pub(crate) struct EnPassant {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) captured_x: i32,
+    pub(crate) captured_y: i32,
 }
 
 // Movement delta across file, rank, time, and timeline row.
 #[derive(Clone, Copy)]
-struct Delta {
-    x: i32,
-    y: i32,
-    t: i32,
-    l: i32,
+pub(crate) struct Delta {
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) t: i32,
+    pub(crate) l: i32,
 }
 
 // Side effects that from/to alone cannot describe.
 #[derive(Clone, Copy)]
-enum MoveKind {
+pub(crate) enum MoveKind {
     Standard,
     Branch,
     Castle { rook_from_x: i32, rook_to_x: i32 },

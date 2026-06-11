@@ -1,15 +1,17 @@
+use crate::*;
+
 #[allow(dead_code)]
-struct ParsedMove {
-    from: Position,
-    to: Position,
-    piece: char,
-    captured: Option<char>,
-    branch_timeline_id: Option<i32>,
+pub(crate) struct ParsedMove {
+    pub(crate) from: Position,
+    pub(crate) to: Position,
+    pub(crate) piece: char,
+    pub(crate) captured: Option<char>,
+    pub(crate) branch_timeline_id: Option<i32>,
 }
 
 #[allow(dead_code)]
 impl ParsedMove {
-    fn parse(text: &str) -> Result<Self, String> {
+    pub(crate) fn parse(text: &str) -> Result<Self, String> {
         let chars: Vec<char> = text.trim().chars().collect();
         let mut index = 0;
         let from_time = parse_prefixed_i32(&chars, &mut index, 'T')?;
@@ -81,7 +83,7 @@ impl ParsedMove {
 }
 
 #[allow(dead_code)]
-fn strip_notation_comments(line: &str) -> String {
+pub(crate) fn strip_notation_comments(line: &str) -> String {
     let mut output = String::new();
     let mut in_comment = false;
     for character in line.chars() {
@@ -96,7 +98,11 @@ fn strip_notation_comments(line: &str) -> String {
 }
 
 #[allow(dead_code)]
-fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result<i32, String> {
+pub(crate) fn parse_prefixed_i32(
+    chars: &[char],
+    index: &mut usize,
+    prefix: char,
+) -> Result<i32, String> {
     if chars.get(*index) != Some(&prefix) {
         return Err(format!("Expected `{prefix}`"));
     }
@@ -105,7 +111,10 @@ fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result
     if chars.get(*index) == Some(&'-') {
         *index += 1;
     }
-    while chars.get(*index).is_some_and(|character| character.is_ascii_digit()) {
+    while chars
+        .get(*index)
+        .is_some_and(|character| character.is_ascii_digit())
+    {
         *index += 1;
     }
     if *index == start || *index == start + 1 && chars.get(start) == Some(&'-') {
@@ -119,10 +128,14 @@ fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result
 }
 
 #[allow(dead_code)]
-fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String> {
-    let file = *chars.get(*index).ok_or_else(|| "Missing file".to_string())?;
+pub(crate) fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String> {
+    let file = *chars
+        .get(*index)
+        .ok_or_else(|| "Missing file".to_string())?;
     *index += 1;
-    let rank = *chars.get(*index).ok_or_else(|| "Missing rank".to_string())?;
+    let rank = *chars
+        .get(*index)
+        .ok_or_else(|| "Missing rank".to_string())?;
     *index += 1;
     let x = match file {
         'a' => 0,
@@ -144,7 +157,7 @@ fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String>
 }
 
 #[allow(dead_code)]
-fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
+pub(crate) fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
     match symbol.to_ascii_uppercase() {
         'K' => Some(PieceType::King),
         'N' => Some(PieceType::Knight),

@@ -1,24 +1,18 @@
-struct TurnPlanBuildContext<'a> {
-    color: Color,
-    weights: &'a EvalWeights,
-    deadline: Option<SearchInstant>,
-    move_limit: usize,
-    capture_sanity: bool,
-}
+use super::*;
 
 impl Game {
     #[allow(dead_code)]
-    fn ai_turn_json(&self, max_depth: i32, max_nodes: i32) -> String {
+    pub(crate) fn ai_turn_json(&self, max_depth: i32, max_nodes: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, None).to_json()
     }
 
     #[allow(dead_code)]
-    fn ai_turn_timed_json(&self, max_depth: i32, max_nodes: i32, millis: i32) -> String {
+    pub(crate) fn ai_turn_timed_json(&self, max_depth: i32, max_nodes: i32, millis: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, search_deadline(millis))
             .to_json()
     }
 
-    fn best_ai_turn(
+    pub(crate) fn best_ai_turn(
         &self,
         max_depth: i32,
         max_nodes: i32,
@@ -34,7 +28,7 @@ impl Game {
         .0
     }
 
-    fn best_ai_turn_with_options(
+    pub(crate) fn best_ai_turn_with_options(
         &self,
         max_depth: i32,
         max_nodes: i32,
@@ -52,7 +46,7 @@ impl Game {
         )
     }
 
-    fn best_ai_turn_with_value_evaluator(
+    pub(crate) fn best_ai_turn_with_value_evaluator(
         &self,
         max_depth: i32,
         max_nodes: i32,
@@ -68,7 +62,9 @@ impl Game {
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
         context.options = options;
         context.evaluator = evaluator;
-        context.killers.resize((depth as usize).saturating_add(3), [None, None]);
+        context
+            .killers
+            .resize((depth as usize).saturating_add(3), [None, None]);
 
         // Check evasions are tactically forced and should not wait behind the
         // full multiverse turn planner. In heavily branched positions the full
@@ -107,7 +103,7 @@ impl Game {
         // limit is hit before the requested depth completes.
         let mut previous_score = 0;
         for current_depth in 1..=depth {
-            let window = if context.options.aspiration_windows && current_depth > 1 {
+            let window = if context.use_aspiration_windows() && current_depth > 1 {
                 Some((
                     previous_score - ASPIRATION_WINDOW,
                     previous_score + ASPIRATION_WINDOW,
@@ -132,9 +128,15 @@ impl Game {
         }
 
         if best.status == "noLegalTurn" {
-            let mut fallback = SearchContext::new(weights, self.turn, nodes.max(MAX_TURN_PLANS), None);
+            let mut fallback =
+                SearchContext::new(weights, self.turn, nodes.max(MAX_TURN_PLANS), None);
             fallback.options = SearchOptions::minimal();
-            if let Some(plan) = self.legal_turn_plans_with_context(&mut fallback).into_iter().next() {
+            let plan_limit = fallback.root_plan_limit();
+            if let Some(plan) = self
+                .legal_turn_plans_with_context(&mut fallback, plan_limit)
+                .into_iter()
+                .next()
+            {
                 best = AiSearchResult {
                     moves: plan.moves,
                     score: plan.score_hint,
@@ -159,7 +161,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn best_ai_turn_partitioned(
+    pub(crate) fn best_ai_turn_partitioned(
         &self,
         max_depth: i32,
         max_nodes: i32,
@@ -178,7 +180,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn best_ai_turn_partitioned_with_value_evaluator(
+    pub(crate) fn best_ai_turn_partitioned_with_value_evaluator(
         &self,
         max_depth: i32,
         max_nodes: i32,
@@ -193,7 +195,9 @@ impl Game {
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
         context.options = SearchOptions::optimized();
         context.evaluator = evaluator;
-        context.killers.resize((depth as usize).saturating_add(3), [None, None]);
+        context
+            .killers
+            .resize((depth as usize).saturating_add(3), [None, None]);
 
         if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
             return AiSearchResult {
@@ -217,7 +221,7 @@ impl Game {
         };
         let mut previous_score = 0;
         for current_depth in 1..=depth {
-            let window = if context.options.aspiration_windows && current_depth > 1 {
+            let window = if context.use_aspiration_windows() && current_depth > 1 {
                 Some((
                     previous_score - ASPIRATION_WINDOW,
                     previous_score + ASPIRATION_WINDOW,
@@ -247,7 +251,7 @@ impl Game {
         best
     }
 
-    fn search_root(
+    pub(crate) fn search_root(
         &self,
         depth: i32,
         context: &mut SearchContext,
@@ -256,42 +260,18 @@ impl Game {
         self.search_root_partitioned(depth, context, window, None)
     }
 
-    fn search_root_partitioned(
+    pub(crate) fn search_root_partitioned(
         &self,
         depth: i32,
         context: &mut SearchContext,
         window: Option<(i32, i32)>,
         partition: Option<(usize, usize)>,
     ) -> Option<(TurnPlan, i32)> {
-        if context.expired() {
-            return None;
-        }
-
-        let mut plans = self.legal_turn_plans_with_context(context);
-        if let Some((partition_index, partition_count)) = partition {
-            plans = plans
-                .into_iter()
-                .enumerate()
-                .filter_map(|(index, plan)| {
-                    (index % partition_count == partition_index).then_some(plan)
-                })
-                .collect();
-        }
-        let (mut alpha, beta) = window.unwrap_or((-CHECKMATE_SCORE * 2, CHECKMATE_SCORE * 2));
-        let mut best = self.search_root_with_bounds(depth, context, plans.clone(), alpha, beta);
-
-        if let (Some((_, score)), Some((low, high))) = (&best, window) {
-            if *score <= low || *score >= high {
-                context.stats.aspiration_researches += 1;
-                alpha = -CHECKMATE_SCORE * 2;
-                best = self.search_root_with_bounds(depth, context, plans, alpha, CHECKMATE_SCORE * 2);
-            }
-        }
-
-        best
+        self.search_root_staged(depth, context, window, partition)
     }
 
-    fn search_root_with_bounds(
+    #[allow(dead_code)]
+    pub(crate) fn search_root_with_bounds(
         &self,
         depth: i32,
         context: &mut SearchContext,
@@ -305,9 +285,13 @@ impl Game {
             if context.exhausted() {
                 break;
             }
-            let score = plan
-                .game
-                .alpha_beta(depth - 1, alpha, beta, context.root_color, context);
+            if !context.charge_clone() {
+                break;
+            }
+            let Some(child) = self.apply_turn_plan_for_search(&plan) else {
+                continue;
+            };
+            let score = child.alpha_beta(depth - 1, alpha, beta, context.root_color, context);
             // Deterministic tie-breaking matters for repeatable self-play and
             // stable worker output in the frontend.
             let replace = best.as_ref().is_none_or(|(current, current_score)| {
@@ -323,7 +307,8 @@ impl Game {
         best
     }
 
-    fn alpha_beta(
+    #[allow(dead_code)]
+    pub(crate) fn alpha_beta_plan_based(
         &self,
         depth: i32,
         mut alpha: i32,
@@ -337,7 +322,7 @@ impl Game {
             return score;
         }
         if context.exhausted() {
-            return context.evaluator.evaluate(self, maximizing_color, &context.weights);
+            return context.evaluate(self, maximizing_color);
         }
 
         if depth <= 0 {
@@ -346,48 +331,51 @@ impl Game {
                 CHECKMATE_SCORE * 2,
                 maximizing_color,
                 context,
-                MAX_QUIESCENCE_DEPTH,
+                context.quiescence_depth(),
             );
         }
 
-        let key = self.search_key(depth, maximizing_color);
+        let original_alpha = alpha;
+        let original_beta = beta;
+        let key = self.search_key(maximizing_color);
         if let Some(entry) = context.table.get(&key) {
             if entry.depth >= depth {
-                context.stats.tt_hits += 1;
-                return entry.score;
+                let usable = match entry.bound {
+                    SearchBound::Exact => true,
+                    SearchBound::Lower => entry.score >= beta,
+                    SearchBound::Upper => entry.score <= alpha,
+                };
+                if usable {
+                    context.stats.tt_hits += 1;
+                    return entry.score;
+                }
             }
         }
 
-        let plans = self.legal_turn_plans_with_context(context);
+        let plan_limit = context.child_plan_limit();
+        let plans = self.legal_turn_plans_with_context(context, plan_limit);
         if plans.is_empty() {
-            return context.evaluator.evaluate(self, maximizing_color, &context.weights);
+            return context.evaluate(self, maximizing_color);
         }
 
         let result = if self.turn == maximizing_color {
             let mut best = -CHECKMATE_SCORE * 2;
             let mut best_move = None;
             for (index, plan) in plans.iter().enumerate() {
-                let child_depth = self.child_search_depth(depth, index, plan, context);
+                if !context.charge_clone() {
+                    break;
+                }
+                let Some(child) = self.apply_turn_plan_for_search(plan) else {
+                    continue;
+                };
+                let child_depth = self.child_search_depth(depth, index, plan, &child, context);
                 let mut score = if index > 0 {
-                    plan.game.alpha_beta(
-                        child_depth,
-                        alpha,
-                        alpha + 1,
-                        maximizing_color,
-                        context,
-                    )
+                    child.alpha_beta(child_depth, alpha, alpha + 1, maximizing_color, context)
                 } else {
-                    plan.game
-                        .alpha_beta(child_depth, alpha, beta, maximizing_color, context)
+                    child.alpha_beta(child_depth, alpha, beta, maximizing_color, context)
                 };
                 if (child_depth < depth - 1 || index > 0) && score > alpha && score < beta {
-                    score = plan.game.alpha_beta(
-                        depth - 1,
-                        alpha,
-                        beta,
-                        maximizing_color,
-                        context,
-                    );
+                    score = child.alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
                 }
                 if score > best {
                     best_move = plan.moves.first().copied();
@@ -399,11 +387,19 @@ impl Game {
                     break;
                 }
             }
+            let bound = if best <= original_alpha {
+                SearchBound::Upper
+            } else if best >= original_beta {
+                SearchBound::Lower
+            } else {
+                SearchBound::Exact
+            };
             context.table.insert(
                 key,
                 SearchEntry {
                     depth,
                     score: best,
+                    bound,
                     best_move,
                 },
             );
@@ -412,27 +408,20 @@ impl Game {
             let mut best = CHECKMATE_SCORE * 2;
             let mut best_move = None;
             for (index, plan) in plans.iter().enumerate() {
-                let child_depth = self.child_search_depth(depth, index, plan, context);
+                if !context.charge_clone() {
+                    break;
+                }
+                let Some(child) = self.apply_turn_plan_for_search(plan) else {
+                    continue;
+                };
+                let child_depth = self.child_search_depth(depth, index, plan, &child, context);
                 let mut score = if index > 0 {
-                    plan.game.alpha_beta(
-                        child_depth,
-                        beta - 1,
-                        beta,
-                        maximizing_color,
-                        context,
-                    )
+                    child.alpha_beta(child_depth, beta - 1, beta, maximizing_color, context)
                 } else {
-                    plan.game
-                        .alpha_beta(child_depth, alpha, beta, maximizing_color, context)
+                    child.alpha_beta(child_depth, alpha, beta, maximizing_color, context)
                 };
                 if (child_depth < depth - 1 || index > 0) && score > alpha && score < beta {
-                    score = plan.game.alpha_beta(
-                        depth - 1,
-                        alpha,
-                        beta,
-                        maximizing_color,
-                        context,
-                    );
+                    score = child.alpha_beta(depth - 1, alpha, beta, maximizing_color, context);
                 }
                 if score < best {
                     best_move = plan.moves.first().copied();
@@ -444,11 +433,19 @@ impl Game {
                     break;
                 }
             }
+            let bound = if best <= original_alpha {
+                SearchBound::Upper
+            } else if best >= original_beta {
+                SearchBound::Lower
+            } else {
+                SearchBound::Exact
+            };
             context.table.insert(
                 key,
                 SearchEntry {
                     depth,
                     score: best,
+                    bound,
                     best_move,
                 },
             );
@@ -457,7 +454,7 @@ impl Game {
         result
     }
 
-    fn quiescence(
+    pub(crate) fn quiescence(
         &self,
         mut alpha: i32,
         mut beta: i32,
@@ -468,7 +465,7 @@ impl Game {
         if let Some(score) = self.terminal_score(maximizing_color) {
             return score;
         }
-        let stand_pat = context.evaluator.evaluate(self, maximizing_color, &context.weights);
+        let stand_pat = context.evaluate(self, maximizing_color);
         if depth <= 0 || context.exhausted() {
             return stand_pat;
         }
@@ -479,9 +476,10 @@ impl Game {
             self.legal_single_moves_until(&context.weights, context.deadline)
                 .into_iter()
                 .filter(|movement| self.is_forcing_move(movement, &weights, context))
-                .take(6)
+                .take(MAX_QUIESCENCE_MOVES)
                 .collect()
         };
+        context.charge_move_generation(moves.len());
 
         if self.turn == maximizing_color {
             if stand_pat >= beta {
@@ -494,7 +492,9 @@ impl Game {
                 if context.exhausted() {
                     break;
                 }
-                context.nodes += 1;
+                if !context.charge_clone() {
+                    break;
+                }
                 let mut next = self.clone_for_search();
                 if !next.apply_move_for_search(movement.from, movement.to) {
                     continue;
@@ -518,7 +518,9 @@ impl Game {
                 if context.exhausted() {
                     break;
                 }
-                context.nodes += 1;
+                if !context.charge_clone() {
+                    break;
+                }
                 let mut next = self.clone_for_search();
                 if !next.apply_move_for_search(movement.from, movement.to) {
                     continue;
@@ -535,11 +537,11 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn legal_single_moves(&self, weights: &EvalWeights) -> Vec<MoveStep> {
+    pub(crate) fn legal_single_moves(&self, weights: &EvalWeights) -> Vec<MoveStep> {
         self.legal_single_moves_until(weights, None)
     }
 
-    fn legal_single_moves_until(
+    pub(crate) fn legal_single_moves_until(
         &self,
         weights: &EvalWeights,
         deadline: Option<SearchInstant>,
@@ -565,35 +567,20 @@ impl Game {
                             x,
                             y,
                         };
-                        if !self
-                            .piece_at(from)
-                            .is_some_and(|piece| piece.color == self.turn)
-                        {
+                        let Some(piece) =
+                            self.piece_at(from).filter(|piece| piece.color == self.turn)
+                        else {
                             continue;
-                        }
-                        for target_timeline in &self.timelines {
-                            for target_board in &target_timeline.boards {
-                                if deadline_expired(deadline) {
-                                    return moves;
-                                }
-                                for target_y in 0..8 {
-                                    for target_x in 0..8 {
-                                        let to = Position {
-                                            timeline_id: target_timeline.id,
-                                            time: target_board.time,
-                                            x: target_x,
-                                            y: target_y,
-                                        };
-                                        let Some((piece, move_kind)) =
-                                            self.legal_move_kind(from, to)
-                                        else {
-                                            continue;
-                                        };
-                                        if self.allows_search_move(from, to, piece, move_kind) {
-                                            moves.push(MoveStep { from, to });
-                                        }
-                                    }
-                                }
+                        };
+                        for to in self.piece_candidate_destinations(from, piece) {
+                            if deadline_expired(deadline) {
+                                return self.order_moves(moves, weights);
+                            }
+                            let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                                continue;
+                            };
+                            if self.allows_search_move(from, to, piece, move_kind) {
+                                moves.push(MoveStep { from, to });
                             }
                         }
                     }
@@ -604,21 +591,266 @@ impl Game {
         // Order likely tactical/progress moves first using cheap facts only.
         // Deep tactical probes are reserved for the small set of moves that
         // survive turn-plan construction.
-        moves.sort_by(|left, right| {
-            self.cheap_move_order_score(right, weights)
-                .cmp(&self.cheap_move_order_score(left, weights))
-                .then_with(|| Self::move_cmp(left, right))
-        });
-        moves
+        self.order_moves(moves, weights)
     }
 
-    fn forcing_moves_until(
+    pub(crate) fn legal_single_moves_for_board_until(
+        &self,
+        timeline_id: i32,
+        time: i32,
+        weights: &EvalWeights,
+        deadline: Option<SearchInstant>,
+    ) -> Vec<MoveStep> {
+        let Some(board) = self.board(timeline_id, time) else {
+            return Vec::new();
+        };
+        if !self.is_active_timeline(timeline_id)
+            || !self.is_latest_board(timeline_id, time)
+            || board.side_to_move != self.turn
+            || self.present_time() != Some(time)
+        {
+            return Vec::new();
+        }
+
+        let mut moves = Vec::new();
+        for y in 0..8 {
+            for x in 0..8 {
+                let from = Position {
+                    timeline_id,
+                    time,
+                    x,
+                    y,
+                };
+                let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
+                else {
+                    continue;
+                };
+                for to in self.piece_candidate_destinations(from, piece) {
+                    if deadline_expired(deadline) {
+                        return self.order_moves(moves, weights);
+                    }
+                    let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                        continue;
+                    };
+                    if self.allows_search_move(from, to, piece, move_kind) {
+                        moves.push(MoveStep { from, to });
+                    }
+                }
+            }
+        }
+        self.order_moves(moves, weights)
+    }
+
+    pub(crate) fn order_moves(&self, moves: Vec<MoveStep>, weights: &EvalWeights) -> Vec<MoveStep> {
+        let mut scored: Vec<(i32, MoveStep)> = moves
+            .into_iter()
+            .map(|movement| (self.cheap_move_order_score(&movement, weights), movement))
+            .collect();
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| Self::move_cmp(left, right))
+        });
+        scored.into_iter().map(|(_, movement)| movement).collect()
+    }
+
+    pub(crate) fn piece_candidate_destinations(
+        &self,
+        from: Position,
+        piece: Piece,
+    ) -> Vec<Position> {
+        let mut targets = Vec::new();
+        match piece.piece_type {
+            PieceType::Pawn => self.push_pawn_candidates(from, piece.color, false, &mut targets),
+            PieceType::Brawn => self.push_pawn_candidates(from, piece.color, true, &mut targets),
+            PieceType::Knight => {
+                for long_axis in 0..4 {
+                    for short_axis in 0..4 {
+                        if long_axis == short_axis {
+                            continue;
+                        }
+                        for long_sign in [-1, 1] {
+                            for short_sign in [-1, 1] {
+                                let mut offset = [0; 4];
+                                offset[long_axis] = long_sign * 2;
+                                offset[short_axis] = short_sign;
+                                self.push_offset_target(from, offset, &mut targets);
+                            }
+                        }
+                    }
+                }
+            }
+            PieceType::King | PieceType::CommonKing => {
+                self.push_direction_targets(from, 1, 4, 1, &mut targets);
+                if piece.piece_type == PieceType::King {
+                    self.push_offset_target(from, [2, 0, 0, 0], &mut targets);
+                    self.push_offset_target(from, [-2, 0, 0, 0], &mut targets);
+                }
+            }
+            PieceType::Rook => self.push_slider_targets(from, 1, 1, &mut targets),
+            PieceType::Bishop => self.push_slider_targets(from, 2, 2, &mut targets),
+            PieceType::Unicorn => self.push_slider_targets(from, 3, 3, &mut targets),
+            PieceType::Dragon => self.push_slider_targets(from, 4, 4, &mut targets),
+            PieceType::Princess => self.push_slider_targets(from, 1, 2, &mut targets),
+            PieceType::Queen | PieceType::RoyalQueen => {
+                self.push_slider_targets(from, 1, 4, &mut targets)
+            }
+        }
+        targets.sort_by_key(|position| position_key(*position));
+        targets.dedup();
+        targets
+    }
+
+    pub(crate) fn push_pawn_candidates(
+        &self,
+        from: Position,
+        color: Color,
+        brawn: bool,
+        targets: &mut Vec<Position>,
+    ) {
+        let forward = if color == Color::White { 1 } else { -1 };
+        for offset in [
+            [0, forward, 0, 0],
+            [0, forward * 2, 0, 0],
+            [-1, forward, 0, 0],
+            [1, forward, 0, 0],
+            [0, 0, 0, forward],
+            [0, 0, 0, forward * 2],
+            [0, 0, -1, forward],
+            [0, 0, 1, forward],
+        ] {
+            self.push_offset_target(from, offset, targets);
+        }
+        if brawn {
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dt in -1..=1 {
+                        for dl in -1..=1 {
+                            let offset = [dx, dy, dt, dl];
+                            let changed = offset.iter().filter(|value| **value != 0).count();
+                            if changed >= 2
+                                && (dy == forward || dl == forward)
+                                && dy != -forward
+                                && dl != -forward
+                            {
+                                self.push_offset_target(from, offset, targets);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn push_slider_targets(
+        &self,
+        from: Position,
+        min_axes: usize,
+        max_axes: usize,
+        targets: &mut Vec<Position>,
+    ) {
+        self.push_direction_targets(
+            from,
+            min_axes,
+            max_axes,
+            self.max_ray_distance(from),
+            targets,
+        );
+    }
+
+    pub(crate) fn push_direction_targets(
+        &self,
+        from: Position,
+        min_axes: usize,
+        max_axes: usize,
+        max_distance: i32,
+        targets: &mut Vec<Position>,
+    ) {
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dt in -1..=1 {
+                    for dl in -1..=1 {
+                        let direction = [dx, dy, dt, dl];
+                        let axes = direction.iter().filter(|value| **value != 0).count();
+                        if axes < min_axes || axes > max_axes {
+                            continue;
+                        }
+                        for distance in 1..=max_distance {
+                            let offset = direction.map(|value| value * distance);
+                            if !self.push_offset_target(from, offset, targets) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn push_offset_target(
+        &self,
+        from: Position,
+        [dx, dy, dt, dl]: [i32; 4],
+        targets: &mut Vec<Position>,
+    ) -> bool {
+        let x = from.x + dx;
+        let y = from.y + dy;
+        if !Self::in_bounds(x, y) {
+            return false;
+        }
+        let from_row = self
+            .timeline(from.timeline_id)
+            .map_or(0, |timeline| timeline.row);
+        let Some(timeline) = self
+            .timelines
+            .iter()
+            .find(|timeline| timeline.row == from_row + dl)
+        else {
+            return false;
+        };
+        let time = from.time + dt * 2;
+        if self.board(timeline.id, time).is_none() {
+            return false;
+        }
+        targets.push(Position {
+            timeline_id: timeline.id,
+            time,
+            x,
+            y,
+        });
+        true
+    }
+
+    pub(crate) fn max_ray_distance(&self, from: Position) -> i32 {
+        let from_row = self
+            .timeline(from.timeline_id)
+            .map_or(0, |timeline| timeline.row);
+        self.timelines
+            .iter()
+            .flat_map(|timeline| {
+                timeline.boards.iter().map(move |board| {
+                    (timeline.row - from_row)
+                        .abs()
+                        .max((board.time - from.time).abs() / 2)
+                })
+            })
+            .max()
+            .unwrap_or(0)
+            .max(7)
+    }
+
+    pub(crate) fn forcing_moves_until(
         &self,
         weights: &EvalWeights,
         deadline: Option<SearchInstant>,
     ) -> Vec<MoveStep> {
         let mut moves = Vec::new();
-        for movement in self.legal_single_moves_until(weights, deadline) {
+        let Some((timeline_id, time)) = self.next_pending_board_key(self.turn) else {
+            return moves;
+        };
+        for movement in
+            self.legal_single_moves_for_board_until(timeline_id, time, weights, deadline)
+        {
             if deadline_expired(deadline) {
                 break;
             }
@@ -629,14 +861,14 @@ impl Game {
             {
                 moves.push(movement);
             }
-            if moves.len() >= 6 {
+            if moves.len() >= MAX_QUIESCENCE_MOVES {
                 break;
             }
         }
         moves
     }
 
-    fn cheap_move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
+    pub(crate) fn cheap_move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
         let mut score = 0;
         let is_branch = movement.from.timeline_id != movement.to.timeline_id
             || movement.from.time != movement.to.time;
@@ -659,67 +891,11 @@ impl Game {
         score
     }
 
-    fn move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
-        let mut score = 0;
-        let captures_piece = self.piece_at(movement.to).is_some();
-        if let Some(piece) = self.piece_at(movement.to) {
-            score += weights.piece_value(piece.piece_type) * 4;
-            if Self::is_royal_piece(piece.piece_type) {
-                score += CHECKMATE_SCORE / 4;
-            }
-        }
-        let is_branch = movement.from.timeline_id != movement.to.timeline_id
-            || movement.from.time != movement.to.time;
-        if is_branch {
-            score -= weights.branch_penalty;
-            if captures_piece {
-                score += weights.branch_attack;
-            }
-        }
-        if self
-            .present_board()
-            .is_some_and(|board| movement.from.time <= board.time)
-        {
-            score += weights.present_progress;
-        }
-        score += self.quiet_development_order_score(*movement, weights);
-        let should_probe_tactics = captures_piece || is_branch;
-        if self.move_creates_royal_capture_setup(*movement, weights) {
-            score += weights.royal_capture_setup;
-        }
-        if should_probe_tactics {
-            if let Some(piece) = self.piece_at(movement.from) {
-                let mut next = self.clone_for_search();
-                if next.apply_move_for_search(movement.from, movement.to) {
-                    if next.royal_capture_available(piece.color) {
-                        score += CHECKMATE_SCORE / 2;
-                    }
-                    score += next.royal_capture_setup_pressure_for_limited(piece.color, weights, 8);
-                    if next.is_in_check(piece.color.opposite()) {
-                        score += weights.check_bonus;
-                        if is_branch {
-                            score += weights.branch_attack;
-                        }
-                    }
-                    score += next.fork_pressure_for(piece.color, weights) / 2;
-                    score += next.forcing_pressure_for(piece.color, weights) / 2;
-                    score -= next.royal_safety_for(piece.color, weights).min(0).abs() / 2;
-                    let arrival = Position {
-                        timeline_id: movement.to.timeline_id,
-                        time: movement.to.time + 1,
-                        x: movement.to.x,
-                        y: movement.to.y,
-                    };
-                    if is_branch && next.attack_summary(arrival, piece.color).count >= 2 {
-                        score += weights.branch_attack;
-                    }
-                }
-            }
-        }
-        score
-    }
-
-    fn quiet_development_order_score(&self, movement: MoveStep, weights: &EvalWeights) -> i32 {
+    pub(crate) fn quiet_development_order_score(
+        &self,
+        movement: MoveStep,
+        weights: &EvalWeights,
+    ) -> i32 {
         if self.piece_at(movement.to).is_some() {
             return 0;
         }
@@ -760,7 +936,7 @@ impl Game {
         score
     }
 
-    fn move_creates_royal_capture_setup(
+    pub(crate) fn move_creates_royal_capture_setup(
         &self,
         movement: MoveStep,
         weights: &EvalWeights,
@@ -784,7 +960,7 @@ impl Game {
                     > current_corridor_pressure)
     }
 
-    fn submit_turn_for_search(&mut self) -> bool {
+    pub(crate) fn submit_turn_for_search(&mut self) -> bool {
         // Search mirrors user submission but returns a bool rather than writing a
         // user-facing status message.
         let Some(present_side) = self.present_board().map(|board| board.side_to_move) else {
@@ -801,7 +977,7 @@ impl Game {
         true
     }
 
-    fn apply_move_for_search(&mut self, from: Position, to: Position) -> bool {
+    pub(crate) fn apply_move_for_search(&mut self, from: Position, to: Position) -> bool {
         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
             return false;
         };
@@ -815,79 +991,85 @@ impl Game {
         true
     }
 
-    fn turn_plan_tactical_score(
+    pub(crate) fn make_search_move(&mut self, movement: MoveStep) -> Option<SearchUndo> {
+        let undo = SearchUndo {
+            timeline_count: self.timelines.len(),
+            board_lengths: self
+                .timelines
+                .iter()
+                .map(|timeline| (timeline.id, timeline.boards.len()))
+                .collect(),
+            next_timeline_id: self.next_timeline_id,
+            next_black_timeline_id: self.next_black_timeline_id,
+            staged_royal_capture_by: self.staged_royal_capture_by,
+            position_hash: self.position_hash,
+        };
+        self.apply_move_for_search(movement.from, movement.to)
+            .then_some(undo)
+    }
+
+    pub(crate) fn unmake_search_move(&mut self, undo: SearchUndo) {
+        self.timelines.truncate(undo.timeline_count);
+        for (timeline_id, board_len) in undo.board_lengths {
+            if let Some(timeline) = self.timeline_mut(timeline_id) {
+                timeline.boards.truncate(board_len);
+            }
+        }
+        self.next_timeline_id = undo.next_timeline_id;
+        self.next_black_timeline_id = undo.next_black_timeline_id;
+        self.staged_royal_capture_by = undo.staged_royal_capture_by;
+        self.position_hash = undo.position_hash;
+    }
+
+    pub(crate) fn apply_turn_plan_for_search(&self, plan: &TurnPlan) -> Option<Game> {
+        let mut game = self.clone_for_search();
+        for movement in &plan.moves {
+            if !game.apply_move_for_search(movement.from, movement.to) {
+                return None;
+            }
+        }
+        game.submit_turn_for_search().then_some(game)
+    }
+
+    pub(crate) fn turn_plan_tactical_score_from_result(
         &self,
+        result: &Game,
         moves: &[MoveStep],
         color: Color,
         weights: &EvalWeights,
     ) -> i32 {
-        let mut score = 0;
-        for movement in moves {
-            score += self.move_order_score(movement, weights);
-        }
-        let mut next = self.clone_for_search();
-        for movement in moves {
-            let _ = next.apply_move_for_search(movement.from, movement.to);
-        }
-        if next.is_in_check(color.opposite()) {
+        let mut score = moves
+            .first()
+            .map_or(0, |movement| self.cheap_move_order_score(movement, weights));
+        if result.is_in_check(color.opposite()) {
             score += weights.check_bonus;
         }
         score
     }
 
-    fn is_forcing_move(
+    pub(crate) fn is_forcing_move(
         &self,
         movement: &MoveStep,
-        weights: &EvalWeights,
-        context: &mut SearchContext,
+        _weights: &EvalWeights,
+        _context: &mut SearchContext,
     ) -> bool {
         self.piece_at(movement.to).is_some()
             || movement.from.timeline_id != movement.to.timeline_id
             || movement.from.time != movement.to.time
-            || {
-                context.stats.expensive_order_probes += 1;
-                self.move_order_score(movement, weights) >= weights.check_bonus
-            }
     }
 
-    fn search_key(&self, depth: i32, maximizing_color: Color) -> u64 {
-        let mut hash = mix64(0x8a5c_7d13_9e37_79b9);
-        hash_combine(&mut hash, depth as u64);
+    pub(crate) fn search_key(&self, maximizing_color: Color) -> u64 {
+        let mut hash = self.position_hash;
         hash_combine(&mut hash, color_hash(self.turn));
         hash_combine(&mut hash, color_hash(maximizing_color));
-        for timeline in &self.timelines {
-            hash_combine(&mut hash, timeline.id as u64);
-            hash_combine(&mut hash, timeline.row as u64);
-            hash_combine(&mut hash, owner_hash(timeline.owner));
-            hash_combine(&mut hash, self.is_active_timeline(timeline.id) as u64);
-            for board in &timeline.boards {
-                hash_combine(&mut hash, board.time as u64);
-                hash_combine(&mut hash, color_hash(board.side_to_move));
-                hash_combine(&mut hash, castling_hash(board.castling));
-                if let Some(en_passant) = board.en_passant {
-                    hash_combine(&mut hash, en_passant.x as u64);
-                    hash_combine(&mut hash, en_passant.y as u64);
-                    hash_combine(&mut hash, en_passant.captured_x as u64);
-                    hash_combine(&mut hash, en_passant.captured_y as u64);
-                }
-                for y in 0..8 {
-                    for x in 0..8 {
-                        if let Some(piece) = board.board[y][x] {
-                            hash_combine(&mut hash, piece_hash(piece));
-                            hash_combine(&mut hash, ((x as u64) << 3) | y as u64);
-                        }
-                    }
-                }
-            }
-        }
         hash
     }
 
-    fn turn_plan_cache_key(&self) -> u64 {
-        self.search_key(0, self.turn)
+    pub(crate) fn turn_plan_cache_key(&self) -> u64 {
+        self.search_key(self.turn)
     }
 
-    fn turn_plan_cmp(left: &TurnPlan, right: &TurnPlan) -> std::cmp::Ordering {
+    pub(crate) fn turn_plan_cmp(left: &TurnPlan, right: &TurnPlan) -> std::cmp::Ordering {
         left.moves.len().cmp(&right.moves.len()).then_with(|| {
             left.moves
                 .iter()
@@ -898,48 +1080,46 @@ impl Game {
         })
     }
 
-    fn move_cmp(left: &MoveStep, right: &MoveStep) -> std::cmp::Ordering {
+    pub(crate) fn move_cmp(left: &MoveStep, right: &MoveStep) -> std::cmp::Ordering {
         position_key(left.from)
             .cmp(&position_key(right.from))
             .then_with(|| position_key(left.to).cmp(&position_key(right.to)))
     }
 
-    fn child_search_depth(
+    pub(crate) fn child_search_depth(
         &self,
         depth: i32,
         index: usize,
         plan: &TurnPlan,
+        child: &Game,
         context: &mut SearchContext,
     ) -> i32 {
-        let mover = self.turn;
-        let creates_or_answers_royal_setup =
-            plan.game.royal_capture_available(mover)
-                || plan
-                    .game
-                    .royal_capture_setup_pressure_for_limited(mover, &context.weights, 12)
-                    > 0
-                || plan
-                    .game
-                    .temporal_royal_corridor_pressure_for(mover, &context.weights)
-                    > self.temporal_royal_corridor_pressure_for(mover, &context.weights)
-                || plan.game.royal_capture_setup_pressure_for_limited(
-                    mover.opposite(),
-                    &context.weights,
-                    12,
-                ) < self.royal_capture_setup_pressure_for_limited(
-                    mover.opposite(),
-                    &context.weights,
-                    12,
-                );
+        if !context.options.late_move_reduction {
+            return depth - 1;
+        }
 
-        let reduced = context.options.late_move_reduction
-            && depth > 2
+        let mover = self.turn;
+        let creates_or_answers_royal_setup = child.royal_capture_available(mover)
+            || child.royal_capture_setup_pressure_for_limited(mover, &context.weights, 12) > 0
+            || child.temporal_royal_corridor_pressure_for(mover, &context.weights)
+                > self.temporal_royal_corridor_pressure_for(mover, &context.weights)
+            || child.royal_capture_setup_pressure_for_limited(
+                mover.opposite(),
+                &context.weights,
+                12,
+            ) < self.royal_capture_setup_pressure_for_limited(
+                mover.opposite(),
+                &context.weights,
+                12,
+            );
+
+        let reduced = depth > 2
             && index >= LATE_MOVE_REDUCTION_AFTER
             && !creates_or_answers_royal_setup
             && plan.moves.iter().all(|movement| {
                 movement.from.timeline_id == movement.to.timeline_id
                     && movement.from.time == movement.to.time
-                    && plan.game.piece_at(movement.to).is_none()
+                    && child.piece_at(movement.to).is_none()
             });
 
         let base_depth = if reduced {

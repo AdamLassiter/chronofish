@@ -1,5 +1,10 @@
+use super::*;
+
 impl Game {
-    fn immediate_check_escape_plan(&self, context: &mut SearchContext) -> Option<TurnPlan> {
+    pub(crate) fn immediate_check_escape_plan(
+        &self,
+        context: &mut SearchContext,
+    ) -> Option<TurnPlan> {
         let color = self.turn;
         if !self.is_in_check(color) {
             return None;
@@ -16,7 +21,9 @@ impl Game {
             if context.exhausted() {
                 break;
             }
-            context.nodes += 1;
+            if !context.charge_clone() {
+                break;
+            }
 
             let mut next = self.clone_for_search();
             if !next.apply_move_for_search(movement.from, movement.to) {
@@ -31,11 +38,7 @@ impl Game {
 
             let score_hint =
                 self.check_escape_pre_score(movement, &context.weights) - moves.len() as i32;
-            let plan = TurnPlan {
-                moves,
-                game: next,
-                score_hint,
-            };
+            let plan = TurnPlan { moves, score_hint };
             let replace = best.as_ref().is_none_or(|current| {
                 plan.score_hint > current.score_hint
                     || plan.score_hint == current.score_hint
@@ -49,7 +52,7 @@ impl Game {
         best
     }
 
-    fn complete_present_turn_greedily(
+    pub(crate) fn complete_present_turn_greedily(
         &mut self,
         color: Color,
         moves: &mut Vec<MoveStep>,
@@ -76,7 +79,7 @@ impl Game {
         true
     }
 
-    fn first_present_legal_move(
+    pub(crate) fn first_present_legal_move(
         &self,
         color: Color,
         deadline: Option<SearchInstant>,
@@ -102,30 +105,19 @@ impl Game {
                         x,
                         y,
                     };
-                    if !self
-                        .piece_at(from)
-                        .is_some_and(|piece| piece.color == color)
-                    {
+                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == color)
+                    else {
                         continue;
-                    }
-                    for target_timeline in &self.timelines {
-                        for target_board in &target_timeline.boards {
-                            if deadline_expired(deadline) {
-                                return None;
-                            }
-                            for target_y in 0..8 {
-                                for target_x in 0..8 {
-                                    let to = Position {
-                                        timeline_id: target_timeline.id,
-                                        time: target_board.time,
-                                        x: target_x,
-                                        y: target_y,
-                                    };
-                                    if self.can_move_to(from, to) {
-                                        return Some(MoveStep { from, to });
-                                    }
-                                }
-                            }
+                    };
+                    for to in self.piece_candidate_destinations(from, piece) {
+                        if deadline_expired(deadline) {
+                            return None;
+                        }
+                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                            continue;
+                        };
+                        if self.allows_search_move(from, to, piece, move_kind) {
+                            return Some(MoveStep { from, to });
                         }
                     }
                 }
@@ -134,7 +126,7 @@ impl Game {
         None
     }
 
-    fn local_royal_escape_moves(
+    pub(crate) fn local_royal_escape_moves(
         &self,
         positions: &[Position],
         weights: &EvalWeights,
@@ -179,7 +171,7 @@ impl Game {
         moves
     }
 
-    fn check_escape_pre_score(&self, movement: MoveStep, weights: &EvalWeights) -> i32 {
+    pub(crate) fn check_escape_pre_score(&self, movement: MoveStep, weights: &EvalWeights) -> i32 {
         let mut score = 0;
         if let Some(piece) = self.piece_at(movement.from) {
             if Self::is_royal_piece(piece.piece_type) {
@@ -202,8 +194,12 @@ impl Game {
         score
     }
 
-    fn legal_turn_plans_with_context(&self, context: &mut SearchContext) -> Vec<TurnPlan> {
-        let cache_key = self.turn_plan_cache_key();
+    pub(crate) fn legal_turn_plans_with_context(
+        &self,
+        context: &mut SearchContext,
+        plan_limit: usize,
+    ) -> Vec<TurnPlan> {
+        let cache_key = self.turn_plan_cache_key() ^ mix64(plan_limit as u64);
         if context.options.turn_plan_cache {
             if let Some(plans) = context.turn_plan_cache.get(&cache_key) {
                 context.stats.turn_plan_cache_hits += 1;
@@ -231,19 +227,24 @@ impl Game {
             .count()
             + 1;
         let mut plans = Vec::new();
+        if !context.charge_clone() {
+            return plans;
+        }
+        let mut working = self.clone_for_search();
+        let mut prefix = Vec::new();
 
         for move_limit in [MAX_MOVES_PER_NODE, MAX_MOVES_PER_NODE * 4] {
             if deadline_expired(context.deadline) {
                 break;
             }
-            let build_context = TurnPlanBuildContext {
-                color,
-                weights: &context.weights,
-                deadline: context.deadline,
+            working.collect_turn_plans(
+                max_depth,
+                &mut prefix,
+                &mut plans,
+                context,
                 move_limit,
-                capture_sanity: context.options.capture_sanity,
-            };
-            self.collect_turn_plans(max_depth, Vec::new(), &mut plans, &build_context);
+                plan_limit,
+            );
             if !plans.is_empty() {
                 break;
             }
@@ -256,132 +257,123 @@ impl Game {
                 .then_with(|| Self::turn_plan_cmp(left, right))
         });
         self.apply_search_ordering(&mut plans, context);
-        plans.truncate(MAX_TURN_PLANS);
+        plans.truncate(plan_limit);
         if context.options.turn_plan_cache {
             context.turn_plan_cache.insert(cache_key, plans.clone());
         }
         plans
     }
 
-    fn collect_turn_plans(
-        &self,
+    pub(crate) fn collect_turn_plans(
+        &mut self,
         depth_left: usize,
-        prefix: Vec<MoveStep>,
+        prefix: &mut Vec<MoveStep>,
         plans: &mut Vec<TurnPlan>,
-        context: &TurnPlanBuildContext<'_>,
+        context: &mut SearchContext,
+        move_limit: usize,
+        plan_limit: usize,
     ) {
-        if plans.len() >= MAX_TURN_PLANS || depth_left == 0 || deadline_expired(context.deadline) {
+        if plans.len() >= plan_limit || depth_left == 0 || context.exhausted() {
             return;
         }
 
         // Once the present line belongs to the opponent, this staged prefix is a
         // complete legal turn.
-        if !prefix.is_empty() && !self.has_pending_present_board(context.color) {
-            let mut submitted = self.clone_for_search();
-            if submitted.submit_turn_for_search() {
-                if submitted.terminal_score(context.color) == Some(-CHECKMATE_SCORE) {
-                    return;
-                }
-                let score_hint = submitted.evaluate(context.color, context.weights)
-                    + self.turn_plan_tactical_score(&prefix, context.color, context.weights)
-                    - prefix.len() as i32;
-                plans.push(TurnPlan {
-                    moves: prefix,
-                    game: submitted,
-                    score_hint,
-                });
+        let color = self.turn;
+        if !prefix.is_empty() && !self.has_pending_present_board(color) {
+            if self.staged_royal_capture_by == Some(color.opposite()) {
+                return;
             }
+            let score_hint =
+                self.turn_plan_tactical_score_from_result(self, prefix, color, &context.weights)
+                    - prefix.len() as i32;
+            plans.push(TurnPlan {
+                moves: prefix.clone(),
+                score_hint,
+            });
+            context.record_generated_plan();
             return;
         }
 
-        let moves = self.prioritized_turn_moves(
-            context.color,
-            context.weights,
-            context.deadline,
-            context.move_limit,
-        );
+        let mut moves =
+            self.prioritized_turn_moves(color, &context.weights, context.deadline, move_limit);
+        moves.truncate(context.max_nodes.saturating_sub(context.nodes));
+        context.charge_move_generation(moves.len());
         for movement in moves {
-            if context.capture_sanity
-                && context.move_limit == MAX_MOVES_PER_NODE
-                && self.is_likely_bad_capture(movement, context.weights)
+            if context.exhausted() {
+                break;
+            }
+            if context.options.capture_sanity
+                && move_limit == MAX_MOVES_PER_NODE
+                && self.is_likely_bad_capture(movement, &context.weights)
             {
                 continue;
             }
-            let mut next = self.clone_for_search();
-            if !next.apply_move_for_search(movement.from, movement.to) {
+            let Some(undo) = self.make_search_move(movement) else {
                 continue;
-            }
-            let mut next_prefix = prefix.clone();
-            next_prefix.push(movement);
-            next.collect_turn_plans(depth_left - 1, next_prefix, plans, context);
-            if plans.len() >= MAX_TURN_PLANS {
+            };
+            prefix.push(movement);
+            self.collect_turn_plans(
+                depth_left - 1,
+                prefix,
+                plans,
+                context,
+                move_limit,
+                plan_limit,
+            );
+            prefix.pop();
+            self.unmake_search_move(undo);
+            if plans.len() >= plan_limit {
                 break;
             }
         }
     }
 
-    fn prioritized_turn_moves(
+    pub(crate) fn prioritized_turn_moves(
         &self,
         color: Color,
         weights: &EvalWeights,
         deadline: Option<SearchInstant>,
         soft_limit: usize,
     ) -> Vec<MoveStep> {
-        let moves = self.legal_single_moves_until(weights, deadline);
+        let Some((timeline_id, time)) = self.next_pending_board_key(color) else {
+            return Vec::new();
+        };
+        let moves = self.legal_single_moves_for_board_until(timeline_id, time, weights, deadline);
         if self.is_in_check(color) {
             return moves;
         }
-        if moves.len() <= soft_limit {
-            return moves;
-        }
-
-        let mut selected = Vec::new();
-        for movement in moves.iter().take(soft_limit) {
-            Self::push_unique_move(&mut selected, movement);
-        }
-
-        // Search ordering can heavily favor captures, branches, and knights. A
-        // whole turn still needs coverage over every playable latest board, so
-        // keep a few locally best moves from each board even when they rank below
-        // the global cutoff.
-        for (timeline_id, time) in self.playable_board_keys(color) {
-            let mut added = 0;
-            for movement in &moves {
-                if movement.from.timeline_id != timeline_id || movement.from.time != time {
-                    continue;
-                }
-                if Self::push_unique_move(&mut selected, movement) {
-                    added += 1;
-                }
-                if added >= REQUIRED_MOVES_PER_BOARD {
-                    break;
-                }
-            }
-        }
-
-        selected
+        moves.into_iter().take(soft_limit).collect()
     }
 
-    fn apply_search_ordering(&self, plans: &mut [TurnPlan], context: &SearchContext) {
-        let key = self.search_key(0, context.root_color);
+    pub(crate) fn apply_search_ordering(&self, plans: &mut [TurnPlan], context: &SearchContext) {
+        let key = self.search_key(context.root_color);
         let tt_move = context
             .options
             .tt_best_move
             .then(|| context.table.get(&key).and_then(|entry| entry.best_move))
             .flatten();
-        plans.sort_by(|left, right| {
-            self.plan_order_bonus(right, tt_move, context)
-                .cmp(&self.plan_order_bonus(left, tt_move, context))
-                .then_with(|| {
-                    right
-                        .score_hint
-                        .cmp(&left.score_hint)
-                        .then_with(|| Self::turn_plan_cmp(left, right))
-                })
+        let mut bonuses: Vec<(i32, usize)> = plans
+            .iter()
+            .enumerate()
+            .map(|(index, plan)| (self.plan_order_bonus(plan, tt_move, context), index))
+            .collect();
+        bonuses.sort_by(|(left_bonus, left_index), (right_bonus, right_index)| {
+            right_bonus.cmp(left_bonus).then_with(|| {
+                plans[*right_index]
+                    .score_hint
+                    .cmp(&plans[*left_index].score_hint)
+                    .then_with(|| Self::turn_plan_cmp(&plans[*left_index], &plans[*right_index]))
+            })
         });
+        let ordered = bonuses
+            .into_iter()
+            .map(|(_, index)| plans[index].clone())
+            .collect::<Vec<_>>();
+        plans.clone_from_slice(&ordered);
     }
 
-    fn plan_order_bonus(
+    pub(crate) fn plan_order_bonus(
         &self,
         plan: &TurnPlan,
         tt_move: Option<MoveStep>,
@@ -405,36 +397,10 @@ impl Game {
         if context.options.history_heuristic {
             bonus += context.history.get(&move_hash(first)).copied().unwrap_or(0);
         }
-        if plan.game.royal_capture_available(self.turn) {
-            bonus += CHECKMATE_SCORE / 4;
-        }
-        bonus += plan
-            .game
-            .royal_capture_setup_pressure_for_limited(self.turn, &context.weights, 12);
-        bonus += plan
-            .game
-            .temporal_royal_corridor_pressure_for(self.turn, &context.weights)
-            .saturating_sub(self.temporal_royal_corridor_pressure_for(
-                self.turn,
-                &context.weights,
-            ));
-        let opponent_setup_now = self.royal_capture_setup_pressure_for_limited(
-            self.turn.opposite(),
-            &context.weights,
-            12,
-        );
-        let opponent_setup_after = plan.game.royal_capture_setup_pressure_for_limited(
-            self.turn.opposite(),
-            &context.weights,
-            12,
-        );
-        if opponent_setup_after < opponent_setup_now {
-            bonus += opponent_setup_now - opponent_setup_after;
-        }
         bonus
     }
 
-    fn is_likely_bad_capture(&self, movement: MoveStep, weights: &EvalWeights) -> bool {
+    pub(crate) fn is_likely_bad_capture(&self, movement: MoveStep, weights: &EvalWeights) -> bool {
         let Some(attacker) = self.piece_at(movement.from) else {
             return false;
         };
@@ -448,7 +414,7 @@ impl Game {
             && self.is_square_attacked(movement.to, attacker.color.opposite())
     }
 
-    fn playable_board_keys(&self, color: Color) -> Vec<(i32, i32)> {
+    pub(crate) fn playable_board_keys(&self, color: Color) -> Vec<(i32, i32)> {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
@@ -463,14 +429,26 @@ impl Game {
             .collect()
     }
 
-    fn push_unique_move(selected: &mut Vec<MoveStep>, movement: &MoveStep) -> bool {
-        if selected.iter().any(|existing| {
-            position_key(existing.from) == position_key(movement.from)
-                && position_key(existing.to) == position_key(movement.to)
-        }) {
-            return false;
+    pub(crate) fn next_pending_board_key(&self, color: Color) -> Option<(i32, i32)> {
+        let present_time = self.present_time()?;
+        let checked = self
+            .royal_piece_positions(color)
+            .into_iter()
+            .find(|position| {
+                position.time == present_time
+                    && self.is_active_timeline(position.timeline_id)
+                    && self
+                        .board(position.timeline_id, position.time)
+                        .is_some_and(|board| board.side_to_move == color)
+                    && self.is_square_attacked(*position, color.opposite())
+            });
+        if let Some(position) = checked {
+            return Some((position.timeline_id, position.time));
         }
-        selected.push(*movement);
-        true
+
+        self.playable_board_keys(color)
+            .into_iter()
+            .filter(|(_, time)| *time == present_time)
+            .min()
     }
 }

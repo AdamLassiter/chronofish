@@ -18,6 +18,8 @@ default = []
 neural-cpu = ["dep:burn", "burn/ndarray"]
 neural-wgpu = ["dep:burn", "burn/wgpu"]
 neural-rocm = ["dep:burn", "burn/rocm"]
+training-beam-search = []
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10"
+pretty-log = { path = "../pretty-log" }

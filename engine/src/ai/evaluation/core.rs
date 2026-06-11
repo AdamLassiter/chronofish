@@ -1,22 +1,24 @@
+use super::*;
+
 #[derive(Default)]
-struct TurnFeatureSummary {
-    obligations: i32,
-    completion_count: i32,
-    safe_move_count: i32,
-    zugzwang_boards: i32,
-    branch_payload: i32,
-    branch_waste: i32,
-    safe_arrivals: i32,
-    source_abandonment: i32,
-    escape_branches: i32,
-    mate_nets: i32,
-    anti_mate_resources: i32,
-    check_quality: i32,
-    volatility: i32,
-    promotion_choices: i32,
-    promotion_checks: i32,
-    branch_moves: i32,
-    checking_moves: i32,
+pub(crate) struct TurnFeatureSummary {
+    pub(crate) obligations: i32,
+    pub(crate) completion_count: i32,
+    pub(crate) safe_move_count: i32,
+    pub(crate) zugzwang_boards: i32,
+    pub(crate) branch_payload: i32,
+    pub(crate) branch_waste: i32,
+    pub(crate) safe_arrivals: i32,
+    pub(crate) source_abandonment: i32,
+    pub(crate) escape_branches: i32,
+    pub(crate) mate_nets: i32,
+    pub(crate) anti_mate_resources: i32,
+    pub(crate) check_quality: i32,
+    pub(crate) volatility: i32,
+    pub(crate) promotion_choices: i32,
+    pub(crate) promotion_checks: i32,
+    pub(crate) branch_moves: i32,
+    pub(crate) checking_moves: i32,
 }
 
 #[allow(dead_code)]

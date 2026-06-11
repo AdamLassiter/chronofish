@@ -1,3 +1,6 @@
+use super::*;
+use crate::ai::effort::{ai_effort_config, default_ai_effort};
+
 pub fn run_training_cli() {
     let config = TrainerConfig::from_env(std::env::args().skip(1).collect());
 
@@ -8,7 +11,10 @@ pub fn run_training_cli() {
     }
 
     if config.score_default {
-        println!("{}", fitness(EvalWeights::default_tuned(), &config).summary());
+        println!(
+            "{}",
+            fitness(EvalWeights::default_tuned(), &config).summary()
+        );
         return;
     }
 
@@ -28,7 +34,7 @@ pub fn run_training_cli() {
 }
 
 impl TrainerConfig {
-    fn from_env(args: Vec<String>) -> Self {
+    pub(crate) fn from_env(args: Vec<String>) -> Self {
         // The script-facing CLI is intentionally small, so hand parsing keeps the
         // training harness dependency-free.
         let seed = random_seed();
@@ -39,7 +45,6 @@ impl TrainerConfig {
             population: auto_population(),
             depth: effort.training_depth,
             nodes: effort.training_nodes.max(auto_nodes()),
-            plies: effort.training_plies,
             seed,
             max_seconds: None,
             out: None,
@@ -53,12 +58,13 @@ impl TrainerConfig {
             ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
             hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
             min_pairs: 12,
-            pair_batch: 4,
+            pair_batch: host_parallelism().max(1),
             max_pairs: 48,
             draw_window: 24,
             draw_rate_limit: 0.80,
             max_generations_without_candidate: 12,
             finalist_count: auto_finalists(),
+            search_strategy: TrainingSearchStrategy::AlphaBeta,
         };
         let mut index = 0;
         let mut compare_seeds_overridden = false;
@@ -91,8 +97,16 @@ impl TrainerConfig {
                     config.nodes = parse_arg(value, config.nodes);
                     index += 2;
                 }
+                "--search-strategy" => {
+                    if let Some(strategy) = value {
+                        config.search_strategy = TrainingSearchStrategy::parse(&strategy)
+                            .unwrap_or_else(|message| panic!("{message}"));
+                    }
+                    index += 2;
+                }
                 "--plies" => {
-                    config.plies = parse_arg(value, config.plies);
+                    // Full-match training no longer uses plies, but keep consuming
+                    // the flag so older local scripts do not skew later args.
                     index += 2;
                 }
                 "--seed" => {
@@ -193,28 +207,25 @@ impl TrainerConfig {
         config
     }
 
-    fn with_search(&self, depth: i32, nodes: usize, plies: usize) -> Self {
+    pub(crate) fn with_search(&self, depth: i32, nodes: usize) -> Self {
         let mut config = self.clone();
         config.depth = depth;
         config.nodes = nodes;
-        config.plies = plies;
         config
     }
 
-    fn screening_search(&self) -> Self {
+    pub(crate) fn screening_search(&self) -> Self {
         let mut config = self.clone();
         config.depth = (self.depth - 1).max(1);
         config.nodes = (self.nodes / 4).max(20).min(self.nodes);
-        config.plies = (self.plies / 2).max(2.min(self.plies)).min(self.plies);
         config
     }
 
-    fn apply_effort(&mut self, name: &str) {
+    pub(crate) fn apply_effort(&mut self, name: &str) {
         if let Some(effort) = ai_effort_config(name) {
             self.effort = name.to_string();
             self.depth = effort.training_depth;
             self.nodes = effort.training_nodes;
-            self.plies = effort.training_plies;
         }
     }
 }

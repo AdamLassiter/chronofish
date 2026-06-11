@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn board_control_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn board_control_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.board_control_for(color, weights) - self.board_control_for(color.opposite(), weights)
     }
 

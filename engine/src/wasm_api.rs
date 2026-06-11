@@ -1,3 +1,7 @@
+use std::cell::RefCell;
+
+use crate::*;
+
 // The browser talks to the engine through a deliberately small C ABI. A single
 // thread-local Game mirrors the current UI state for non-bot rules work.
 thread_local! {
@@ -214,7 +218,7 @@ fn set_last_message(message: &str) -> i32 {
     0
 }
 
-fn parse_game_snapshot(text: &str) -> Result<Game, String> {
+pub(crate) fn parse_game_snapshot(text: &str) -> Result<Game, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|error| format!("Snapshot JSON failed: {error}"))?;
     let object = value
@@ -234,7 +238,7 @@ fn parse_game_snapshot(text: &str) -> Result<Game, String> {
         .unwrap_or_else(|| next_timeline_id_for(&timelines, Color::White));
     let next_black_timeline_id = optional_i32(object.get("nextBlackTimelineId"))
         .unwrap_or_else(|| next_timeline_id_for(&timelines, Color::Black));
-    Ok(Game {
+    let mut game = Game {
         turn,
         timelines,
         next_timeline_id,
@@ -243,7 +247,10 @@ fn parse_game_snapshot(text: &str) -> Result<Game, String> {
         staged_notation: Vec::new(),
         staged_royal_capture_by: None,
         last_message: format!("{} to move.", turn.capitalized()),
-    })
+        position_hash: 0,
+    };
+    game.position_hash = game.recompute_position_hash();
+    Ok(game)
 }
 
 fn parse_timeline(value: &serde_json::Value) -> Result<Timeline, String> {
@@ -353,12 +360,14 @@ fn parse_castling(value: Option<&serde_json::Value>) -> CastlingRights {
             black_queenside: bits & 8 != 0,
         };
     }
-    value.as_object().map_or_else(CastlingRights::new, |object| CastlingRights {
-        white_kingside: optional_bool(object.get("whiteKingside")).unwrap_or(true),
-        white_queenside: optional_bool(object.get("whiteQueenside")).unwrap_or(true),
-        black_kingside: optional_bool(object.get("blackKingside")).unwrap_or(true),
-        black_queenside: optional_bool(object.get("blackQueenside")).unwrap_or(true),
-    })
+    value
+        .as_object()
+        .map_or_else(CastlingRights::new, |object| CastlingRights {
+            white_kingside: optional_bool(object.get("whiteKingside")).unwrap_or(true),
+            white_queenside: optional_bool(object.get("whiteQueenside")).unwrap_or(true),
+            black_kingside: optional_bool(object.get("blackKingside")).unwrap_or(true),
+            black_queenside: optional_bool(object.get("blackQueenside")).unwrap_or(true),
+        })
 }
 
 fn parse_en_passant(value: Option<&serde_json::Value>) -> Option<EnPassant> {
@@ -428,19 +437,23 @@ fn optional_bool(value: Option<&serde_json::Value>) -> Option<bool> {
 
 fn next_timeline_id_for(timelines: &[Timeline], color: Color) -> i32 {
     match color {
-        Color::White => timelines
-            .iter()
-            .map(|timeline| timeline.id)
-            .filter(|id| *id > 0)
-            .max()
-            .unwrap_or(0)
-            + 1,
-        Color::Black => timelines
-            .iter()
-            .map(|timeline| timeline.id)
-            .filter(|id| *id < 0)
-            .min()
-            .unwrap_or(0)
-            - 1,
+        Color::White => {
+            timelines
+                .iter()
+                .map(|timeline| timeline.id)
+                .filter(|id| *id > 0)
+                .max()
+                .unwrap_or(0)
+                + 1
+        }
+        Color::Black => {
+            timelines
+                .iter()
+                .map(|timeline| timeline.id)
+                .filter(|id| *id < 0)
+                .min()
+                .unwrap_or(0)
+                - 1
+        }
     }
 }

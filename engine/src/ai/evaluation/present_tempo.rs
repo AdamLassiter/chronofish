@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn present_tempo_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn present_tempo_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         let Some(present) = self.present_board() else {
             return 0;
         };

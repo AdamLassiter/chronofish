@@ -1,4 +1,6 @@
-fn print_threshold_progress(
+use super::*;
+
+pub(crate) fn print_threshold_progress(
     comparison_stats: ComparisonStats,
     match_stats: MatchStats,
     significance: Significance,
@@ -8,54 +10,72 @@ fn print_threshold_progress(
     let delta_needed = config
         .min_total_delta
         .saturating_sub(comparison_stats.total_delta);
-    println!(
-        "comparison: pairs={} wins={} losses={} draws={} points={:.1}/{:.1} win_rate={:.1}% elo={:+.0} min_pairs={} total_delta={}/{}",
-        comparison_stats.played,
-        comparison_stats.wins,
-        comparison_stats.losses,
-        comparison_stats.draws,
-        comparison_stats.points,
-        comparison_stats.played as f64,
-        comparison_stats.win_rate() * 100.0,
-        comparison_stats.estimated_elo(),
-        config.min_pairs,
-        comparison_stats.total_delta,
-        config.min_total_delta
+    pretty_log::section("Comparison Summary");
+    pretty_log::label_value(
+        "pairs",
+        format!(
+            "{} wins={} losses={} draws={} points={:.1}/{:.1}",
+            comparison_stats.played,
+            comparison_stats.wins,
+            comparison_stats.losses,
+            comparison_stats.draws,
+            comparison_stats.points,
+            comparison_stats.played as f64,
+        ),
     );
-    println!("comparison matches: {}", match_stats.summary());
-    println!(
-        "stats: samples={} mean_delta={:.1} stddev={:.1} stderr={:.1} lower95_delta={:.1} lower95_win_rate={:.1}%",
-        significance.samples,
-        significance.mean,
-        significance.stddev,
-        significance.stderr,
-        significance.lower_95,
-        comparison_stats.lower_95_win_rate() * 100.0
+    pretty_log::label_value(
+        "strength",
+        format!(
+            "win_rate={:.1}% elo={:+.0}",
+            comparison_stats.win_rate() * 100.0,
+            comparison_stats.estimated_elo(),
+        ),
     );
-    println!("threshold remaining: wins={wins_needed} total_delta={delta_needed}");
+    pretty_log::label_value(
+        "delta",
+        format!(
+            "total={}/{} lower95={:.1} lower95_win_rate={:.1}%",
+            comparison_stats.total_delta,
+            config.min_total_delta,
+            significance.lower_95,
+            comparison_stats.lower_95_win_rate() * 100.0,
+        ),
+    );
+    pretty_log::label_value(
+        "stats",
+        format!(
+            "samples={} mean={:.1} stddev={:.1} stderr={:.1}",
+            significance.samples, significance.mean, significance.stddev, significance.stderr,
+        ),
+    );
+    pretty_log::label_value("matches", match_stats.summary());
+    pretty_log::label_value(
+        "threshold remaining",
+        format!("wins={wins_needed} total_delta={delta_needed}"),
+    );
 }
 
 #[derive(Clone, Copy)]
-struct Significance {
-    samples: usize,
-    mean: f64,
-    stddev: f64,
-    stderr: f64,
-    lower_95: f64,
+pub(crate) struct Significance {
+    pub(crate) samples: usize,
+    pub(crate) mean: f64,
+    pub(crate) stddev: f64,
+    pub(crate) stderr: f64,
+    pub(crate) lower_95: f64,
 }
 
 #[derive(Clone, Copy, Default)]
-struct ComparisonStats {
-    played: usize,
-    wins: usize,
-    losses: usize,
-    draws: usize,
-    points: f64,
-    total_delta: i32,
+pub(crate) struct ComparisonStats {
+    pub(crate) played: usize,
+    pub(crate) wins: usize,
+    pub(crate) losses: usize,
+    pub(crate) draws: usize,
+    pub(crate) points: f64,
+    pub(crate) total_delta: i32,
 }
 
 impl ComparisonStats {
-    fn record(&mut self, delta: i32) {
+    pub(crate) fn record(&mut self, delta: i32) {
         self.played += 1;
         self.total_delta += delta;
         if delta > 0 {
@@ -69,7 +89,7 @@ impl ComparisonStats {
         }
     }
 
-    fn win_rate(self) -> f64 {
+    pub(crate) fn win_rate(self) -> f64 {
         if self.played == 0 {
             0.0
         } else {
@@ -77,7 +97,7 @@ impl ComparisonStats {
         }
     }
 
-    fn lower_95_win_rate(self) -> f64 {
+    pub(crate) fn lower_95_win_rate(self) -> f64 {
         if self.played < 2 {
             return 0.0;
         }
@@ -86,7 +106,7 @@ impl ComparisonStats {
         (p - 1.96 * stderr).max(0.0)
     }
 
-    fn upper_95_win_rate(self) -> f64 {
+    pub(crate) fn upper_95_win_rate(self) -> f64 {
         if self.played < 2 {
             return 1.0;
         }
@@ -95,21 +115,21 @@ impl ComparisonStats {
         (p + 1.96 * stderr).min(1.0)
     }
 
-    fn estimated_elo(self) -> f64 {
+    pub(crate) fn estimated_elo(self) -> f64 {
         let rate = self.win_rate().clamp(0.01, 0.99);
         -400.0 * (1.0 / rate - 1.0).log10()
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatisticalDecision {
+pub(crate) enum StatisticalDecision {
     Promote,
     Reject,
     Inconclusive,
     Continue,
 }
 
-fn statistical_decision(
+pub(crate) fn statistical_decision(
     stats: ComparisonStats,
     deltas: &[i32],
     significance: Significance,
@@ -131,7 +151,7 @@ fn statistical_decision(
     StatisticalDecision::Continue
 }
 
-fn draw_stagnant(deltas: &[i32], config: &TrainerConfig) -> bool {
+pub(crate) fn draw_stagnant(deltas: &[i32], config: &TrainerConfig) -> bool {
     if deltas.len() < config.draw_window {
         return false;
     }
@@ -143,15 +163,15 @@ fn draw_stagnant(deltas: &[i32], config: &TrainerConfig) -> bool {
 }
 
 #[derive(Clone, Copy, Default)]
-struct MatchStats {
-    played: usize,
-    wins: usize,
-    losses: usize,
-    draws: usize,
+pub(crate) struct MatchStats {
+    pub(crate) played: usize,
+    pub(crate) wins: usize,
+    pub(crate) losses: usize,
+    pub(crate) draws: usize,
 }
 
 impl MatchStats {
-    fn record_score(&mut self, score: i32) {
+    pub(crate) fn record_score(&mut self, score: i32) {
         self.played += 1;
         if score > 0 {
             self.wins += 1;
@@ -162,14 +182,14 @@ impl MatchStats {
         }
     }
 
-    fn add(&mut self, other: Self) {
+    pub(crate) fn add(&mut self, other: Self) {
         self.played += other.played;
         self.wins += other.wins;
         self.losses += other.losses;
         self.draws += other.draws;
     }
 
-    fn summary(self) -> String {
+    pub(crate) fn summary(self) -> String {
         format!(
             "played={} wins={} losses={} draws={}",
             self.played, self.wins, self.losses, self.draws
@@ -178,20 +198,20 @@ impl MatchStats {
 }
 
 #[derive(Clone, Copy, Default)]
-struct FitnessReport {
-    score: i32,
-    matches: MatchStats,
-    blunders: usize,
+pub(crate) struct FitnessReport {
+    pub(crate) score: i32,
+    pub(crate) matches: MatchStats,
+    pub(crate) blunders: usize,
 }
 
 impl FitnessReport {
-    fn add_match(&mut self, report: MatchReport) {
+    pub(crate) fn add_match(&mut self, report: MatchReport) {
         self.score += report.score;
         self.matches.record_score(report.result.score());
         self.blunders += usize::from(report.blunder);
     }
 
-    fn summary(self) -> String {
+    pub(crate) fn summary(self) -> String {
         format!(
             "score={} {} blunders={}",
             self.score,
@@ -202,33 +222,33 @@ impl FitnessReport {
 }
 
 #[derive(Clone, Copy)]
-struct MatchReport {
-    score: i32,
-    result: MatchResult,
-    blunder: bool,
+pub(crate) struct MatchReport {
+    pub(crate) score: i32,
+    pub(crate) result: MatchResult,
+    pub(crate) blunder: bool,
 }
 
 #[derive(Clone, Copy, Default)]
-struct PairReport {
-    candidate: FitnessReport,
-    baseline: FitnessReport,
+pub(crate) struct PairReport {
+    pub(crate) candidate: FitnessReport,
+    pub(crate) baseline: FitnessReport,
 }
 
 impl PairReport {
-    fn delta(self) -> i32 {
+    pub(crate) fn delta(self) -> i32 {
         self.candidate.score - self.baseline.score
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MatchResult {
+pub(crate) enum MatchResult {
     Win,
     Loss,
     Draw,
 }
 
 impl MatchResult {
-    fn score(self) -> i32 {
+    pub(crate) fn score(self) -> i32 {
         match self {
             Self::Win => 1,
             Self::Loss => -1,
@@ -237,7 +257,7 @@ impl MatchResult {
     }
 }
 
-fn significance(values: &[i32]) -> Significance {
+pub(crate) fn significance(values: &[i32]) -> Significance {
     if values.is_empty() {
         return Significance {
             samples: 0,
@@ -279,10 +299,11 @@ fn significance(values: &[i32]) -> Significance {
     }
 }
 
-fn should_promote(
+pub(crate) fn should_promote(
     comparison_stats: ComparisonStats,
     significance: Significance,
     config: &TrainerConfig,
 ) -> bool {
-    statistical_decision(comparison_stats, &[], significance, config) == StatisticalDecision::Promote
+    statistical_decision(comparison_stats, &[], significance, config)
+        == StatisticalDecision::Promote
 }

@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn timeline_coordination(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn timeline_coordination(&self, color: Color, weights: &EvalWeights) -> i32 {
         let Some(present) = self.present_board() else {
             return 0;
         };

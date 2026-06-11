@@ -1,5 +1,8 @@
+use super::parser::{strip_notation_comments, ParsedMove};
+use crate::*;
+
 impl Game {
-    fn load_notation(&mut self, notation: &str) -> Result<(), String> {
+    pub(crate) fn load_notation(&mut self, notation: &str) -> Result<(), String> {
         let mut game = Game::new();
         for line in notation.lines() {
             let line = strip_notation_comments(line);
@@ -26,7 +29,7 @@ impl Game {
         Ok(())
     }
 
-    fn apply_notation_move(&mut self, move_text: &str) -> Result<(), String> {
+    pub(crate) fn apply_notation_move(&mut self, move_text: &str) -> Result<(), String> {
         let parsed = ParsedMove::parse(move_text)?;
         let piece = self
             .piece_at(parsed.from)

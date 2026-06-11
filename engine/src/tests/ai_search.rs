@@ -1,4 +1,118 @@
 use super::*;
+use crate::training::{train_weights, TrainerConfig, TrainingSearchStrategy};
+
+#[test]
+fn direct_candidate_generation_keeps_all_default_legal_moves() {
+    let game = Game::new();
+
+    for y in 0..8 {
+        for x in 0..8 {
+            let from = Position {
+                timeline_id: 0,
+                time: 0,
+                x,
+                y,
+            };
+            let Some(piece) = game.piece_at(from) else {
+                continue;
+            };
+            let candidates = game.piece_candidate_destinations(from, piece);
+            for target_y in 0..8 {
+                for target_x in 0..8 {
+                    let to = Position {
+                        timeline_id: 0,
+                        time: 0,
+                        x: target_x,
+                        y: target_y,
+                    };
+                    if game.legal_move_kind(from, to).is_some() {
+                        assert!(
+                            candidates.contains(&to),
+                            "candidate generation rejected legal move from ({x}, {y}) to ({target_x}, {target_y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn incremental_hash_matches_recompute_and_search_undo() {
+    let mut game = Game::new();
+    let initial_json = game.to_json();
+    let initial_hash = game.position_hash;
+    assert_eq!(initial_hash, game.recompute_position_hash());
+
+    let movement = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 1,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 4,
+            y: 3,
+        },
+    };
+    let undo = game
+        .make_search_move(movement)
+        .expect("search move is legal");
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+
+    game.unmake_search_move(undo);
+    assert_eq!(game.position_hash, initial_hash);
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+    assert_eq!(game.to_json(), initial_json);
+}
+
+#[test]
+fn incremental_hash_tracks_branch_search_moves() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0g7pg6\n\
+         3. T2L0d1Qg4\n\
+         4. T3L0g8nf6\n\
+         5. T4L0f1Bc4\n\
+         6. T5L0d7pd5\n\
+         7. T6L0c4Bd5xp\n\
+         8. T7L0d8qd6\n\
+         9. T8L0g4Qc8xb+\n\
+         10. T9L0d6qd8",
+    )
+    .expect("notation should create a historical target");
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+    let initial_json = game.to_json();
+    let initial_hash = game.position_hash;
+    let movement = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 10,
+            x: 2,
+            y: 7,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 6,
+            x: 4,
+            y: 7,
+        },
+    };
+
+    let undo = game
+        .make_search_move(movement)
+        .expect("branch move is legal");
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+
+    game.unmake_search_move(undo);
+    assert_eq!(game.position_hash, initial_hash);
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+    assert_eq!(game.to_json(), initial_json);
+}
 
 #[test]
 fn verbose_notation_writes_and_replays_turns() {
@@ -72,9 +186,9 @@ fn royal_threat_highlights_but_only_capture_ends_game() {
 
     assert_eq!(game.turn, Color::Black);
     assert!(game.is_in_check(Color::Black));
-    assert!(game.to_json().contains(
-        "\"checkedRoyals\":[{\"timelineId\":0,\"time\":9,\"x\":4,\"y\":7}]"
-    ));
+    assert!(game
+        .to_json()
+        .contains("\"checkedRoyals\":[{\"timelineId\":0,\"time\":9,\"x\":4,\"y\":7}]"));
     assert!(game.can_move_to(
         Position {
             timeline_id: 0,
@@ -395,7 +509,10 @@ fn evaluation_penalizes_exposed_royal_piece() {
     let safe = Game::new();
     let weights = EvalWeights::default_tuned();
 
-    assert!(exposed.royal_safety_balance(Color::White, &weights) < safe.royal_safety_balance(Color::White, &weights));
+    assert!(
+        exposed.royal_safety_balance(Color::White, &weights)
+            < safe.royal_safety_balance(Color::White, &weights)
+    );
 }
 
 #[test]
@@ -433,13 +550,19 @@ fn training_json_round_trips_tactical_weights() {
     assert_eq!(parsed.royal_shelter, weights.royal_shelter);
     assert_eq!(parsed.space_advantage, weights.space_advantage);
     assert_eq!(parsed.mandatory_move_burden, weights.mandatory_move_burden);
-    assert_eq!(parsed.turn_completion_safety, weights.turn_completion_safety);
+    assert_eq!(
+        parsed.turn_completion_safety,
+        weights.turn_completion_safety
+    );
     assert_eq!(parsed.present_zugzwang, weights.present_zugzwang);
     assert_eq!(parsed.weakest_royal_safety, weights.weakest_royal_safety);
     assert_eq!(parsed.branch_payload, weights.branch_payload);
     assert_eq!(parsed.temporal_pin, weights.temporal_pin);
     assert_eq!(parsed.mate_net_depth_1_2, weights.mate_net_depth_1_2);
-    assert_eq!(parsed.board_importance_weight, weights.board_importance_weight);
+    assert_eq!(
+        parsed.board_importance_weight,
+        weights.board_importance_weight
+    );
 }
 
 #[test]
@@ -461,8 +584,14 @@ fn evaluation_rewards_board_control_and_activity() {
     });
     edge.timelines[0].boards = vec![snapshot(0, Color::White, edge_board)];
 
-    assert!(center.board_control_for(Color::White, &weights) > edge.board_control_for(Color::White, &weights));
-    assert!(center.piece_activity_for(Color::White, &weights) > edge.piece_activity_for(Color::White, &weights));
+    assert!(
+        center.board_control_for(Color::White, &weights)
+            > edge.board_control_for(Color::White, &weights)
+    );
+    assert!(
+        center.piece_activity_for(Color::White, &weights)
+            > edge.piece_activity_for(Color::White, &weights)
+    );
 }
 
 #[test]
@@ -492,7 +621,10 @@ fn evaluation_rewards_healthier_pawn_structure() {
     });
     weak.timelines[0].boards = vec![snapshot(0, Color::White, weak_board)];
 
-    assert!(healthy.pawn_structure_for(Color::White, &weights) > weak.pawn_structure_for(Color::White, &weights));
+    assert!(
+        healthy.pawn_structure_for(Color::White, &weights)
+            > weak.pawn_structure_for(Color::White, &weights)
+    );
 }
 
 #[test]
@@ -593,7 +725,10 @@ fn evaluation_rewards_royal_shelter() {
     let mut exposed = Game::new();
     exposed.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];
 
-    assert!(sheltered.royal_shelter_for(Color::White, &weights) > exposed.royal_shelter_for(Color::White, &weights));
+    assert!(
+        sheltered.royal_shelter_for(Color::White, &weights)
+            > exposed.royal_shelter_for(Color::White, &weights)
+    );
 }
 
 #[test]
@@ -604,7 +739,6 @@ fn training_mutation_is_seeded() {
         population: 4,
         depth: 1,
         nodes: 5,
-        plies: 0,
         seed: 7,
         max_seconds: Some(1),
         out: None,
@@ -624,7 +758,11 @@ fn training_mutation_is_seeded() {
         draw_rate_limit: 0.8,
         max_generations_without_candidate: 1,
         finalist_count: 2,
+        search_strategy: TrainingSearchStrategy::AlphaBeta,
     };
 
-    assert_eq!(train_weights(&config).to_json(), train_weights(&config).to_json());
+    assert_eq!(
+        train_weights(&config).to_json(),
+        train_weights(&config).to_json()
+    );
 }

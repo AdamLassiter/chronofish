@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn fork_pressure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn fork_pressure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.fork_pressure_for(color, weights) - self.fork_pressure_for(color.opposite(), weights)
     }
 

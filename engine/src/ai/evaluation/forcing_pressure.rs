@@ -1,6 +1,9 @@
+use super::*;
+
 impl Game {
-    fn forcing_pressure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.forcing_pressure_for(color, weights) - self.forcing_pressure_for(color.opposite(), weights)
+    pub(crate) fn forcing_pressure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+        self.forcing_pressure_for(color, weights)
+            - self.forcing_pressure_for(color.opposite(), weights)
     }
 
     pub(crate) fn forcing_pressure_for(&self, color: Color, weights: &EvalWeights) -> i32 {

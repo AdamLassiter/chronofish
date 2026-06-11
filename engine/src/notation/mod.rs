@@ -1,7 +1,14 @@
+use crate::*;
+
+mod parser;
+
+#[cfg(test)]
+mod replay;
+
 #[allow(dead_code)]
 impl Game {
     // Short human-readable status messages for the frontend HUD.
-    fn move_message(
+    pub(crate) fn move_message(
         &self,
         piece: Piece,
         from: Position,
@@ -24,7 +31,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         // Keep JSON ordering stable for deterministic frontend rendering,
         // multiplayer snapshots, and tests.
         let mut timelines = self.timelines.clone();
@@ -49,11 +56,11 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn staged_turn_notation(&self) -> String {
+    pub(crate) fn staged_turn_notation(&self) -> String {
         self.staged_notation.join("/")
     }
 
-    fn move_notation(
+    pub(crate) fn move_notation(
         &self,
         piece: Piece,
         from: Position,
@@ -81,7 +88,7 @@ impl Game {
         notation
     }
 
-    fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
+    pub(crate) fn finish_move_notation(&self, mut notation: String, color: Color) -> String {
         if self.staged_royal_capture_by == Some(color) {
             notation.push('#');
         } else if self.is_in_check(color.opposite()) {
@@ -90,7 +97,7 @@ impl Game {
         notation
     }
 
-    fn captured_piece(&self, to: Position, move_kind: MoveKind) -> Option<Piece> {
+    pub(crate) fn captured_piece(&self, to: Position, move_kind: MoveKind) -> Option<Piece> {
         match move_kind {
             MoveKind::EnPassant {
                 captured_x,
@@ -102,14 +109,14 @@ impl Game {
         }
     }
 
-    fn in_bounds(x: i32, y: i32) -> bool {
+    pub(crate) fn in_bounds(x: i32, y: i32) -> bool {
         (0..8).contains(&x) && (0..8).contains(&y)
     }
 }
 
 impl Timeline {
     #[allow(dead_code)]
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         let mut boards = self.boards.clone();
         boards.sort_by_key(|board| board.time);
 
@@ -130,7 +137,7 @@ impl Timeline {
 
 impl BoardSnapshot {
     #[allow(dead_code)]
-    fn to_json(&self, timeline_id: i32) -> String {
+    pub(crate) fn to_json(&self, timeline_id: i32) -> String {
         let ranks = self
             .board
             .iter()
@@ -159,7 +166,7 @@ impl BoardSnapshot {
 
 impl Origin {
     #[allow(dead_code)]
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         match self {
             Origin::None => "null".to_string(),
             Origin::Move {
@@ -177,7 +184,7 @@ impl Origin {
 }
 
 impl Color {
-    fn opposite(self) -> Self {
+    pub(crate) fn opposite(self) -> Self {
         match self {
             Color::White => Color::Black,
             Color::Black => Color::White,
@@ -185,14 +192,14 @@ impl Color {
     }
 
     #[allow(dead_code)]
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Color::White => "white",
             Color::Black => "black",
         }
     }
 
-    fn capitalized(self) -> &'static str {
+    pub(crate) fn capitalized(self) -> &'static str {
         match self {
             Color::White => "White",
             Color::Black => "Black",
@@ -204,7 +211,7 @@ impl Color {
 impl PieceType {
     // These strings are part of the frontend JSON contract.
     #[allow(dead_code)]
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             PieceType::King => "king",
             PieceType::CommonKing => "commonKing",
@@ -221,7 +228,7 @@ impl PieceType {
         }
     }
 
-    fn notation_letter(self) -> char {
+    pub(crate) fn notation_letter(self) -> char {
         match self {
             PieceType::King => 'K',
             PieceType::Knight => 'N',
@@ -241,7 +248,7 @@ impl PieceType {
 
 #[allow(dead_code)]
 impl Piece {
-    fn notation_symbol(self) -> char {
+    pub(crate) fn notation_symbol(self) -> char {
         let symbol = self.piece_type.notation_letter();
         match self.color {
             Color::White => symbol,
@@ -251,7 +258,7 @@ impl Piece {
 }
 
 impl TimelineOwner {
-    fn from_color(color: Color) -> Self {
+    pub(crate) fn from_color(color: Color) -> Self {
         match color {
             Color::White => TimelineOwner::White,
             Color::Black => TimelineOwner::Black,
@@ -259,7 +266,7 @@ impl TimelineOwner {
     }
 
     #[allow(dead_code)]
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             TimelineOwner::Neutral => "neutral",
             TimelineOwner::White => "white",
@@ -270,7 +277,7 @@ impl TimelineOwner {
 
 impl CastlingRights {
     // A new board line starts with both orthodox castling options available.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             white_kingside: true,
             white_queenside: true,
@@ -279,7 +286,7 @@ impl CastlingRights {
         }
     }
 
-    fn to_json_bits(self) -> i32 {
+    pub(crate) fn to_json_bits(self) -> i32 {
         self.white_kingside as i32
             | ((self.white_queenside as i32) << 1)
             | ((self.black_kingside as i32) << 2)
@@ -289,7 +296,7 @@ impl CastlingRights {
 
 impl MoveKind {
     // Stored in Origin for rendering/debugging.
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             MoveKind::Standard => "standard",
             MoveKind::Branch => "branch",
@@ -299,7 +306,7 @@ impl MoveKind {
     }
 }
 
-fn en_passant_after_move(
+pub(crate) fn en_passant_after_move(
     piece: Piece,
     from: Position,
     to: Position,
@@ -322,7 +329,7 @@ fn en_passant_after_move(
     })
 }
 
-fn update_castling_rights(
+pub(crate) fn update_castling_rights(
     castling: &mut CastlingRights,
     piece: Piece,
     from: Position,
@@ -376,7 +383,7 @@ fn update_castling_rights(
     }
 }
 
-fn promote_if_needed(piece: Piece, y: i32) -> Piece {
+pub(crate) fn promote_if_needed(piece: Piece, y: i32) -> Piece {
     if !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn) {
         return piece;
     }
@@ -392,7 +399,7 @@ fn promote_if_needed(piece: Piece, y: i32) -> Piece {
 }
 
 #[allow(dead_code)]
-fn piece_json(piece: &Option<Piece>) -> String {
+pub(crate) fn piece_json(piece: &Option<Piece>) -> String {
     match piece {
         Some(piece) => format!(
             "{{\"color\":\"{}\",\"type\":\"{}\"}}",
@@ -403,7 +410,7 @@ fn piece_json(piece: &Option<Piece>) -> String {
     }
 }
 
-fn en_passant_json(en_passant: Option<EnPassant>) -> String {
+pub(crate) fn en_passant_json(en_passant: Option<EnPassant>) -> String {
     en_passant.map_or_else(
         || "null".to_string(),
         |target| {
@@ -415,7 +422,7 @@ fn en_passant_json(en_passant: Option<EnPassant>) -> String {
     )
 }
 
-fn position_json(position: Position) -> String {
+pub(crate) fn position_json(position: Position) -> String {
     format!(
         "{{\"timelineId\":{},\"time\":{},\"x\":{},\"y\":{}}}",
         position.timeline_id, position.time, position.x, position.y
@@ -423,12 +430,12 @@ fn position_json(position: Position) -> String {
 }
 
 #[allow(dead_code)]
-fn position_prefix(position: Position) -> String {
+pub(crate) fn position_prefix(position: Position) -> String {
     format!("T{}L{}", position.time, position.timeline_id)
 }
 
 #[allow(dead_code)]
-fn target_prefix(from: Position, to: Position) -> String {
+pub(crate) fn target_prefix(from: Position, to: Position) -> String {
     if from.timeline_id == to.timeline_id && from.time == to.time {
         String::new()
     } else {
@@ -437,12 +444,12 @@ fn target_prefix(from: Position, to: Position) -> String {
 }
 
 #[allow(dead_code)]
-fn square_name(position: Position) -> String {
+pub(crate) fn square_name(position: Position) -> String {
     format!("{}{}", file_name(position.x), position.y + 1)
 }
 
 #[allow(dead_code)]
-fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
+pub(crate) fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
     match color {
         Color::White => game.next_timeline_id,
         Color::Black => game.next_black_timeline_id,
@@ -450,7 +457,7 @@ fn next_branch_timeline_id(color: Color, game: &Game) -> i32 {
 }
 
 #[allow(dead_code)]
-fn file_name(x: i32) -> &'static str {
+pub(crate) fn file_name(x: i32) -> &'static str {
     match x {
         0 => "a",
         1 => "b",
@@ -465,6 +472,6 @@ fn file_name(x: i32) -> &'static str {
 }
 
 #[allow(dead_code)]
-fn escape_json(value: &str) -> String {
+pub(crate) fn escape_json(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }

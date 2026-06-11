@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn royal_shelter_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn royal_shelter_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.royal_shelter_for(color, weights) - self.royal_shelter_for(color.opposite(), weights)
     }
 

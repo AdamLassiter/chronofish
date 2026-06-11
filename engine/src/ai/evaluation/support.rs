@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn individual_royal_safety_scores(&self, color: Color) -> Vec<i32> {
+    pub(crate) fn individual_royal_safety_scores(&self, color: Color) -> Vec<i32> {
         self.royal_pieces(color)
             .into_iter()
             .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
@@ -7,7 +9,12 @@ impl Game {
             .collect()
     }
 
-    fn individual_royal_safety(&self, position: Position, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn individual_royal_safety(
+        &self,
+        position: Position,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> i32 {
         let attackers = self.attack_summary(position, color.opposite());
         let defenders = self.attack_summary(position, color);
         let escapes = self.royal_escape_count(position, color);
@@ -22,7 +29,7 @@ impl Game {
         score
     }
 
-    fn raw_royal_safety_score(&self, position: Position, color: Color) -> i32 {
+    pub(crate) fn raw_royal_safety_score(&self, position: Position, color: Color) -> i32 {
         let attackers = self.attack_summary(position, color.opposite());
         let defenders = self.attack_summary(position, color);
         let escapes = self.royal_escape_count(position, color);
@@ -37,7 +44,7 @@ impl Game {
         score
     }
 
-    fn royal_shield_count(&self, position: Position, color: Color) -> i32 {
+    pub(crate) fn royal_shield_count(&self, position: Position, color: Color) -> i32 {
         let forward = if color == Color::White { 1 } else { -1 };
         let mut shields = 0;
         for dx in -1..=1 {
@@ -49,7 +56,8 @@ impl Game {
             };
             if Self::in_bounds(shield.x, shield.y)
                 && self.piece_at(shield).is_some_and(|piece| {
-                    piece.color == color && matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+                    piece.color == color
+                        && matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
                 })
             {
                 shields += 1;
@@ -58,7 +66,7 @@ impl Game {
         shields
     }
 
-    fn latest_arrival_position(&self, color: Color, x: i32, y: i32) -> Option<Position> {
+    pub(crate) fn latest_arrival_position(&self, color: Color, x: i32, y: i32) -> Option<Position> {
         self.latest_pieces()
             .into_iter()
             .filter(|(position, piece)| piece.color == color && position.x == x && position.y == y)
@@ -66,18 +74,22 @@ impl Game {
             .map(|(position, _)| position)
     }
 
-    fn active_timeline_count(&self) -> i32 {
+    pub(crate) fn active_timeline_count(&self) -> i32 {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
             .count() as i32
     }
 
-    fn clear_piece_at(&mut self, position: Position) {
+    pub(crate) fn clear_piece_at(&mut self, position: Position) {
         let Some(timeline) = self.timeline_mut(position.timeline_id) else {
             return;
         };
-        let Some(board) = timeline.boards.iter_mut().find(|board| board.time == position.time) else {
+        let Some(board) = timeline
+            .boards
+            .iter_mut()
+            .find(|board| board.time == position.time)
+        else {
             return;
         };
         board.board[position.y as usize][position.x as usize] = None;
@@ -108,7 +120,7 @@ impl Game {
         pieces
     }
 
-    fn latest_board_positions(&self) -> Vec<Position> {
+    pub(crate) fn latest_board_positions(&self) -> Vec<Position> {
         let mut positions = Vec::new();
         for timeline in &self.timelines {
             let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
@@ -128,24 +140,30 @@ impl Game {
         positions
     }
 
-    fn near_enemy_royal(&self, target: Position, color: Color) -> bool {
+    pub(crate) fn near_enemy_royal(&self, target: Position, color: Color) -> bool {
         self.royal_pieces(color.opposite())
             .into_iter()
             .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
             .any(|(position, _)| {
                 let delta = self.movement_delta(target, position);
-                delta.x.abs().max(delta.y.abs()).max(delta.t.abs()).max(delta.l.abs()) <= 2
+                delta
+                    .x
+                    .abs()
+                    .max(delta.y.abs())
+                    .max(delta.t.abs())
+                    .max(delta.l.abs())
+                    <= 2
             })
     }
 
-    fn pseudo_attack_count(&self, position: Position, piece: Piece) -> i32 {
+    pub(crate) fn pseudo_attack_count(&self, position: Position, piece: Piece) -> i32 {
         self.latest_board_positions()
             .into_iter()
             .filter(|target| self.attacks_square(piece, position, *target))
             .count() as i32
     }
 
-    fn open_line_count(&self, position: Position, piece: Piece) -> i32 {
+    pub(crate) fn open_line_count(&self, position: Position, piece: Piece) -> i32 {
         let directions: &[(i32, i32, i32, i32)] = &[
             (1, 0, 0, 0),
             (-1, 0, 0, 0),
@@ -163,14 +181,16 @@ impl Game {
         directions
             .iter()
             .filter(|(dx, dy, dt, dl)| {
-                self.first_step_on_line(position, *dx, *dy, *dt, *dl).is_some_and(|target| {
-                    self.piece_at(target).is_none() && self.attacks_square(piece, position, target)
-                })
+                self.first_step_on_line(position, *dx, *dy, *dt, *dl)
+                    .is_some_and(|target| {
+                        self.piece_at(target).is_none()
+                            && self.attacks_square(piece, position, target)
+                    })
             })
             .count() as i32
     }
 
-    fn first_step_on_line(
+    pub(crate) fn first_step_on_line(
         &self,
         position: Position,
         dx: i32,
@@ -183,7 +203,10 @@ impl Game {
         let target_timeline_id = if dl == 0 {
             position.timeline_id
         } else {
-            self.timelines.iter().find(|timeline| timeline.row == target_row)?.id
+            self.timelines
+                .iter()
+                .find(|timeline| timeline.row == target_row)?
+                .id
         };
         let target = Position {
             timeline_id: target_timeline_id,
@@ -191,11 +214,12 @@ impl Game {
             x: position.x + dx,
             y: position.y + dy,
         };
-        (Self::in_bounds(target.x, target.y) && self.board(target.timeline_id, target.time).is_some())
-            .then_some(target)
+        (Self::in_bounds(target.x, target.y)
+            && self.board(target.timeline_id, target.time).is_some())
+        .then_some(target)
     }
 
-    fn is_passed_pawn(&self, position: Position, color: Color) -> bool {
+    pub(crate) fn is_passed_pawn(&self, position: Position, color: Color) -> bool {
         let direction = if color == Color::White { 1 } else { -1 };
         let Some(board) = self.board(position.timeline_id, position.time) else {
             return false;
@@ -217,7 +241,7 @@ impl Game {
         true
     }
 
-    fn is_supported_pawn(&self, position: Position, color: Color) -> bool {
+    pub(crate) fn is_supported_pawn(&self, position: Position, color: Color) -> bool {
         let behind = if color == Color::White { -1 } else { 1 };
         [-1, 1].into_iter().any(|dx| {
             let supporter = Position {
@@ -228,12 +252,13 @@ impl Game {
             };
             Self::in_bounds(supporter.x, supporter.y)
                 && self.piece_at(supporter).is_some_and(|piece| {
-                    piece.color == color && matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+                    piece.color == color
+                        && matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
                 })
         })
     }
 
-    fn is_isolated_pawn(&self, position: Position, color: Color) -> bool {
+    pub(crate) fn is_isolated_pawn(&self, position: Position, color: Color) -> bool {
         let Some(board) = self.board(position.timeline_id, position.time) else {
             return false;
         };
@@ -249,7 +274,7 @@ impl Game {
         })
     }
 
-    fn timeline_time_spread(&self) -> i32 {
+    pub(crate) fn timeline_time_spread(&self) -> i32 {
         let mut latest_times = self
             .timelines
             .iter()
@@ -298,7 +323,7 @@ impl Game {
     }
 }
 
-fn weights_for_tropism(piece_type: PieceType) -> i32 {
+pub(crate) fn weights_for_tropism(piece_type: PieceType) -> i32 {
     match piece_type {
         PieceType::King | PieceType::CommonKing => 1,
         PieceType::Pawn | PieceType::Brawn => 1,

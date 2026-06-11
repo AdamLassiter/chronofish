@@ -1,46 +1,22 @@
-use std::cell::RefCell;
+mod model;
+pub(crate) use model::*;
 
-// The engine is intentionally assembled as one Rust module split across smaller
-// files. wasm exports, move generation, notation, AI, and tests all share many
-// helpers; include! keeps those helpers private without turning them into a wide
-// pub(crate) API.
-include!("model.rs");
-include!("wasm_api.rs");
-include!("game.rs");
-include!("movegen.rs");
-include!("notation.rs");
-include!("notation_parser.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/types.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/effort.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/model.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/evaluator.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/weights.rs");
-#[cfg(not(any(test, doctest)))]
-#[path = "ai/evaluation/mod.rs"]
-mod evaluation;
-#[cfg(not(any(test, doctest)))]
-include!("ai/search.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/search_plans.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/search_support.rs");
-#[cfg(not(any(test, doctest)))]
-include!("ai/json.rs");
+mod game;
+mod hash;
+mod movegen;
+mod notation;
+pub(crate) use notation::*;
+mod ai;
+pub(crate) use ai::*;
+mod wasm_api;
 
-#[cfg(any(test, doctest))]
-include!("ai.rs");
 #[cfg(test)]
-include!("gpu_snapshot.rs");
-#[cfg(test)]
-include!("notation_replay.rs");
+mod gpu_snapshot;
 
 #[cfg(not(target_arch = "wasm32"))]
-include!("training.rs");
+mod training;
+#[cfg(not(target_arch = "wasm32"))]
+pub use training::run_training_cli;
 
 #[cfg(test)]
-include!("tests.rs");
+mod tests;

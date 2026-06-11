@@ -1,8 +1,16 @@
-fn parse_arg<T: std::str::FromStr>(value: Option<String>, fallback: T) -> T {
+use super::*;
+
+pub(crate) fn host_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(8)
+}
+
+pub(crate) fn parse_arg<T: std::str::FromStr>(value: Option<String>, fallback: T) -> T {
     value.and_then(|raw| raw.parse().ok()).unwrap_or(fallback)
 }
 
-fn parse_seed_list(value: Option<&str>) -> Option<Vec<u64>> {
+pub(crate) fn parse_seed_list(value: Option<&str>) -> Option<Vec<u64>> {
     let seeds: Vec<u64> = value?
         .split([',', ' '])
         .filter(|part| !part.is_empty())
@@ -11,40 +19,34 @@ fn parse_seed_list(value: Option<&str>) -> Option<Vec<u64>> {
     (!seeds.is_empty()).then_some(seeds)
 }
 
-fn auto_population() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get())
-        .unwrap_or(8)
-        .clamp(4, 16)
+pub(crate) fn auto_population() -> usize {
+    host_parallelism().max(4)
 }
 
-fn auto_finalists() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get() / 2)
-        .unwrap_or(4)
-        .clamp(3, 6)
+pub(crate) fn auto_finalists() -> usize {
+    host_parallelism().max(2)
 }
 
-fn auto_nodes() -> usize {
-    std::thread::available_parallelism()
-        .map(|parallelism| parallelism.get() * 20)
+pub(crate) fn auto_nodes() -> usize {
+    host_parallelism()
+        .checked_mul(20)
         .unwrap_or(160)
         .clamp(80, 240)
 }
 
-fn random_seed() -> u64 {
+pub(crate) fn random_seed() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or(1)
 }
 
-fn default_compare_seeds(seed: u64) -> Vec<u64> {
+pub(crate) fn default_compare_seeds(seed: u64) -> Vec<u64> {
     let mut rng = Lcg::new(seed ^ 0x9e37_79b9_7f4a_7c15);
     (0..9).map(|_| rng.next_u64()).collect()
 }
 
-fn promote_weights(weights: EvalWeights, ai_src: &str) {
+pub(crate) fn promote_weights(weights: EvalWeights, ai_src: &str) {
     // Runtime weights live in a small JSON include file. Overwriting the whole
     // file is less clever than field patching and avoids ever touching types.
     let json = serde_json::to_string_pretty(&weights).expect("EvalWeights should serialize");
@@ -54,7 +56,7 @@ fn promote_weights(weights: EvalWeights, ai_src: &str) {
     std::fs::write(ai_src, format!("{json}\n")).expect("failed to write AI parameters");
 }
 
-fn load_hall_of_fame(path: &str) -> Vec<EvalWeights> {
+pub(crate) fn load_hall_of_fame(path: &str) -> Vec<EvalWeights> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
@@ -65,7 +67,7 @@ fn load_hall_of_fame(path: &str) -> Vec<EvalWeights> {
         .collect()
 }
 
-fn append_hall_of_fame(path: &str, weights: EvalWeights) {
+pub(crate) fn append_hall_of_fame(path: &str, weights: EvalWeights) {
     if let Some(parent) = std::path::Path::new(path).parent() {
         std::fs::create_dir_all(parent).expect("failed to create hall-of-fame directory");
     }
@@ -80,7 +82,7 @@ fn append_hall_of_fame(path: &str, weights: EvalWeights) {
         .expect("failed to append hall-of-fame weights");
 }
 
-fn ai_source_is_dirty(ai_src: &str) -> bool {
+pub(crate) fn ai_source_is_dirty(ai_src: &str) -> bool {
     !std::process::Command::new("git")
         .args(["diff", "--quiet", "--", ai_src])
         .status()
@@ -91,7 +93,7 @@ fn ai_source_is_dirty(ai_src: &str) -> bool {
             .is_ok_and(|status| status.success())
 }
 
-fn run_command(command: &str, args: &[&str]) {
+pub(crate) fn run_command(command: &str, args: &[&str]) {
     let status = std::process::Command::new(command)
         .args(args)
         .status()
@@ -101,7 +103,7 @@ fn run_command(command: &str, args: &[&str]) {
     }
 }
 
-fn run_shell(command: &str) {
+pub(crate) fn run_shell(command: &str) {
     let status = std::process::Command::new("sh")
         .args(["-c", command])
         .status()

@@ -1,9 +1,11 @@
+use super::*;
+
 impl EvalWeights {
-    fn mutate(self, rng: &mut Lcg) -> Self {
+    pub(crate) fn mutate(self, rng: &mut Lcg) -> Self {
         self.mutate_with_scale(rng, 1.0)
     }
 
-    fn mutate_with_scale(self, rng: &mut Lcg, scale: f32) -> Self {
+    pub(crate) fn mutate_with_scale(self, rng: &mut Lcg, scale: f32) -> Self {
         // Keep royal values fixed so training cannot discover incentives that
         // trade away the king-shaped objective for short-term material.
         let spread = |value: i32| ((value as f32) * scale).round().max(1.0) as i32;
@@ -48,13 +50,7 @@ impl EvalWeights {
                 0,
                 3_000,
             ),
-            royal_capture_setup: mutate_weight(
-                self.royal_capture_setup,
-                rng,
-                spread(80),
-                0,
-                6_000,
-            ),
+            royal_capture_setup: mutate_weight(self.royal_capture_setup, rng, spread(80), 0, 6_000),
             royal_escape_pressure: mutate_weight(
                 self.royal_escape_pressure,
                 rng,
@@ -78,7 +74,13 @@ impl EvalWeights {
             present_tempo: mutate_weight(self.present_tempo, rng, spread(8), -100, 300),
             royal_shelter: mutate_weight(self.royal_shelter, rng, spread(10), 0, 500),
             space_advantage: mutate_weight(self.space_advantage, rng, spread(4), 0, 120),
-            mandatory_move_burden: mutate_weight(self.mandatory_move_burden, rng, spread(8), 0, 300),
+            mandatory_move_burden: mutate_weight(
+                self.mandatory_move_burden,
+                rng,
+                spread(8),
+                0,
+                300,
+            ),
             turn_completion_safety: mutate_weight(
                 self.turn_completion_safety,
                 rng,
@@ -88,7 +90,13 @@ impl EvalWeights {
             ),
             present_zugzwang: mutate_weight(self.present_zugzwang, rng, spread(12), 0, 600),
             weakest_royal_safety: mutate_weight(self.weakest_royal_safety, rng, spread(10), 0, 200),
-            royal_liability_count: mutate_weight(self.royal_liability_count, rng, spread(8), 0, 200),
+            royal_liability_count: mutate_weight(
+                self.royal_liability_count,
+                rng,
+                spread(8),
+                0,
+                200,
+            ),
             multi_royal_attack: mutate_weight(self.multi_royal_attack, rng, spread(10), 0, 400),
             defensive_bandwidth: mutate_weight(self.defensive_bandwidth, rng, spread(8), 0, 300),
             threat_overload: mutate_weight(self.threat_overload, rng, spread(10), 0, 400),
@@ -180,13 +188,7 @@ impl EvalWeights {
                 300,
             ),
             mate_net_depth_1_2: mutate_weight(self.mate_net_depth_1_2, rng, spread(10), 0, 400),
-            anti_mate_resources: mutate_weight(
-                self.anti_mate_resources,
-                rng,
-                spread(8),
-                0,
-                300,
-            ),
+            anti_mate_resources: mutate_weight(self.anti_mate_resources, rng, spread(8), 0, 300),
             checking_move_quality: mutate_weight(
                 self.checking_move_quality,
                 rng,
@@ -220,7 +222,7 @@ impl EvalWeights {
         }
     }
 
-    fn crossover(left: Self, right: Self, rng: &mut Lcg) -> Self {
+    pub(crate) fn crossover(left: Self, right: Self, rng: &mut Lcg) -> Self {
         // Uniform crossover lets each parameter independently come from either
         // parent, which fits this compact, flat genome.
         macro_rules! pick {
@@ -319,22 +321,21 @@ impl EvalWeights {
         }
     }
 
-    fn to_json(self) -> String {
+    pub(crate) fn to_json(self) -> String {
         serde_json::to_string(&self).expect("EvalWeights should serialize")
     }
 
-    fn from_json(value: &str) -> Result<Self, String> {
+    pub(crate) fn from_json(value: &str) -> Result<Self, String> {
         serde_json::from_str(value).map_err(|error| error.to_string())
     }
-
 }
 
 impl Lcg {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self { state: seed.max(1) }
     }
 
-    fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.state = self
             .state
             .wrapping_mul(6_364_136_223_846_793_005)
@@ -342,11 +343,11 @@ impl Lcg {
         self.state
     }
 
-    fn next_usize(&mut self, upper: usize) -> usize {
+    pub(crate) fn next_usize(&mut self, upper: usize) -> usize {
         (self.next_u64() as usize) % upper.max(1)
     }
 
-    fn next_bool(&mut self) -> bool {
+    pub(crate) fn next_bool(&mut self) -> bool {
         self.next_u64() & 1 == 1
     }
 }

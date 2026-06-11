@@ -1,4 +1,5 @@
 use super::*;
+use crate::wasm_api::parse_game_snapshot;
 
 #[test]
 fn browser_snapshot_round_trip_preserves_castling_and_pawn_targets() {
@@ -159,9 +160,9 @@ fn royal_capture_threat_highlights_without_ending_game() {
     );
     assert_eq!(game.submit_turn(), 1);
     assert_eq!(game.last_message, "Black to move.");
-    assert!(game.to_json().contains(
-        "\"checkedRoyals\":[{\"timelineId\":0,\"time\":1,\"x\":4,\"y\":0}]"
-    ));
+    assert!(game
+        .to_json()
+        .contains("\"checkedRoyals\":[{\"timelineId\":0,\"time\":1,\"x\":4,\"y\":0}]"));
 }
 
 #[test]
@@ -435,6 +436,7 @@ fn ai_returns_submit_valid_turn() {
 
     assert_eq!(result.status, "ok");
     assert!(!result.moves.is_empty());
+    assert!(result.nodes <= 1_000);
 
     let mut replay = Game::new();
     for movement in result.moves {
@@ -556,8 +558,7 @@ fn ai_search_perf_stockfish_style_steps_do_not_regress() {
 
     let mut previous_effort = u128::MAX;
     for (label, options) in stages {
-        let (result, sample) =
-            game.best_ai_turn_with_options(2, 2_500, None, options, Some(label));
+        let (result, sample) = game.best_ai_turn_with_options(2, 2_500, None, options, Some(label));
         let sample = sample.expect("perf label should request sample");
         let effort = sample.elapsed_micros + sample.nodes as u128 * 10;
         eprintln!(

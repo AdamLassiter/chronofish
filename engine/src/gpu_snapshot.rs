@@ -1,11 +1,13 @@
-const GPU_SNAPSHOT_MAGIC: i32 = 0x4346_4750;
-const GPU_SNAPSHOT_VERSION: i32 = 1;
-const GPU_TIMELINE_RECORD_I32S: i32 = 8;
-const GPU_BOARD_RECORD_I32S: i32 = 12;
-const GPU_BOARD_SQUARE_I32S: i32 = 64;
+use crate::*;
+
+pub(crate) const GPU_SNAPSHOT_MAGIC: i32 = 0x4346_4750;
+pub(crate) const GPU_SNAPSHOT_VERSION: i32 = 1;
+pub(crate) const GPU_TIMELINE_RECORD_I32S: i32 = 8;
+pub(crate) const GPU_BOARD_RECORD_I32S: i32 = 12;
+pub(crate) const GPU_BOARD_SQUARE_I32S: i32 = 64;
 
 impl Game {
-    fn gpu_snapshot_bytes(&self) -> Vec<u8> {
+    pub(crate) fn gpu_snapshot_bytes(&self) -> Vec<u8> {
         let mut timelines = self.timelines.clone();
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
         let board_count = timelines
@@ -62,8 +64,14 @@ impl Game {
                 push_i32(&mut words, castling_code(board.castling));
                 push_i32(&mut words, board.en_passant.map_or(-1, |target| target.x));
                 push_i32(&mut words, board.en_passant.map_or(-1, |target| target.y));
-                push_i32(&mut words, board.en_passant.map_or(-1, |target| target.captured_x));
-                push_i32(&mut words, board.en_passant.map_or(-1, |target| target.captured_y));
+                push_i32(
+                    &mut words,
+                    board.en_passant.map_or(-1, |target| target.captured_x),
+                );
+                push_i32(
+                    &mut words,
+                    board.en_passant.map_or(-1, |target| target.captured_y),
+                );
                 push_i32(&mut words, (board.time == latest_time) as i32);
                 push_i32(&mut words, origin_code(&board.origin));
                 push_i32(&mut words, 0);
@@ -106,7 +114,7 @@ fn owner_code(owner: TimelineOwner) -> i32 {
     }
 }
 
-fn piece_type_code(piece_type: PieceType) -> i32 {
+pub(crate) fn piece_type_code(piece_type: PieceType) -> i32 {
     match piece_type {
         PieceType::King => 1,
         PieceType::CommonKing => 2,

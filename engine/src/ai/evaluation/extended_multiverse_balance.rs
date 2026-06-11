@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn extended_multiverse_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn extended_multiverse_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         let own_turn = self.turn_feature_summary(color, weights);
         let opp_turn = self.turn_feature_summary(color.opposite(), weights);
         let own_scores = self.individual_royal_safety_scores(color);
@@ -22,7 +24,8 @@ impl Game {
         let opp_temporal_lane = self.temporal_lane_control_score_for(color.opposite());
         let own_royal_distance = self.royal_distance_score_for(color);
         let opp_royal_distance = self.royal_distance_score_for(color.opposite());
-        let multiverse_size = self.active_timeline_count() + self.playable_board_keys(color).len() as i32;
+        let multiverse_size =
+            self.active_timeline_count() + self.playable_board_keys(color).len() as i32;
         let opening_factor = (6 - multiverse_size).max(0);
         let temporal_factor = (multiverse_size - 2).max(0);
 
@@ -31,7 +34,8 @@ impl Game {
                 * weights.turn_completion_safety
             + (opp_turn.zugzwang_boards - own_turn.zugzwang_boards) * weights.present_zugzwang
             + (own_weakest - opp_weakest) * weights.weakest_royal_safety
-            + (self.royal_liability_score_for(color.opposite()) - self.royal_liability_score_for(color))
+            + (self.royal_liability_score_for(color.opposite())
+                - self.royal_liability_score_for(color))
                 * weights.royal_liability_count
             + (self.multi_royal_attack_score_for(color)
                 - self.multi_royal_attack_score_for(color.opposite()))
@@ -67,7 +71,8 @@ impl Game {
             + (self.temporal_skewer_score_for(color, weights)
                 - self.temporal_skewer_score_for(color.opposite(), weights))
                 * weights.temporal_skewer
-            + (self.causal_battery_score_for(color) - self.causal_battery_score_for(color.opposite()))
+            + (self.causal_battery_score_for(color)
+                - self.causal_battery_score_for(color.opposite()))
                 * weights.causal_battery
             + (own_turn.safe_arrivals - opp_turn.safe_arrivals) * weights.arrival_square_safety
             + (opp_turn.source_abandonment - own_turn.source_abandonment)
@@ -84,21 +89,25 @@ impl Game {
             + (self.past_royal_vulnerability_score_for(color.opposite())
                 - self.past_royal_vulnerability_score_for(color))
                 * weights.past_royal_vulnerability
-            + (self.safe_haven_board_score_for(color) - self.safe_haven_board_score_for(color.opposite()))
+            + (self.safe_haven_board_score_for(color)
+                - self.safe_haven_board_score_for(color.opposite()))
                 * weights.safe_haven_boards
-            + (own_turn.escape_branches - opp_turn.escape_branches) * weights.escape_branch_potential
+            + (own_turn.escape_branches - opp_turn.escape_branches)
+                * weights.escape_branch_potential
             + (own_turn.mate_nets - opp_turn.mate_nets) * weights.mate_net_depth_1_2
             + (own_turn.anti_mate_resources - opp_turn.anti_mate_resources)
                 * weights.anti_mate_resources
             + (own_turn.check_quality - opp_turn.check_quality) * weights.checking_move_quality
-            + ((own_turn.volatility + own_urgent_threats) - (opp_turn.volatility + opp_urgent_threats))
+            + ((own_turn.volatility + own_urgent_threats)
+                - (opp_turn.volatility + opp_urgent_threats))
                 * weights.search_volatility
             + (self.timeline_repetition_risk_score_for(color.opposite())
                 - self.timeline_repetition_risk_score_for(color))
                 * weights.timeline_repetition_risk
             + ((self.development_count_for(color) - self.development_count_for(color.opposite()))
                 * opening_factor
-                + ((own_temporal_lane - opp_temporal_lane) + (own_royal_distance - opp_royal_distance) / 2)
+                + ((own_temporal_lane - opp_temporal_lane)
+                    + (own_royal_distance - opp_royal_distance) / 2)
                     * temporal_factor)
                 * weights.phase_by_multiverse_size
             + (own_royal_distance - opp_royal_distance) * weights.royal_distance_in_4d
@@ -107,7 +116,11 @@ impl Game {
                 * weights.board_importance_weight
     }
 
-    fn turn_feature_summary(&self, color: Color, weights: &EvalWeights) -> TurnFeatureSummary {
+    pub(crate) fn turn_feature_summary(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> TurnFeatureSummary {
         let obligations = self.present_obligation_count(color);
         let mut summary = TurnFeatureSummary {
             obligations,
@@ -148,7 +161,8 @@ impl Game {
         }
 
         for movement in search.current_turn_moves_for(color, weights, 48) {
-            let Some((piece, _move_kind)) = search.legal_move_kind(movement.from, movement.to) else {
+            let Some((piece, _move_kind)) = search.legal_move_kind(movement.from, movement.to)
+            else {
                 continue;
             };
             let is_temporal = movement.from.timeline_id != movement.to.timeline_id
@@ -197,7 +211,9 @@ impl Game {
                 if next_royal_safety > current_royal_safety {
                     summary.escape_branches += 1;
                 }
-                if let Some(arrival) = next.latest_arrival_position(color, movement.to.x, movement.to.y) {
+                if let Some(arrival) =
+                    next.latest_arrival_position(color, movement.to.x, movement.to.y)
+                {
                     if !next.is_square_attacked(arrival, color.opposite()) {
                         summary.safe_arrivals += 1;
                     }
@@ -205,14 +221,16 @@ impl Game {
                 if movement.from.time == search.present_time().unwrap_or(movement.from.time)
                     && next_royal_safety < current_royal_safety
                 {
-                    summary.source_abandonment += (current_royal_safety - next_royal_safety) / 50 + 1;
+                    summary.source_abandonment +=
+                        (current_royal_safety - next_royal_safety) / 50 + 1;
                 }
             }
 
             if gives_check {
                 let quality = 1
                     + (next_royal_safety >= current_royal_safety) as i32
-                    + (next.timeline_economy_for(color, weights) >= current_timeline_economy) as i32
+                    + (next.timeline_economy_for(color, weights) >= current_timeline_economy)
+                        as i32
                     + makes_mate_net as i32;
                 summary.check_quality += quality;
             }
@@ -232,13 +250,14 @@ impl Game {
                 + (next.active_timeline_count() > current_active_timelines) as i32;
         }
 
-        summary.anti_mate_resources =
-            summary.completion_count + summary.safe_move_count + summary.escape_branches
-                + self.safe_haven_board_score_for(color);
+        summary.anti_mate_resources = summary.completion_count
+            + summary.safe_move_count
+            + summary.escape_branches
+            + self.safe_haven_board_score_for(color);
         summary
     }
 
-    fn present_obligation_count(&self, color: Color) -> i32 {
+    pub(crate) fn present_obligation_count(&self, color: Color) -> i32 {
         let Some(present_time) = self.present_time() else {
             return 0;
         };
@@ -250,7 +269,7 @@ impl Game {
             .count() as i32
     }
 
-    fn estimated_turn_completion_count(
+    pub(crate) fn estimated_turn_completion_count(
         &self,
         color: Color,
         weights: &EvalWeights,
@@ -268,7 +287,7 @@ impl Game {
         self.estimated_turn_completion_count_at_depth(color, weights, 0, max_depth, limit)
     }
 
-    fn estimated_turn_completion_count_at_depth(
+    pub(crate) fn estimated_turn_completion_count_at_depth(
         &self,
         color: Color,
         weights: &EvalWeights,
@@ -306,7 +325,12 @@ impl Game {
         total
     }
 
-    fn current_turn_moves_for(&self, color: Color, weights: &EvalWeights, limit: usize) -> Vec<MoveStep> {
+    pub(crate) fn current_turn_moves_for(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limit: usize,
+    ) -> Vec<MoveStep> {
         if !self.has_pending_present_board(color) {
             return Vec::new();
         }
@@ -317,7 +341,7 @@ impl Game {
         moves
     }
 
-    fn legal_single_moves_from_board(
+    pub(crate) fn legal_single_moves_from_board(
         &self,
         timeline_id: i32,
         time: i32,
@@ -337,7 +361,12 @@ impl Game {
         let mut moves = Vec::new();
         for y in 0..8 {
             for x in 0..8 {
-                let from = Position { timeline_id, time, x, y };
+                let from = Position {
+                    timeline_id,
+                    time,
+                    x,
+                    y,
+                };
                 let Some(piece) = self.piece_at(from) else {
                     continue;
                 };
@@ -354,7 +383,8 @@ impl Game {
                                     x: target_x,
                                     y: target_y,
                                 };
-                                let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                                let Some((piece, move_kind)) = self.legal_move_kind(from, to)
+                                else {
                                     continue;
                                 };
                                 if self.allows_search_move(from, to, piece, move_kind) {
@@ -374,7 +404,7 @@ impl Game {
         moves
     }
 
-    fn latest_material_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn latest_material_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.latest_pieces()
             .into_iter()
             .filter(|(_, piece)| piece.color == color)
@@ -382,18 +412,22 @@ impl Game {
             .sum()
     }
 
-    fn opponent_temporal_tactic_pressure(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn opponent_temporal_tactic_pressure(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> i32 {
         self.royal_capture_pressure_for(color.opposite(), weights)
             + self.temporal_royal_corridor_pressure_for(color.opposite(), weights)
     }
 
-    fn royal_liability_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn royal_liability_score_for(&self, color: Color) -> i32 {
         let royal_scores = self.individual_royal_safety_scores(color);
         royal_scores.iter().filter(|score| **score < 0).count() as i32
             + royal_scores.len().saturating_sub(1) as i32
     }
 
-    fn multi_royal_attack_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn multi_royal_attack_score_for(&self, color: Color) -> i32 {
         let enemy_royals = self.royal_pieces(color.opposite());
         self.latest_pieces()
             .into_iter()
@@ -409,7 +443,7 @@ impl Game {
             .sum()
     }
 
-    fn urgent_threat_count_for(&self, color: Color) -> i32 {
+    pub(crate) fn urgent_threat_count_for(&self, color: Color) -> i32 {
         let enemy_royals = self.royal_pieces(color.opposite()).len() as i32;
         let enemy_hanging = self
             .latest_pieces()
@@ -423,9 +457,19 @@ impl Game {
         enemy_royals + enemy_hanging
     }
 
-    fn active_branch_capacity_score_for(&self, color: Color) -> i32 {
-        let min_timeline = self.timelines.iter().map(|timeline| timeline.id).min().unwrap_or(0);
-        let max_timeline = self.timelines.iter().map(|timeline| timeline.id).max().unwrap_or(0);
+    pub(crate) fn active_branch_capacity_score_for(&self, color: Color) -> i32 {
+        let min_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .min()
+            .unwrap_or(0);
+        let max_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .max()
+            .unwrap_or(0);
         let active_distance = (-min_timeline).min(max_timeline).max(0) + 1;
         let frontier = match color {
             Color::White => max_timeline.max(0),
@@ -434,9 +478,23 @@ impl Game {
         (active_distance - frontier).max(0)
     }
 
-    fn latent_timeline_reactivation_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
-        let min_timeline = self.timelines.iter().map(|timeline| timeline.id).min().unwrap_or(0);
-        let max_timeline = self.timelines.iter().map(|timeline| timeline.id).max().unwrap_or(0);
+    pub(crate) fn latent_timeline_reactivation_score_for(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> i32 {
+        let min_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .min()
+            .unwrap_or(0);
+        let max_timeline = self
+            .timelines
+            .iter()
+            .map(|timeline| timeline.id)
+            .max()
+            .unwrap_or(0);
         let active_distance = (-min_timeline).min(max_timeline).max(0) + 1;
         let owner = TimelineOwner::from_color(color);
         self.timelines
@@ -449,7 +507,7 @@ impl Game {
             .sum()
     }
 
-    fn inactive_material_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn inactive_material_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         let owner = TimelineOwner::from_color(color);
         self.timelines
             .iter()
@@ -458,7 +516,7 @@ impl Game {
             .sum()
     }
 
-    fn timeline_material(&self, timeline_id: i32, weights: &EvalWeights) -> i32 {
+    pub(crate) fn timeline_material(&self, timeline_id: i32, weights: &EvalWeights) -> i32 {
         let Some(timeline) = self.timeline(timeline_id) else {
             return 0;
         };
@@ -471,11 +529,13 @@ impl Game {
             .sum()
     }
 
-    fn timeline_compaction_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn timeline_compaction_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         let active_material: i32 = self
             .latest_pieces()
             .into_iter()
-            .filter(|(position, piece)| piece.color == color && self.is_active_timeline(position.timeline_id))
+            .filter(|(position, piece)| {
+                piece.color == color && self.is_active_timeline(position.timeline_id)
+            })
             .map(|(_, piece)| weights.piece_value(piece.piece_type) / 100)
             .sum();
         let inactive_material = self.inactive_material_score_for(color, weights);
@@ -483,7 +543,7 @@ impl Game {
         active_material + present_material - inactive_material
     }
 
-    fn present_board_material(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn present_board_material(&self, color: Color, weights: &EvalWeights) -> i32 {
         let Some(present_time) = self.present_time() else {
             return 0;
         };
@@ -499,7 +559,8 @@ impl Game {
             })
             .filter(|(_, board)| board.time == present_time)
             .map(|(_, board)| {
-                board.board
+                board
+                    .board
                     .iter()
                     .flatten()
                     .filter_map(|piece| *piece)
@@ -515,7 +576,7 @@ impl Game {
             .sum()
     }
 
-    fn historical_access_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn historical_access_score_for(&self, color: Color) -> i32 {
         let mut score = 0;
         for (from, piece) in self.latest_pieces() {
             if piece.color != color {
@@ -536,9 +597,9 @@ impl Game {
                             };
                             if self.attacks_square(piece, from, target) {
                                 score += 1;
-                                if board.board[y][x]
-                                    .is_some_and(|target_piece| Self::is_royal_piece(target_piece.piece_type))
-                                {
+                                if board.board[y][x].is_some_and(|target_piece| {
+                                    Self::is_royal_piece(target_piece.piece_type)
+                                }) {
                                     score += 2;
                                 }
                             }
@@ -550,7 +611,7 @@ impl Game {
         score
     }
 
-    fn temporal_lane_control_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn temporal_lane_control_score_for(&self, color: Color) -> i32 {
         self.latest_pieces()
             .into_iter()
             .filter(|(_, piece)| piece.color == color)
@@ -558,7 +619,7 @@ impl Game {
             .sum()
     }
 
-    fn temporal_open_line_count(&self, position: Position, piece: Piece) -> i32 {
+    pub(crate) fn temporal_open_line_count(&self, position: Position, piece: Piece) -> i32 {
         if !self.is_temporal_slider(piece.piece_type) {
             return 0;
         }
@@ -577,22 +638,29 @@ impl Game {
         directions
             .iter()
             .filter(|(dx, dy, dt, dl)| {
-                self.first_step_on_line(position, *dx, *dy, *dt, *dl).is_some_and(|target| {
-                    self.piece_at(target).is_none() && self.attacks_square(piece, position, target)
-                })
+                self.first_step_on_line(position, *dx, *dy, *dt, *dl)
+                    .is_some_and(|target| {
+                        self.piece_at(target).is_none()
+                            && self.attacks_square(piece, position, target)
+                    })
             })
             .count() as i32
     }
 
-    fn temporal_pin_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn temporal_pin_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.temporal_xray_score_for(color, weights, true)
     }
 
-    fn temporal_skewer_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn temporal_skewer_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.temporal_xray_score_for(color, weights, false)
     }
 
-    fn temporal_xray_score_for(&self, color: Color, weights: &EvalWeights, pin_mode: bool) -> i32 {
+    pub(crate) fn temporal_xray_score_for(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        pin_mode: bool,
+    ) -> i32 {
         let enemy_royals = self.royal_pieces(color.opposite());
         let mut score = 0;
         for (from, piece) in self.latest_pieces() {
@@ -629,7 +697,7 @@ impl Game {
         score
     }
 
-    fn causal_battery_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn causal_battery_score_for(&self, color: Color) -> i32 {
         let enemy_royals = self.royal_pieces(color.opposite());
         let own_pieces = self.latest_pieces();
         let mut score = 0;
@@ -658,7 +726,7 @@ impl Game {
         score
     }
 
-    fn is_temporal_slider(&self, piece_type: PieceType) -> bool {
+    pub(crate) fn is_temporal_slider(&self, piece_type: PieceType) -> bool {
         matches!(
             piece_type,
             PieceType::Rook
@@ -671,7 +739,7 @@ impl Game {
         )
     }
 
-    fn piece_temporal_flexibility_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn piece_temporal_flexibility_score_for(&self, color: Color) -> i32 {
         self.latest_pieces()
             .into_iter()
             .filter(|(_, piece)| piece.color == color)
@@ -691,7 +759,7 @@ impl Game {
             .sum()
     }
 
-    fn dimension_coverage_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn dimension_coverage_score_for(&self, color: Color) -> i32 {
         let mut x = 0;
         let mut y = 0;
         let mut t = 0;
@@ -714,7 +782,7 @@ impl Game {
         [x, y, t, l].into_iter().min().unwrap_or(0)
     }
 
-    fn past_royal_vulnerability_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn past_royal_vulnerability_score_for(&self, color: Color) -> i32 {
         self.royal_pieces(color)
             .into_iter()
             .filter(|(position, _)| !self.is_latest_board(position.timeline_id, position.time))
@@ -722,7 +790,7 @@ impl Game {
             .sum()
     }
 
-    fn safe_haven_board_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn safe_haven_board_score_for(&self, color: Color) -> i32 {
         self.royal_pieces(color)
             .into_iter()
             .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
@@ -735,7 +803,7 @@ impl Game {
             .sum()
     }
 
-    fn royal_distance_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn royal_distance_score_for(&self, color: Color) -> i32 {
         let enemy_royals = self.royal_pieces(color.opposite());
         self.latest_pieces()
             .into_iter()
@@ -753,10 +821,19 @@ impl Game {
             .sum()
     }
 
-    fn board_importance_material_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn board_importance_material_score_for(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> i32 {
         self.timelines
             .iter()
-            .flat_map(|timeline| timeline.boards.iter().map(move |board| (timeline.id, board)))
+            .flat_map(|timeline| {
+                timeline
+                    .boards
+                    .iter()
+                    .map(move |board| (timeline.id, board))
+            })
             .map(|(timeline_id, board)| {
                 self.board_importance(timeline_id, board)
                     * board
@@ -776,7 +853,7 @@ impl Game {
             .sum()
     }
 
-    fn board_importance(&self, timeline_id: i32, board: &BoardSnapshot) -> i32 {
+    pub(crate) fn board_importance(&self, timeline_id: i32, board: &BoardSnapshot) -> i32 {
         let latest = self.is_latest_board(timeline_id, board.time) as i32;
         let active = self.is_active_timeline(timeline_id) as i32;
         let present_distance = self
@@ -792,7 +869,7 @@ impl Game {
         latest * 3 + active * 2 + present_distance + royal_count.max(1)
     }
 
-    fn timeline_repetition_risk_score_for(&self, color: Color) -> i32 {
+    pub(crate) fn timeline_repetition_risk_score_for(&self, color: Color) -> i32 {
         let owner = TimelineOwner::from_color(color);
         let inactive = self
             .timelines
@@ -815,7 +892,7 @@ impl Game {
         inactive + repeated
     }
 
-    fn development_count_for(&self, color: Color) -> i32 {
+    pub(crate) fn development_count_for(&self, color: Color) -> i32 {
         self.latest_pieces()
             .into_iter()
             .filter(|(position, piece)| {

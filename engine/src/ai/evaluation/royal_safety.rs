@@ -1,3 +1,5 @@
+use super::*;
+
 impl Game {
     pub(crate) fn royal_safety_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.royal_safety_for(color, weights) - self.royal_safety_for(color.opposite(), weights)
@@ -11,7 +13,7 @@ impl Game {
             .sum()
     }
 
-    fn royal_escape_count(&self, position: Position, color: Color) -> i32 {
+    pub(crate) fn royal_escape_count(&self, position: Position, color: Color) -> i32 {
         let mut search = self.clone_for_search();
         search.turn = color;
         let mut escapes = 0;
@@ -27,7 +29,9 @@ impl Game {
                     y: position.y + dy,
                 };
                 if !Self::in_bounds(to.x, to.y)
-                    || search.piece_at(to).is_some_and(|piece| piece.color == color)
+                    || search
+                        .piece_at(to)
+                        .is_some_and(|piece| piece.color == color)
                     || search.is_square_attacked(to, color.opposite())
                 {
                     continue;

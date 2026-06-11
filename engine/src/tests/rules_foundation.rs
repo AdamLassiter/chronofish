@@ -110,9 +110,7 @@ fn search_ignores_inactive_timeline_sources() {
             y: 1,
         },
     ));
-    assert!(moves
-        .iter()
-        .all(|movement| movement.from.timeline_id != -2));
+    assert!(moves.iter().all(|movement| movement.from.timeline_id != -2));
 }
 
 #[test]

@@ -1,4 +1,5 @@
 use super::*;
+use crate::{gpu_snapshot::*, training::*};
 
 fn trainer_test_config() -> TrainerConfig {
     TrainerConfig {
@@ -7,7 +8,6 @@ fn trainer_test_config() -> TrainerConfig {
         population: 4,
         depth: 1,
         nodes: 5,
-        plies: 0,
         seed: 7,
         max_seconds: Some(1),
         out: None,
@@ -27,7 +27,41 @@ fn trainer_test_config() -> TrainerConfig {
         draw_rate_limit: 0.75,
         max_generations_without_candidate: 1,
         finalist_count: 2,
+        search_strategy: TrainingSearchStrategy::AlphaBeta,
     }
+}
+
+#[test]
+fn alpha_beta_training_strategy_is_always_available() {
+    assert_eq!(
+        TrainingSearchStrategy::parse("alpha-beta"),
+        Ok(TrainingSearchStrategy::AlphaBeta)
+    );
+}
+
+#[cfg(not(feature = "training-beam-search"))]
+#[test]
+fn beam_training_strategy_requires_feature() {
+    assert!(TrainingSearchStrategy::parse("beam")
+        .expect_err("beam should require its Cargo feature")
+        .contains("training-beam-search"));
+}
+
+#[cfg(feature = "training-beam-search")]
+#[test]
+fn beam_training_strategy_returns_submit_valid_turn() {
+    let game = Game::new();
+    let mut config = trainer_test_config();
+    config.nodes = 200;
+    config.search_strategy = TrainingSearchStrategy::Beam;
+
+    let plan = training_turn_plan(&game, EvalWeights::default_tuned(), &config, None)
+        .expect("beam search should find a turn");
+    let mut replay = game;
+    for movement in plan.moves {
+        assert_eq!(replay.apply_move(movement.from, movement.to), 1);
+    }
+    assert_eq!(replay.submit_turn(), 1);
 }
 
 #[test]

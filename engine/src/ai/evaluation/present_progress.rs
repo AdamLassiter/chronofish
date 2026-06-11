@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn present_progress(&self, color: Color) -> i32 {
+    pub(crate) fn present_progress(&self, color: Color) -> i32 {
         let Some(present) = self.present_board() else {
             return 0;
         };

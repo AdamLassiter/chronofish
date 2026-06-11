@@ -1,12 +1,15 @@
+use super::*;
+
 impl Game {
-    fn pawn_structure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn pawn_structure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.pawn_structure_for(color, weights) - self.pawn_structure_for(color.opposite(), weights)
     }
 
     pub(crate) fn pawn_structure_for(&self, color: Color, weights: &EvalWeights) -> i32 {
         let mut score = 0;
         for (position, piece) in self.latest_pieces() {
-            if piece.color != color || !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+            if piece.color != color
+                || !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
             {
                 continue;
             }

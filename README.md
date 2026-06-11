@@ -23,6 +23,7 @@ The project currently includes:
 chronofish/
   engine/                  Rust engine crate and native trainer
     src/ai/                AI search, evaluation, weights, and parameters
+    src/notation/          Notation formatting, parsing, and replay
     src/training/          Native genetic training harness
   server/                  Rust static file and multiplayer room server
   web/                     Browser frontend npm project
@@ -122,16 +123,19 @@ The server stores rooms in memory. Restarting it clears all rooms.
 
 ## Engine
 
-The engine is one crate split into small include files so private helpers can be
-shared without exposing a broad crate API:
+The engine is one crate organized as normal Rust modules. Internal APIs use
+`pub(crate)` where sibling modules need to collaborate, while the public surface
+stays limited to the WASM C ABI and native training entrypoint:
 
 - `model.rs` defines core state types;
 - `game.rs` applies moves, staging, submission, timelines, castling, en-passant,
   and present-line rules;
 - `movegen.rs` implements attacks and legal movement across board, time, and
   timeline axes;
+- `notation/` contains notation formatting, parsing, and replay;
 - `ai/search.rs` implements iterative deepening, alpha-beta, quiescence search,
-  move ordering, and turn-plan generation;
+  move ordering, and candidate generation, while `ai/staged_search.rs` searches
+  multi-board turns incrementally;
 - `ai/evaluation/` scores material, timelines, safety, tactics, and 5D
   strategic features;
 - `engine/models/cpu-v1/parameters.json` contains the active CPU heuristic
@@ -182,8 +186,16 @@ For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --config fast --generations 1 --population 4 --depth 1 --nodes 20 --plies 1 \
+  --config fast --generations 1 --population 4 --depth 1 --nodes 20 \
   --min-pairs 4 --max-pairs 8 --max-seconds 20
+```
+
+Alpha-beta is the default training search. An experimental beam strategy is
+available only when its Cargo feature is enabled:
+
+```sh
+cargo run -q --manifest-path engine/Cargo.toml --features training-beam-search \
+  --bin train -- --search-strategy beam --max-seconds 20
 ```
 
 ## AI Effort Presets

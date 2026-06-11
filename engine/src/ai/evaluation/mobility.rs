@@ -1,9 +1,11 @@
+use super::*;
+
 impl Game {
-    fn mobility_balance(&self, color: Color) -> i32 {
+    pub(crate) fn mobility_balance(&self, color: Color) -> i32 {
         self.legal_single_move_count_for(color) - self.legal_single_move_count_for(color.opposite())
     }
 
-    fn legal_single_move_count_for(&self, color: Color) -> i32 {
+    pub(crate) fn legal_single_move_count_for(&self, color: Color) -> i32 {
         let mut count = 0;
         for timeline in &self.timelines {
             if !self.is_active_timeline(timeline.id) {
@@ -56,7 +58,7 @@ impl Game {
         count
     }
 
-    fn legal_move_kind_for_turn(
+    pub(crate) fn legal_move_kind_for_turn(
         &self,
         turn: Color,
         from: Position,
@@ -86,6 +88,7 @@ impl Game {
             return None;
         }
 
-        self.move_kind_for(piece, from, to).map(|kind| (piece, kind))
+        self.move_kind_for(piece, from, to)
+            .map(|kind| (piece, kind))
     }
 }

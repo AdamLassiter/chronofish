@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn piece_activity_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn piece_activity_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.piece_activity_for(color, weights) - self.piece_activity_for(color.opposite(), weights)
     }
 

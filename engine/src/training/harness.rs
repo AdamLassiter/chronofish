@@ -1,39 +1,32 @@
-fn run_training_cycle(config: &TrainerConfig) {
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use pretty_log::transient;
+use rayon::prelude::*;
+
+use super::*;
+
+pub(crate) fn run_training_cycle(config: &TrainerConfig) {
     // Promotion rewrites the parameter include file, so refuse to continue when
     // it already has local edits that should not be mixed with generated tuning.
     if ai_source_is_dirty(&config.ai_src) {
-        eprintln!(
+        pretty_log::fail(format!(
             "{} has uncommitted changes; commit or stash before running training",
             config.ai_src
-        );
+        ));
         std::process::exit(1);
     }
 
-    println!(
-        "training config={} max_seconds={} population={} finalists={} base_depth={} base_nodes={} plies={} seed={} min_pairs={} max_pairs={}",
-        config.effort,
-        config
-            .max_seconds
-            .map(|seconds| seconds.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        config.population,
-        config.finalist_count,
-        config.depth,
-        config.nodes,
-        config.plies,
-        config.seed,
-        config.min_pairs,
-        config.max_pairs
-    );
-    println!(
-        "score note: fitness points are aggregate evaluation margins from short matches; comparison wins/losses are decided by candidate fitness minus baseline fitness per seed"
+    training_banner(config);
+    pretty_log::phase(
+        "Fitness uses full-match evaluation margins; comparisons use candidate minus baseline per seed",
     );
 
     let deadline = training_deadline(config);
     let hall_of_fame = load_hall_of_fame(&config.hall_of_fame);
+    pretty_log::section("Evolution");
     let candidate = train_weights_until(config, deadline);
     if candidate == EvalWeights::default_tuned() {
-        println!("candidate inconclusive: selected weights match committed baseline");
+        pretty_log::warn("candidate inconclusive: selected weights match committed baseline");
         return;
     }
     let candidate_json = candidate.to_json();
@@ -41,11 +34,13 @@ fn run_training_cycle(config: &TrainerConfig) {
     let mut deltas = Vec::new();
     let mut comparison_match_stats = MatchStats::default();
 
-    println!("candidate weights: {candidate_json}");
+    pretty_log::section("Candidate");
+    pretty_log::label_value("weights", candidate_json);
+    pretty_log::section("Comparison");
     let mut rng = Lcg::new(config.seed ^ 0xadc8_3b19_7f4a_7c15);
     loop {
         if training_expired(deadline) {
-            println!("comparison stopped: max seconds exhausted");
+            pretty_log::warn("comparison stopped: max seconds exhausted");
             break;
         }
         let remaining_pairs = config.max_pairs.saturating_sub(comparison_stats.played);
@@ -56,42 +51,54 @@ fn run_training_cycle(config: &TrainerConfig) {
         if seeds.is_empty() {
             break;
         }
+        let completed = AtomicUsize::new(0);
+        let total = seeds.len();
         let reports: Vec<(u64, PairReport)> = seeds
             .par_iter()
             .copied()
-            .map(|seed| (seed, paired_baseline_report(candidate, seed, config, deadline)))
+            .map(|seed| {
+                let report = paired_baseline_report(candidate, seed, config, deadline);
+                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                training_progress(
+                    "comparison",
+                    done,
+                    total,
+                    format!("remaining={}s", remaining_seconds(deadline)),
+                );
+                (seed, report)
+            })
             .collect();
         for (seed, report) in reports {
             comparison_match_stats.add(report.candidate.matches);
             comparison_match_stats.add(report.baseline.matches);
             let delta = report.delta();
-        comparison_stats.record(delta);
-        deltas.push(delta);
-        let result = if delta > 0 {
-            "win"
-        } else if delta < 0 {
-            "loss"
-        } else {
-            "draw"
-        };
-        println!(
-            "seed {seed}: {result} candidate={} baseline={} delta={delta}",
+            comparison_stats.record(delta);
+            deltas.push(delta);
+            let result = if delta > 0 {
+                "win"
+            } else if delta < 0 {
+                "loss"
+            } else {
+                "draw"
+            };
+            training_note(format!(
+                "seed {seed}: {result} candidate={} baseline={} delta={delta}",
                 report.candidate.summary(),
                 report.baseline.summary()
-            );
+            ));
         }
         let significance = significance(&deltas);
         match statistical_decision(comparison_stats, &deltas, significance, config) {
             StatisticalDecision::Promote => {
-                println!("sequential comparison accepted");
+                pretty_log::success("sequential comparison accepted");
                 break;
             }
             StatisticalDecision::Reject => {
-                println!("sequential comparison rejected");
+                pretty_log::warn("sequential comparison rejected");
                 break;
             }
             StatisticalDecision::Inconclusive => {
-                println!("sequential comparison inconclusive");
+                pretty_log::warn("sequential comparison inconclusive");
                 break;
             }
             StatisticalDecision::Continue => {}
@@ -106,6 +113,7 @@ fn run_training_cycle(config: &TrainerConfig) {
         config,
     );
     if should_promote(comparison_stats, significance, config) {
+        pretty_log::phase("Promoting candidate");
         promote_weights(candidate, &config.ai_src);
         append_hall_of_fame(&config.hall_of_fame, candidate);
         run_command("cargo", &["fmt"]);
@@ -115,26 +123,28 @@ fn run_training_cycle(config: &TrainerConfig) {
             run_command("git", &["add", &config.hall_of_fame]);
         }
         run_command("git", &["commit", "-m", "Tune AI evaluation parameters"]);
-        println!("promoted candidate and committed updated parameters");
+        pretty_log::success("promoted candidate and committed updated parameters");
     } else {
         match statistical_decision(comparison_stats, &deltas, significance, config) {
-            StatisticalDecision::Reject => println!("candidate rejected"),
+            StatisticalDecision::Reject => pretty_log::warn("candidate rejected"),
             StatisticalDecision::Inconclusive | StatisticalDecision::Continue => {
-                println!("candidate inconclusive")
+                pretty_log::warn("candidate inconclusive")
             }
-            StatisticalDecision::Promote => println!("candidate rejected"),
+            StatisticalDecision::Promote => pretty_log::warn("candidate rejected"),
         }
     }
 }
 
-fn train_weights(config: &TrainerConfig) -> EvalWeights {
+pub(crate) fn train_weights(config: &TrainerConfig) -> EvalWeights {
     train_weights_until(config, training_deadline(config))
 }
 
-fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) -> EvalWeights {
-    println!(
-        "fitness score = material/tempo/check/present-line heuristic accumulated over {} plies against default and mutated opponents",
-        config.plies
+pub(crate) fn train_weights_until(
+    config: &TrainerConfig,
+    deadline: Option<SearchInstant>,
+) -> EvalWeights {
+    pretty_log::phase(
+        "Scoring candidates across full matches against default and mutated opponents",
     );
     let mut rng = Lcg::new(config.seed);
     let committed = EvalWeights::default_tuned();
@@ -161,32 +171,43 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
         let depth_boost = (elapsed / 600).min(2) as i32;
         let search_depth = config.depth + depth_boost;
         let search_nodes = config.nodes * search_depth as usize;
-        let search_plies = config.plies + depth_boost as usize * 2;
-        let scoring_config = config.with_search(search_depth, search_nodes, search_plies);
+        let scoring_config = config.with_search(search_depth, search_nodes);
         let screening_config = scoring_config.screening_search();
-        let baseline_report =
-            fitness_until(EvalWeights::default_tuned(), &scoring_config, deadline);
-        let started_candidates = AtomicUsize::new(0);
+        let baseline_report = fitness_until_named(
+            EvalWeights::default_tuned(),
+            &format!("generation {generation} committed baseline"),
+            &scoring_config,
+            deadline,
+        );
+        let finished_candidates = AtomicUsize::new(0);
         let population_len = population.len();
         let mut screened: Vec<(FitnessReport, EvalWeights)> = population
             .par_iter()
             .copied()
-            .filter_map(|weights| {
+            .enumerate()
+            .filter_map(|(index, weights)| {
                 if training_expired(deadline) {
                     return None;
                 }
-                let index = started_candidates.fetch_add(1, Ordering::Relaxed);
-                let remaining = remaining_seconds(deadline);
-                eprintln!(
-                    "generation {generation}: screening candidate {}/{} depth={} nodes={} plies={} remaining={}s",
-                    index + 1,
-                    population_len,
-                    screening_config.depth,
-                    screening_config.nodes,
-                    screening_config.plies,
-                    remaining
+                let report = fitness_until_with_opponent_limit(
+                    weights,
+                    &format!("generation {generation} screening candidate {}", index + 1),
+                    &screening_config,
+                    deadline,
+                    2,
                 );
-                let report = fitness_until_with_opponent_limit(weights, &screening_config, deadline, 2);
+                let done = finished_candidates.fetch_add(1, Ordering::Relaxed) + 1;
+                training_progress(
+                    &format!("generation {generation} screening"),
+                    done,
+                    population_len,
+                    format!(
+                        "depth={} nodes={} remaining={}s",
+                        screening_config.depth,
+                        screening_config.nodes,
+                        remaining_seconds(deadline)
+                    ),
+                );
                 Some((report, weights))
             })
             .collect();
@@ -200,23 +221,33 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
             .take(finalist_count)
             .map(|entry| entry.1)
             .collect();
-        let finalist_started = AtomicUsize::new(0);
+        let finalist_finished = AtomicUsize::new(0);
         let mut scored: Vec<(FitnessReport, EvalWeights)> = finalists
             .par_iter()
             .copied()
-            .filter_map(|weights| {
+            .enumerate()
+            .filter_map(|(index, weights)| {
                 if training_expired(deadline) {
                     return None;
                 }
-                let index = finalist_started.fetch_add(1, Ordering::Relaxed);
-                let remaining = remaining_seconds(deadline);
-                eprintln!(
-                    "generation {generation}: scoring finalist {}/{} depth={search_depth} nodes={search_nodes} plies={search_plies} remaining={}s",
-                    index + 1,
-                    finalist_count,
-                    remaining
+                let report = fitness_until_named(
+                    weights,
+                    &format!("generation {generation} finalist {}", index + 1),
+                    &scoring_config,
+                    deadline,
                 );
-                let report = fitness_until(weights, &scoring_config, deadline);
+                let done = finalist_finished.fetch_add(1, Ordering::Relaxed) + 1;
+                training_progress(
+                    &format!("generation {generation} finalists"),
+                    done,
+                    finalist_count,
+                    format!(
+                        "depth={} nodes={} remaining={}s",
+                        search_depth,
+                        search_nodes,
+                        remaining_seconds(deadline)
+                    ),
+                );
                 Some((report, weights))
             })
             .collect();
@@ -243,11 +274,10 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
         let improvement = previous_best.map_or(0, |previous| best - previous);
         previous_best = Some(best);
         let remaining = remaining_seconds(deadline);
-        eprintln!(
-            "generation {generation}: screen_depth={} screen_nodes={} screen_plies={} depth={search_depth} nodes={search_nodes} plies={search_plies} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
+        training_note(format!(
+            "generation {generation}: screen_depth={} screen_nodes={} depth={search_depth} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
             screening_config.depth,
             screening_config.nodes,
-            screening_config.plies,
             screened.len(),
             scored.len(),
             generation_match_stats.summary(),
@@ -257,7 +287,7 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
             baseline_report.summary(),
             started.elapsed().as_secs_f32(),
             remaining
-        );
+        ));
 
         if quality.wins == 0 {
             mutation_scale = (mutation_scale * 0.75).max(0.25);
@@ -269,20 +299,15 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
             generations_without_candidate = 0;
         }
 
-        let league_winner = select_league_winner(
-            &scored,
-            committed,
-            &hall_of_fame,
-            &scoring_config,
-            deadline,
-        )
-        .unwrap_or_else(|| {
-            scored
-                .iter()
-                .find(|entry| entry.1 != committed)
-                .map(|entry| entry.1)
-                .unwrap_or_else(|| committed.mutate_with_scale(&mut rng, mutation_scale))
-        });
+        let league_winner =
+            select_league_winner(&scored, committed, &hall_of_fame, &scoring_config, deadline)
+                .unwrap_or_else(|| {
+                    scored
+                        .iter()
+                        .find(|entry| entry.1 != committed)
+                        .map(|entry| entry.1)
+                        .unwrap_or_else(|| committed.mutate_with_scale(&mut rng, mutation_scale))
+                });
         if best_seen_score <= best {
             best_seen = league_winner;
         }
@@ -299,10 +324,10 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
         }
         population = next;
         if generations_without_candidate >= config.max_generations_without_candidate {
-            eprintln!(
+            pretty_log::warn(format!(
                 "training stopped: {} generations without a candidate beating baseline",
                 generations_without_candidate
-            );
+            ));
             break;
         }
     }
@@ -314,20 +339,27 @@ fn train_weights_until(config: &TrainerConfig, deadline: Option<SearchInstant>) 
     }
 }
 
-fn fitness(weights: EvalWeights, config: &TrainerConfig) -> FitnessReport {
-    fitness_until(weights, config, training_deadline(config))
+pub(crate) fn fitness(weights: EvalWeights, config: &TrainerConfig) -> FitnessReport {
+    fitness_until_named(
+        weights,
+        "score candidate",
+        config,
+        training_deadline(config),
+    )
 }
 
-fn fitness_until(
+pub(crate) fn fitness_until_named(
     weights: EvalWeights,
+    candidate_label: &str,
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> FitnessReport {
-    fitness_until_with_opponent_limit(weights, config, deadline, 4)
+    fitness_until_with_opponent_limit(weights, candidate_label, config, deadline, 4)
 }
 
-fn fitness_until_with_opponent_limit(
+pub(crate) fn fitness_until_with_opponent_limit(
     weights: EvalWeights,
+    candidate_label: &str,
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
     opponent_limit: usize,
@@ -345,15 +377,31 @@ fn fitness_until_with_opponent_limit(
         opponents.push(default.mutate(&mut rng));
     }
 
-    let work: Vec<(EvalWeights, u64)> = opponents
+    let work: Vec<(EvalWeights, u64, String)> = opponents
         .into_iter()
         .take(opponent_limit.max(1))
         .enumerate()
-        .map(|(index, opponent)| (opponent, rng.next_u64() ^ ((index as u64) << 32)))
+        .map(|(index, opponent)| {
+            (
+                opponent,
+                rng.next_u64() ^ ((index as u64) << 32),
+                opponent_label(index),
+            )
+        })
         .collect();
     let pairs: Vec<PairReport> = work
         .par_iter()
-        .map(|(opponent, seed)| paired_report(weights, *opponent, *seed, config, deadline))
+        .map(|(opponent, seed, opponent_label)| {
+            paired_report(
+                weights,
+                *opponent,
+                *seed,
+                candidate_label,
+                opponent_label,
+                config,
+                deadline,
+            )
+        })
         .collect();
 
     for pair in pairs {
@@ -365,30 +413,30 @@ fn fitness_until_with_opponent_limit(
     report
 }
 
-fn play_match_until(
+pub(crate) fn play_match_until(
     start: Game,
     weights: EvalWeights,
     opponent: EvalWeights,
     color: Color,
+    candidate_label: &str,
+    opponent_label: &str,
+    match_label: &str,
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> MatchReport {
-    // Matches are short by design; the heuristic should learn opening material,
-    // tempo, and branch quality before deeper minimax is affordable.
+    // Full-match scoring keeps the objective aligned with real game outcomes
+    // rather than stopping at a fixed ply horizon.
     let mut game = start;
     let mut score = 0;
     let mut stable_advantage = 0;
-    for ply in 0..config.plies {
+    let mut plies_played = 0;
+    loop {
         if training_expired(deadline) {
             break;
         }
-        let side_weights = if game.turn == color {
-            weights
-        } else {
-            opponent
-        };
-        let mut context = SearchContext::new(side_weights, game.turn, config.nodes, deadline);
-        let Some((plan, _)) = game.search_root(config.depth, &mut context, None) else {
+        let mover = game.turn;
+        let side_weights = if mover == color { weights } else { opponent };
+        let Some(plan) = training_turn_plan(&game, side_weights, config, deadline) else {
             let result = if game.turn == color {
                 MatchResult::Loss
             } else {
@@ -397,27 +445,40 @@ fn play_match_until(
             return MatchReport {
                 score: score
                     + if result == MatchResult::Win {
-                        20_000
+                        20_000 - plies_played * 10
                     } else {
-                        -20_000
+                        -20_000 + plies_played * 10
                     },
                 result,
                 blunder: result == MatchResult::Loss,
             };
         };
-        game = plan.game;
+        let notation = turn_plan_notation(&game, &plan);
+        game = game
+            .apply_turn_plan_for_search(&plan)
+            .expect("training search returned an applicable turn");
+        plies_played += 1;
         let eval = game.evaluate(color, &weights);
-        score += eval / 20 + eval.signum() * (config.plies - ply) as i32;
+        let mover_label = if mover == color {
+            candidate_label
+        } else {
+            opponent_label
+        };
+        transient(format!(
+            "{match_label} turn {plies_played} {} {mover_label}: {notation}",
+            mover.as_str()
+        ));
+        score += eval / 20;
         if game.terminal_score(color) == Some(CHECKMATE_SCORE) {
             return MatchReport {
-                score: score + CHECKMATE_SCORE / 10,
+                score: score + CHECKMATE_SCORE / 10 - plies_played * 10,
                 result: MatchResult::Win,
                 blunder: false,
             };
         }
         if game.terminal_score(color) == Some(-CHECKMATE_SCORE) {
             return MatchReport {
-                score: score - CHECKMATE_SCORE / 10,
+                score: score - CHECKMATE_SCORE / 10 + plies_played * 10,
                 result: MatchResult::Loss,
                 blunder: true,
             };
@@ -457,7 +518,30 @@ fn play_match_until(
     }
 }
 
-fn paired_baseline_report(
+pub(crate) fn turn_plan_notation(start: &Game, plan: &TurnPlan) -> String {
+    let mut notation_game = start.clone_for_search();
+    for movement in &plan.moves {
+        if notation_game.apply_move(movement.from, movement.to) == 0 {
+            return plan
+                .moves
+                .iter()
+                .map(|movement| {
+                    format!(
+                        "{}{} -> {}{}",
+                        position_prefix(movement.from),
+                        square_name(movement.from),
+                        position_prefix(movement.to),
+                        square_name(movement.to)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+        }
+    }
+    notation_game.staged_turn_notation()
+}
+
+pub(crate) fn paired_baseline_report(
     candidate: EvalWeights,
     seed: u64,
     config: &TrainerConfig,
@@ -467,20 +551,28 @@ fn paired_baseline_report(
         candidate,
         EvalWeights::default_tuned(),
         seed,
+        "comparison candidate",
+        "committed baseline",
         config,
         deadline,
     )
 }
 
-fn paired_report(
+pub(crate) fn paired_report(
     candidate: EvalWeights,
     baseline: EvalWeights,
     seed: u64,
+    candidate_label: &str,
+    opponent_label: &str,
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> PairReport {
     let start = seeded_start_position(seed, config, deadline);
     let black_start = start.clone();
+    let candidate_white_label =
+        format!("{candidate_label} vs {opponent_label} seed={seed} candidate=white");
+    let candidate_black_label =
+        format!("{candidate_label} vs {opponent_label} seed={seed} candidate=black");
     let (candidate_white, candidate_black) = rayon::join(
         || {
             play_match_until(
@@ -488,6 +580,9 @@ fn paired_report(
                 candidate,
                 baseline,
                 Color::White,
+                candidate_label,
+                opponent_label,
+                &candidate_white_label,
                 config,
                 deadline,
             )
@@ -498,6 +593,9 @@ fn paired_report(
                 candidate,
                 baseline,
                 Color::Black,
+                candidate_label,
+                opponent_label,
+                &candidate_black_label,
                 config,
                 deadline,
             )
@@ -514,7 +612,16 @@ fn paired_report(
     report
 }
 
-fn invert_report(report: MatchReport) -> MatchReport {
+pub(crate) fn opponent_label(index: usize) -> String {
+    match index {
+        0 => "committed baseline".to_string(),
+        1 => "hall-of-fame 1".to_string(),
+        2 => "hall-of-fame 2".to_string(),
+        value => format!("mutated opponent {}", value.saturating_sub(2)),
+    }
+}
+
+pub(crate) fn invert_report(report: MatchReport) -> MatchReport {
     let result = match report.result {
         MatchResult::Win => MatchResult::Loss,
         MatchResult::Loss => MatchResult::Win,
@@ -527,7 +634,7 @@ fn invert_report(report: MatchReport) -> MatchReport {
     }
 }
 
-fn select_league_winner(
+pub(crate) fn select_league_winner(
     scored: &[(FitnessReport, EvalWeights)],
     committed: EvalWeights,
     hall_of_fame: &[EvalWeights],
@@ -546,6 +653,8 @@ fn select_league_winner(
     let mut opponents = vec![EvalWeights::default_tuned()];
     opponents.extend(hall_of_fame.iter().copied().take(2));
     opponents.extend(contenders.iter().copied());
+    let total_pairs = contenders.len().saturating_mul(opponents.len()).max(1);
+    let league_progress = AtomicUsize::new(0);
 
     let mut results: Vec<(usize, EvalWeights, ComparisonStats)> = contenders
         .par_iter()
@@ -565,7 +674,23 @@ fn select_league_winner(
                         ^ ((index as u64) << 32)
                         ^ ((opponent_index as u64) << 48)
                         ^ 0xa5a5_5a5a_d3c3_b4b4;
-                    Some(paired_report(contender, opponent, seed, config, deadline))
+                    let report = paired_report(
+                        contender,
+                        opponent,
+                        seed,
+                        &format!("league candidate {}", index + 1),
+                        &format!("league opponent {}", opponent_index + 1),
+                        config,
+                        deadline,
+                    );
+                    let done = league_progress.fetch_add(1, Ordering::Relaxed) + 1;
+                    training_progress(
+                        "league",
+                        done,
+                        total_pairs,
+                        format!("remaining={}s", remaining_seconds(deadline)),
+                    );
+                    Some(report)
                 })
                 .collect();
             for report in reports {
@@ -576,7 +701,7 @@ fn select_league_winner(
         .collect();
     results.sort_by_key(|entry| entry.0);
     for (index, _, stats) in &results {
-        eprintln!(
+        training_note(format!(
             "league candidate {}: pairs={} wins={} losses={} draws={} win_rate={:.1}% elo={:+.0}",
             index + 1,
             stats.played,
@@ -585,7 +710,7 @@ fn select_league_winner(
             stats.draws,
             stats.win_rate() * 100.0,
             stats.estimated_elo()
-        );
+        ));
     }
     results
         .into_iter()
@@ -600,7 +725,7 @@ fn select_league_winner(
         .map(|entry| entry.1)
 }
 
-fn tournament(scored: &[(FitnessReport, EvalWeights)], rng: &mut Lcg) -> EvalWeights {
+pub(crate) fn tournament(scored: &[(FitnessReport, EvalWeights)], rng: &mut Lcg) -> EvalWeights {
     // Tournament selection applies pressure toward stronger candidates while
     // preserving enough randomness for weaker genomes to contribute genes.
     let mut best = scored[rng.next_usize(scored.len())];
@@ -613,22 +738,22 @@ fn tournament(scored: &[(FitnessReport, EvalWeights)], rng: &mut Lcg) -> EvalWei
     best.1
 }
 
-fn mutate_weight(value: i32, rng: &mut Lcg, spread: i32, min: i32, max: i32) -> i32 {
+pub(crate) fn mutate_weight(value: i32, rng: &mut Lcg, spread: i32, min: i32, max: i32) -> i32 {
     let delta = rng.next_usize((spread * 2 + 1) as usize) as i32 - spread;
     (value + delta).clamp(min, max)
 }
 
-fn training_deadline(config: &TrainerConfig) -> Option<SearchInstant> {
+pub(crate) fn training_deadline(config: &TrainerConfig) -> Option<SearchInstant> {
     config
         .max_seconds
         .map(|seconds| SearchInstant::now() + std::time::Duration::from_secs(seconds.max(1)))
 }
 
-fn training_expired(deadline: Option<SearchInstant>) -> bool {
+pub(crate) fn training_expired(deadline: Option<SearchInstant>) -> bool {
     deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
 }
 
-fn remaining_seconds(deadline: Option<SearchInstant>) -> String {
+pub(crate) fn remaining_seconds(deadline: Option<SearchInstant>) -> String {
     deadline.map_or_else(
         || "unbounded".to_string(),
         |deadline| {

@@ -1,5 +1,7 @@
+use super::*;
+
 impl AiSearchResult {
-    fn to_json(&self) -> String {
+    pub(crate) fn to_json(&self) -> String {
         format!(
             "{{\"moves\":[{}],\"score\":{},\"depth\":{},\"nodes\":{},\"status\":\"{}\"}}",
             self.moves
@@ -14,7 +16,7 @@ impl AiSearchResult {
         )
     }
 }
-fn move_step_json(step: &MoveStep) -> String {
+pub(crate) fn move_step_json(step: &MoveStep) -> String {
     format!(
         "{{\"from\":{},\"to\":{}}}",
         position_json(step.from),

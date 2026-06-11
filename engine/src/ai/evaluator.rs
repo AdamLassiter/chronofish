@@ -1,50 +1,56 @@
-const NEURAL_MAX_BOARDS: usize = 16;
-const NEURAL_BOARD_PLANES: usize = 32;
-const NEURAL_BOARD_SQUARES: usize = 64;
-const NEURAL_INPUT_SIZE: usize = NEURAL_MAX_BOARDS * NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
+use super::*;
+
+pub(crate) const NEURAL_MAX_BOARDS: usize = 16;
+pub(crate) const NEURAL_BOARD_PLANES: usize = 32;
+pub(crate) const NEURAL_BOARD_SQUARES: usize = 64;
+pub(crate) const NEURAL_INPUT_SIZE: usize =
+    NEURAL_MAX_BOARDS * NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
 
 #[derive(Clone)]
-struct HeuristicEvaluator;
+pub(crate) struct HeuristicEvaluator;
 
 #[derive(Clone)]
 #[allow(dead_code)]
-struct NeuralEvaluator {
-    model_path: Option<String>,
-    model: Option<NeuralLinearModel>,
+pub(crate) struct NeuralEvaluator {
+    pub(crate) model_path: Option<String>,
+    pub(crate) model: Option<NeuralLinearModel>,
 }
 
 #[derive(Clone)]
-struct HybridEvaluator {
-    heuristic_weight: i32,
-    neural_weight: i32,
-    neural: NeuralEvaluator,
+pub(crate) struct HybridEvaluator {
+    pub(crate) heuristic_weight: i32,
+    pub(crate) neural_weight: i32,
+    pub(crate) neural: NeuralEvaluator,
 }
 
 #[derive(Clone)]
-enum ValueEvaluator {
+pub(crate) enum ValueEvaluator {
     Heuristic(HeuristicEvaluator),
     Neural(NeuralEvaluator),
     Hybrid(HybridEvaluator),
 }
 
-struct NeuralEncodedPosition {
-    values: Vec<f32>,
-    board_count: usize,
+pub(crate) struct NeuralEncodedPosition {
+    pub(crate) values: Vec<f32>,
+    pub(crate) board_count: usize,
 }
 
 impl HeuristicEvaluator {
-    fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         game.evaluate_heuristic(color, weights)
     }
 }
 
 impl NeuralEvaluator {
-    fn missing_model(path: Option<String>) -> Self {
-        Self { model_path: path, model: None }
+    pub(crate) fn missing_model(path: Option<String>) -> Self {
+        Self {
+            model_path: path,
+            model: None,
+        }
     }
 
     #[allow(dead_code)]
-    fn from_model(model: NeuralLinearModel) -> Self {
+    pub(crate) fn from_model(model: NeuralLinearModel) -> Self {
         Self {
             model_path: None,
             model: Some(model),
@@ -53,7 +59,7 @@ impl NeuralEvaluator {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
-    fn from_path(path: impl Into<String>) -> Self {
+    pub(crate) fn from_path(path: impl Into<String>) -> Self {
         let path = path.into();
         let model = std::fs::read_to_string(&path)
             .ok()
@@ -64,7 +70,7 @@ impl NeuralEvaluator {
         }
     }
 
-    fn predict(&self, game: &Game, color: Color) -> Option<i32> {
+    pub(crate) fn predict(&self, game: &Game, color: Color) -> Option<i32> {
         let model = self.model.as_ref()?;
         let evaluation_game = game.pruned_for_evaluation();
         let encoded = evaluation_game.encode_neural_position(color);
@@ -75,14 +81,16 @@ impl NeuralEvaluator {
                 model.projection_size,
                 model.projection_seed,
             );
-            let hidden = evaluate_hidden_layers(&projected, &model.hidden_layers, &model.hidden_weights)?;
+            let hidden =
+                evaluate_hidden_layers(&projected, &model.hidden_layers, &model.hidden_weights)?;
             for (value, weight) in hidden.iter().zip(model.feature_weights.iter()) {
                 score += value * weight;
             }
             if model.feature_weights.len() > hidden.len() {
                 score += model.feature_weights[hidden.len()];
             }
-        } else if model.projection_size > 0 && model.feature_weights.len() == model.projection_size {
+        } else if model.projection_size > 0 && model.feature_weights.len() == model.projection_size
+        {
             let projected = project_neural_features(
                 &encoded.values,
                 model.projection_size,
@@ -104,24 +112,24 @@ impl NeuralEvaluator {
         )
     }
 
-    fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         self.predict(game, color)
             .unwrap_or_else(|| HeuristicEvaluator.evaluate(game, color, weights))
     }
 
     #[allow(dead_code)]
-    fn is_available(&self) -> bool {
+    pub(crate) fn is_available(&self) -> bool {
         self.model.is_some()
     }
 
     #[allow(dead_code)]
-    fn model_path(&self) -> Option<&str> {
+    pub(crate) fn model_path(&self) -> Option<&str> {
         self.model_path.as_deref()
     }
 }
 
 impl HybridEvaluator {
-    fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         let heuristic = HeuristicEvaluator.evaluate(game, color, weights);
         let Some(neural) = self.neural.predict(game, color) else {
             return heuristic;
@@ -132,17 +140,21 @@ impl HybridEvaluator {
 }
 
 impl ValueEvaluator {
-    fn heuristic() -> Self {
+    pub(crate) fn heuristic() -> Self {
         Self::Heuristic(HeuristicEvaluator)
     }
 
     #[allow(dead_code)]
-    fn neural(model_path: Option<String>) -> Self {
+    pub(crate) fn neural(model_path: Option<String>) -> Self {
         Self::Neural(NeuralEvaluator::missing_model(model_path))
     }
 
     #[allow(dead_code)]
-    fn hybrid_from_model(model: NeuralLinearModel, heuristic_weight: i32, neural_weight: i32) -> Self {
+    pub(crate) fn hybrid_from_model(
+        model: NeuralLinearModel,
+        heuristic_weight: i32,
+        neural_weight: i32,
+    ) -> Self {
         Self::Hybrid(HybridEvaluator {
             heuristic_weight,
             neural_weight,
@@ -152,13 +164,17 @@ impl ValueEvaluator {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
-    fn neural_from_path(path: impl Into<String>) -> Self {
+    pub(crate) fn neural_from_path(path: impl Into<String>) -> Self {
         Self::Neural(NeuralEvaluator::from_path(path))
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(dead_code)]
-    fn hybrid_from_path(path: impl Into<String>, heuristic_weight: i32, neural_weight: i32) -> Self {
+    pub(crate) fn hybrid_from_path(
+        path: impl Into<String>,
+        heuristic_weight: i32,
+        neural_weight: i32,
+    ) -> Self {
         Self::Hybrid(HybridEvaluator {
             heuristic_weight,
             neural_weight,
@@ -166,7 +182,7 @@ impl ValueEvaluator {
         })
     }
 
-    fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         match self {
             Self::Heuristic(evaluator) => evaluator.evaluate(game, color, weights),
             Self::Neural(evaluator) => evaluator.evaluate(game, color, weights),
@@ -175,7 +191,7 @@ impl ValueEvaluator {
     }
 
     #[allow(dead_code)]
-    fn neural_available(&self) -> bool {
+    pub(crate) fn neural_available(&self) -> bool {
         match self {
             Self::Heuristic(_) => false,
             Self::Neural(evaluator) => evaluator.is_available(),
@@ -184,7 +200,7 @@ impl ValueEvaluator {
     }
 
     #[allow(dead_code)]
-    fn model_path(&self) -> Option<&str> {
+    pub(crate) fn model_path(&self) -> Option<&str> {
         match self {
             Self::Heuristic(_) => None,
             Self::Neural(evaluator) => evaluator.model_path(),
@@ -194,7 +210,7 @@ impl ValueEvaluator {
 }
 
 impl Game {
-    fn encode_neural_position(&self, color: Color) -> NeuralEncodedPosition {
+    pub(crate) fn encode_neural_position(&self, color: Color) -> NeuralEncodedPosition {
         let mut values = vec![0.0; NEURAL_INPUT_SIZE];
         let selected = self.neural_board_selection();
         let board_count = selected.len();
@@ -243,18 +259,22 @@ impl Game {
             }
         }
 
-        NeuralEncodedPosition { values, board_count }
+        NeuralEncodedPosition {
+            values,
+            board_count,
+        }
     }
 
-    fn neural_board_selection(&self) -> Vec<(usize, usize)> {
+    pub(crate) fn neural_board_selection(&self) -> Vec<(usize, usize)> {
         let mut boards = Vec::new();
         for (timeline_index, timeline) in self.timelines.iter().enumerate() {
             for (board_index, board) in timeline.boards.iter().enumerate() {
                 let latest = self.is_latest_board(timeline.id, board.time);
                 let active = self.is_active_timeline(timeline.id);
-                let has_royal = board.board.iter().flatten().any(|piece| {
-                    piece.is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
-                });
+                let has_royal =
+                    board.board.iter().flatten().any(|piece| {
+                        piece.is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
+                    });
                 let has_recent_origin = matches!(board.origin, Origin::Move { .. });
                 if latest || has_royal || has_recent_origin {
                     let category = match (latest, active) {
@@ -283,11 +303,11 @@ impl Game {
     }
 }
 
-fn neural_feature_index(board: usize, plane: usize, square: usize) -> usize {
+pub(crate) fn neural_feature_index(board: usize, plane: usize, square: usize) -> usize {
     board * NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES + plane * NEURAL_BOARD_SQUARES + square
 }
 
-fn relative_color_value(color: Color, perspective: Color) -> f32 {
+pub(crate) fn relative_color_value(color: Color, perspective: Color) -> f32 {
     if color == perspective {
         1.0
     } else {
@@ -295,7 +315,7 @@ fn relative_color_value(color: Color, perspective: Color) -> f32 {
     }
 }
 
-fn neural_piece_plane(piece: Piece) -> usize {
+pub(crate) fn neural_piece_plane(piece: Piece) -> usize {
     let offset = if piece.color == Color::White { 0 } else { 12 };
     offset
         + match piece.piece_type {
@@ -314,7 +334,11 @@ fn neural_piece_plane(piece: Piece) -> usize {
         }
 }
 
-fn project_neural_features(values: &[f32], projection_size: usize, seed: u32) -> Vec<f32> {
+pub(crate) fn project_neural_features(
+    values: &[f32],
+    projection_size: usize,
+    seed: u32,
+) -> Vec<f32> {
     let active: Vec<(usize, f32)> = values
         .iter()
         .copied()
@@ -328,7 +352,8 @@ fn project_neural_features(values: &[f32], projection_size: usize, seed: u32) ->
     let mut projected = vec![0.0; projection_size];
     for (raw_index, value) in active {
         for (projection_index, projected_value) in projected.iter_mut().enumerate() {
-            let sign = if projection_hash(raw_index as u32, projection_index as u32, seed) & 1 == 0 {
+            let sign = if projection_hash(raw_index as u32, projection_index as u32, seed) & 1 == 0
+            {
                 1.0
             } else {
                 -1.0
@@ -339,7 +364,7 @@ fn project_neural_features(values: &[f32], projection_size: usize, seed: u32) ->
     projected
 }
 
-fn projection_hash(raw_index: u32, projection_index: u32, seed: u32) -> u32 {
+pub(crate) fn projection_hash(raw_index: u32, projection_index: u32, seed: u32) -> u32 {
     let mut hash = seed ^ raw_index;
     hash = hash.wrapping_mul(16_777_619);
     hash ^= projection_index;
@@ -348,7 +373,7 @@ fn projection_hash(raw_index: u32, projection_index: u32, seed: u32) -> u32 {
     hash
 }
 
-fn evaluate_hidden_layers(
+pub(crate) fn evaluate_hidden_layers(
     input: &[f32],
     hidden_layers: &[usize],
     hidden_weights: &[f32],

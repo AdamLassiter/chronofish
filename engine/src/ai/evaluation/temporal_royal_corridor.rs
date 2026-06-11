@@ -1,5 +1,11 @@
+use super::*;
+
 impl Game {
-    fn temporal_royal_corridor_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn temporal_royal_corridor_balance(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+    ) -> i32 {
         self.temporal_royal_corridor_pressure_for(color, weights)
             - self.temporal_royal_corridor_pressure_for(color.opposite(), weights)
     }
@@ -16,7 +22,9 @@ impl Game {
         let royal_targets = self.royal_pieces(color.opposite());
         let mut score = 0;
         for (from, piece) in self.latest_pieces() {
-            if piece.color != color || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn) {
+            if piece.color != color
+                || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+            {
                 continue;
             }
             score += self.temporal_royal_corridor_from_with_targets(
@@ -39,7 +47,7 @@ impl Game {
         self.temporal_royal_corridor_from_with_targets(piece, from, &royal_targets, weights)
     }
 
-    fn temporal_royal_corridor_from_with_targets(
+    pub(crate) fn temporal_royal_corridor_from_with_targets(
         &self,
         piece: Piece,
         from: Position,
@@ -61,7 +69,9 @@ impl Game {
                     time: from.time + wait,
                     ..from
                 };
-                if future_from.time <= target.time || !self.attacks_square(piece, future_from, *target) {
+                if future_from.time <= target.time
+                    || !self.attacks_square(piece, future_from, *target)
+                {
                     continue;
                 }
 
@@ -80,7 +90,8 @@ impl Game {
                     | PieceType::Princess => weights.royal_capture_setup / 3,
                     _ => weights.royal_capture_setup / 6,
                 };
-                score += weights.royal_capture_setup * urgency / 2 + piece_bonus + fixed_target_bonus;
+                score +=
+                    weights.royal_capture_setup * urgency / 2 + piece_bonus + fixed_target_bonus;
                 break;
             }
         }

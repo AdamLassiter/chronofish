@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn strategic_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn strategic_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         let mut score = 0;
         for (position, piece) in self.latest_pieces() {
             let attackers = self.attack_summary(position, piece.color.opposite());

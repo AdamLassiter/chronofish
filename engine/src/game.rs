@@ -1,7 +1,12 @@
+use crate::{
+    hash::{board_position_hash, timeline_position_hash},
+    *,
+};
+
 impl Game {
     // Create the default orthodox board on neutral T0. The expanded piece model
     // is implemented but not used by the initial setup.
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let mut board = [[None; 8]; 8];
         let back_rank = [
             PieceType::Rook,
@@ -33,7 +38,7 @@ impl Game {
             });
         }
 
-        Self {
+        let mut game = Self {
             turn: Color::White,
             timelines: vec![Timeline {
                 id: 0,
@@ -55,29 +60,32 @@ impl Game {
             staged_notation: Vec::new(),
             staged_royal_capture_by: None,
             last_message: "Select a white piece on a latest board.".to_string(),
-        }
+            position_hash: 0,
+        };
+        game.position_hash = game.recompute_position_hash();
+        game
     }
 
-    fn timeline(&self, timeline_id: i32) -> Option<&Timeline> {
+    pub(crate) fn timeline(&self, timeline_id: i32) -> Option<&Timeline> {
         self.timelines
             .iter()
             .find(|timeline| timeline.id == timeline_id)
     }
 
-    fn timeline_mut(&mut self, timeline_id: i32) -> Option<&mut Timeline> {
+    pub(crate) fn timeline_mut(&mut self, timeline_id: i32) -> Option<&mut Timeline> {
         self.timelines
             .iter_mut()
             .find(|timeline| timeline.id == timeline_id)
     }
 
-    fn board(&self, timeline_id: i32, time: i32) -> Option<&BoardSnapshot> {
+    pub(crate) fn board(&self, timeline_id: i32, time: i32) -> Option<&BoardSnapshot> {
         self.timeline(timeline_id)?
             .boards
             .iter()
             .find(|board| board.time == time)
     }
 
-    fn latest_time(&self, timeline_id: i32) -> Option<i32> {
+    pub(crate) fn latest_time(&self, timeline_id: i32) -> Option<i32> {
         self.timeline(timeline_id)?
             .boards
             .iter()
@@ -85,11 +93,11 @@ impl Game {
             .max()
     }
 
-    fn is_latest_board(&self, timeline_id: i32, time: i32) -> bool {
+    pub(crate) fn is_latest_board(&self, timeline_id: i32, time: i32) -> bool {
         self.latest_time(timeline_id) == Some(time)
     }
 
-    fn piece_at(&self, position: Position) -> Option<Piece> {
+    pub(crate) fn piece_at(&self, position: Position) -> Option<Piece> {
         if !Self::in_bounds(position.x, position.y) {
             return None;
         }
@@ -98,12 +106,12 @@ impl Game {
             [position.x as usize]
     }
 
-    fn can_move_to(&self, from: Position, to: Position) -> bool {
+    pub(crate) fn can_move_to(&self, from: Position, to: Position) -> bool {
         self.legal_move_kind(from, to).is_some()
     }
 
     #[allow(dead_code)]
-    fn pruned_for_evaluation(&self) -> Self {
+    pub(crate) fn pruned_for_evaluation(&self) -> Self {
         let active_timeline_ids: Vec<i32> = self
             .timelines
             .iter()
@@ -117,7 +125,7 @@ impl Game {
         pruned
     }
 
-    fn allows_search_move(
+    pub(crate) fn allows_search_move(
         &self,
         from: Position,
         to: Position,
@@ -140,7 +148,7 @@ impl Game {
         true
     }
 
-    fn would_be_active_timeline(&self, timeline_id: i32) -> bool {
+    pub(crate) fn would_be_active_timeline(&self, timeline_id: i32) -> bool {
         let min_timeline = self
             .timelines
             .iter()
@@ -163,7 +171,11 @@ impl Game {
     // Shared legality gate for UI highlighting, user moves, and AI search. It
     // checks turn ownership, latest-board source rules, destination turn rules
     // for time travel, and friendly occupancy before piece geometry runs.
-    fn legal_move_kind(&self, from: Position, to: Position) -> Option<(Piece, MoveKind)> {
+    pub(crate) fn legal_move_kind(
+        &self,
+        from: Position,
+        to: Position,
+    ) -> Option<(Piece, MoveKind)> {
         if !Self::in_bounds(from.x, from.y) || !Self::in_bounds(to.x, to.y) {
             return None;
         }
@@ -197,7 +209,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn legal_targets_json(&self, from: Position) -> String {
+    pub(crate) fn legal_targets_json(&self, from: Position) -> String {
         let mut targets = Vec::new();
 
         for timeline in &self.timelines {
@@ -222,12 +234,12 @@ impl Game {
         format!("[{}]", targets.join(","))
     }
 
-    fn is_present_source_board(&self, from: Position) -> bool {
+    pub(crate) fn is_present_source_board(&self, from: Position) -> bool {
         self.present_time() == Some(from.time)
     }
 
     #[allow(dead_code)]
-    fn apply_move(&mut self, from: Position, to: Position) -> i32 {
+    pub(crate) fn apply_move(&mut self, from: Position, to: Position) -> i32 {
         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
             self.last_message = "Illegal move.".to_string();
             return 0;
@@ -240,7 +252,8 @@ impl Game {
         self.staged_turn.push(self.checkpoint());
         self.record_staged_capture(piece.color, captured);
         self.apply_move_unchecked(from, to, piece, move_kind);
-        self.staged_notation.push(self.finish_move_notation(notation, piece.color));
+        self.staged_notation
+            .push(self.finish_move_notation(notation, piece.color));
         self.last_message = self.move_message(
             piece,
             from,
@@ -253,13 +266,13 @@ impl Game {
         1
     }
 
-    fn clone_for_search(&self) -> Self {
+    pub(crate) fn clone_for_search(&self) -> Self {
         self.clone()
     }
 
     // Capture enough state to undo one staged move.
     #[allow(dead_code)]
-    fn checkpoint(&self) -> GameCheckpoint {
+    pub(crate) fn checkpoint(&self) -> GameCheckpoint {
         GameCheckpoint {
             turn: self.turn,
             timelines: self.timelines.clone(),
@@ -268,11 +281,12 @@ impl Game {
             staged_notation: self.staged_notation.clone(),
             staged_royal_capture_by: self.staged_royal_capture_by,
             last_message: self.last_message.clone(),
+            position_hash: self.position_hash,
         }
     }
 
     #[allow(dead_code)]
-    fn restore(&mut self, checkpoint: GameCheckpoint) {
+    pub(crate) fn restore(&mut self, checkpoint: GameCheckpoint) {
         self.turn = checkpoint.turn;
         self.timelines = checkpoint.timelines;
         self.next_timeline_id = checkpoint.next_timeline_id;
@@ -280,10 +294,11 @@ impl Game {
         self.staged_notation = checkpoint.staged_notation;
         self.staged_royal_capture_by = checkpoint.staged_royal_capture_by;
         self.last_message = checkpoint.last_message;
+        self.position_hash = checkpoint.position_hash;
     }
 
     #[allow(dead_code)]
-    fn undo_staged_move(&mut self) -> i32 {
+    pub(crate) fn undo_staged_move(&mut self) -> i32 {
         let Some(checkpoint) = self.staged_turn.pop() else {
             self.last_message = "No staged move to undo.".to_string();
             return 0;
@@ -299,7 +314,7 @@ impl Game {
     }
 
     #[allow(dead_code)]
-    fn submit_turn(&mut self) -> i32 {
+    pub(crate) fn submit_turn(&mut self) -> i32 {
         if self.staged_turn.is_empty() {
             self.last_message = "Make at least one move before submitting.".to_string();
             return 0;
@@ -348,15 +363,11 @@ impl Game {
         } else {
             ""
         };
-        self.last_message = format!(
-            "{} to move.{}",
-            self.turn.capitalized(),
-            suffix
-        );
+        self.last_message = format!("{} to move.{}", self.turn.capitalized(), suffix);
         1
     }
 
-    fn has_threefold_repetition(&self) -> bool {
+    pub(crate) fn has_threefold_repetition(&self) -> bool {
         self.timelines.iter().any(|timeline| {
             let mut counts = std::collections::HashMap::new();
             timeline.boards.iter().any(|board| {
@@ -367,7 +378,7 @@ impl Game {
         })
     }
 
-    fn board_repetition_key(board: &BoardSnapshot) -> Vec<i32> {
+    pub(crate) fn board_repetition_key(board: &BoardSnapshot) -> Vec<i32> {
         let mut key = Vec::with_capacity(70);
         key.push(Self::repetition_color_code(board.side_to_move));
         key.push(Self::repetition_castling_code(board.castling));
@@ -389,14 +400,14 @@ impl Game {
         key
     }
 
-    fn repetition_color_code(color: Color) -> i32 {
+    pub(crate) fn repetition_color_code(color: Color) -> i32 {
         match color {
             Color::White => 0,
             Color::Black => 1,
         }
     }
 
-    fn repetition_piece_type_code(piece_type: PieceType) -> i32 {
+    pub(crate) fn repetition_piece_type_code(piece_type: PieceType) -> i32 {
         match piece_type {
             PieceType::King => 1,
             PieceType::CommonKing => 2,
@@ -413,27 +424,27 @@ impl Game {
         }
     }
 
-    fn repetition_piece_code(piece: Option<Piece>) -> i32 {
+    pub(crate) fn repetition_piece_code(piece: Option<Piece>) -> i32 {
         piece.map_or(0, |piece| {
             Self::repetition_piece_type_code(piece.piece_type)
                 | (Self::repetition_color_code(piece.color) << 8)
         })
     }
 
-    fn repetition_castling_code(castling: CastlingRights) -> i32 {
+    pub(crate) fn repetition_castling_code(castling: CastlingRights) -> i32 {
         castling.white_kingside as i32
             | ((castling.white_queenside as i32) << 1)
             | ((castling.black_kingside as i32) << 2)
             | ((castling.black_queenside as i32) << 3)
     }
 
-    fn record_staged_capture(&mut self, color: Color, captured: Option<Piece>) {
+    pub(crate) fn record_staged_capture(&mut self, color: Color, captured: Option<Piece>) {
         if captured.is_some_and(|piece| Self::is_royal_piece(piece.piece_type)) {
             self.staged_royal_capture_by = Some(color);
         }
     }
 
-    fn apply_move_unchecked(
+    pub(crate) fn apply_move_unchecked(
         &mut self,
         from: Position,
         to: Position,
@@ -481,10 +492,9 @@ impl Game {
             let mut castling = source_board.castling;
             update_castling_rights(&mut castling, piece, from, to, source_board.board);
 
-            self.timeline_mut(from.timeline_id)
-                .expect("source timeline exists")
-                .boards
-                .push(BoardSnapshot {
+            self.push_board_snapshot(
+                from.timeline_id,
+                BoardSnapshot {
                     time: from.time + 1,
                     side_to_move: next_turn,
                     board: next_board,
@@ -495,7 +505,8 @@ impl Game {
                         to,
                         move_type: move_kind.name(),
                     },
-                });
+                },
+            );
         } else {
             // Time/timeline moves advance the source line without the piece, then
             // place it on the destination. Targeting a historical board creates a
@@ -511,10 +522,9 @@ impl Game {
             advanced_source[from.y as usize][from.x as usize] = None;
             let mut source_castling = source_board.castling;
             update_castling_rights(&mut source_castling, piece, from, to, source_board.board);
-            self.timeline_mut(from.timeline_id)
-                .expect("source timeline exists")
-                .boards
-                .push(BoardSnapshot {
+            self.push_board_snapshot(
+                from.timeline_id,
+                BoardSnapshot {
                     time: from.time + 1,
                     side_to_move: next_turn,
                     board: advanced_source,
@@ -525,16 +535,16 @@ impl Game {
                         to,
                         move_type: "source-advance",
                     },
-                });
+                },
+            );
 
             let mut branch_board = target_board.board;
             branch_board[to.y as usize][to.x as usize] = Some(promote_if_needed(piece, to.y));
             let mut target_castling = target_board.castling;
             update_castling_rights(&mut target_castling, piece, from, to, target_board.board);
-            self.timeline_mut(destination_timeline_id)
-                .expect("destination timeline exists")
-                .boards
-                .push(BoardSnapshot {
+            self.push_board_snapshot(
+                destination_timeline_id,
+                BoardSnapshot {
                     time: to.time + 1,
                     side_to_move: next_turn,
                     board: branch_board,
@@ -549,11 +559,12 @@ impl Game {
                             "cross-board"
                         },
                     },
-                });
+                },
+            );
         }
     }
 
-    fn place_timeline(&mut self, owner: Color, source_row: i32) -> i32 {
+    pub(crate) fn place_timeline(&mut self, owner: Color, source_row: i32) -> i32 {
         // White-created ids are positive and black-created ids are negative,
         // matching RULES.md notation while row supplies the visual L-axis.
         let direction = if owner == Color::White { 1 } else { -1 };
@@ -572,7 +583,7 @@ impl Game {
             self.next_black_timeline_id -= 1;
             id
         };
-        self.timelines.push(Timeline {
+        let timeline = Timeline {
             id,
             row,
             label: format!(
@@ -586,11 +597,21 @@ impl Game {
             ),
             owner: TimelineOwner::from_color(owner),
             boards: Vec::new(),
-        });
+        };
+        self.position_hash ^= timeline_position_hash(&timeline);
+        self.timelines.push(timeline);
         id
     }
 
-    fn present_board(&self) -> Option<&BoardSnapshot> {
+    pub(crate) fn push_board_snapshot(&mut self, timeline_id: i32, board: BoardSnapshot) {
+        self.position_hash ^= board_position_hash(timeline_id, &board);
+        self.timeline_mut(timeline_id)
+            .expect("timeline exists for appended board")
+            .boards
+            .push(board);
+    }
+
+    pub(crate) fn present_board(&self) -> Option<&BoardSnapshot> {
         // The present line is the earliest latest-board among active timelines.
         // Inactive timelines do not hold the turn hostage.
         self.timelines
@@ -600,11 +621,11 @@ impl Game {
             .min_by_key(|board| board.time)
     }
 
-    fn present_time(&self) -> Option<i32> {
+    pub(crate) fn present_time(&self) -> Option<i32> {
         self.present_board().map(|board| board.time)
     }
 
-    fn has_pending_present_board(&self, color: Color) -> bool {
+    pub(crate) fn has_pending_present_board(&self, color: Color) -> bool {
         let Some(present_time) = self.present_time() else {
             return false;
         };
@@ -615,7 +636,7 @@ impl Game {
             .any(|board| board.time == present_time && board.side_to_move == color)
     }
 
-    fn is_active_timeline(&self, timeline_id: i32) -> bool {
+    pub(crate) fn is_active_timeline(&self, timeline_id: i32) -> bool {
         let Some(timeline) = self.timeline(timeline_id) else {
             return false;
         };

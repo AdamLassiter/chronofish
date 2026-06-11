@@ -1,5 +1,7 @@
+use super::*;
+
 impl Game {
-    fn royal_capture_pressure(&self, color: Color, weights: &EvalWeights) -> i32 {
+    pub(crate) fn royal_capture_pressure(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.royal_capture_pressure_for(color, weights)
             - self.royal_capture_pressure_for(color.opposite(), weights)
     }
