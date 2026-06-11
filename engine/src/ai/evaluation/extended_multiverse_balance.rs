@@ -138,8 +138,11 @@ impl Game {
         let current_temporal_pressure = search.opponent_temporal_tactic_pressure(color, weights);
         let current_timeline_economy = search.timeline_economy_for(color, weights);
         let current_active_timelines = search.active_timeline_count();
+        let current_royal_capture_setup =
+            search.royal_capture_setup_pressure_for_limited(color, weights, 8);
+        let present_time = search.present_time();
 
-        if let Some(present_time) = search.present_time() {
+        if let Some(present_time) = present_time {
             for (timeline_id, time) in search.playable_board_keys(color) {
                 if time != present_time {
                     continue;
@@ -178,7 +181,8 @@ impl Game {
             let gives_check = next.is_in_check(color.opposite());
             let makes_mate_net = next.royal_capture_available(color)
                 || next.royal_capture_setup_pressure_for_limited(color, weights, 8)
-                    > search.royal_capture_setup_pressure_for_limited(color, weights, 8);
+                    > current_royal_capture_setup;
+            let next_active_timelines = next.active_timeline_count();
             let is_safe_move = next_royal_safety >= current_royal_safety
                 && next_material >= current_material
                 && next_temporal_pressure <= current_temporal_pressure;
@@ -202,7 +206,7 @@ impl Game {
                     + (next_royal_safety - current_royal_safety).max(0) / 50
                     + gives_check as i32
                     + makes_mate_net as i32
-                    + (next.active_timeline_count() > current_active_timelines) as i32;
+                    + (next_active_timelines > current_active_timelines) as i32;
                 if payload > 0 {
                     summary.branch_payload += payload;
                 } else {
@@ -218,7 +222,7 @@ impl Game {
                         summary.safe_arrivals += 1;
                     }
                 }
-                if movement.from.time == search.present_time().unwrap_or(movement.from.time)
+                if movement.from.time == present_time.unwrap_or(movement.from.time)
                     && next_royal_safety < current_royal_safety
                 {
                     summary.source_abandonment +=
@@ -247,7 +251,7 @@ impl Game {
             summary.volatility += is_temporal as i32
                 + gives_check as i32
                 + makes_mate_net as i32
-                + (next.active_timeline_count() > current_active_timelines) as i32;
+                + (next_active_timelines > current_active_timelines) as i32;
         }
 
         summary.anti_mate_resources = summary.completion_count

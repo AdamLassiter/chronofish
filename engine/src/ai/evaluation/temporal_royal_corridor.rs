@@ -37,16 +37,6 @@ impl Game {
         score
     }
 
-    pub(crate) fn temporal_royal_corridor_from(
-        &self,
-        piece: Piece,
-        from: Position,
-        weights: &EvalWeights,
-    ) -> i32 {
-        let royal_targets = self.royal_pieces(piece.color.opposite());
-        self.temporal_royal_corridor_from_with_targets(piece, from, &royal_targets, weights)
-    }
-
     pub(crate) fn temporal_royal_corridor_from_with_targets(
         &self,
         piece: Piece,

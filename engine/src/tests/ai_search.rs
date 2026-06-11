@@ -721,8 +721,8 @@ fn evaluation_rewards_royal_shelter() {
     let weights = EvalWeights::default_tuned();
     let mut sheltered = Game::new();
     let mut sheltered_board = empty_board_with_kings();
-    for x in 3..=5 {
-        sheltered_board[1][x] = Some(Piece {
+    for square in &mut sheltered_board[1][3..=5] {
+        *square = Some(Piece {
             color: Color::White,
             piece_type: PieceType::Pawn,
         });
