@@ -12,12 +12,14 @@ RUN apt-get update \
 COPY Cargo.toml Cargo.lock ./
 COPY engine/Cargo.toml engine/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
+COPY pretty-log/Cargo.toml pretty-log/Cargo.toml
 COPY web/package.json web/package.json
 COPY web/package-lock.json web/package-lock.json
 COPY web/scripts web/scripts
 COPY web/src web/src
 COPY engine/src engine/src
 COPY server/src server/src
+COPY pretty-log/src pretty-log/src
 
 RUN npm --prefix web ci
 RUN npm --prefix web run build
