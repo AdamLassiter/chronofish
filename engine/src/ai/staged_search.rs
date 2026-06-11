@@ -48,9 +48,6 @@ impl Game {
         if let Some(score) = self.terminal_score(context.root_color) {
             return Some((Vec::new(), score));
         }
-        if context.exhausted() {
-            return Some((Vec::new(), context.evaluate(self, context.root_color)));
-        }
         if !self.has_pending_present_board(self.turn) {
             let original_turn = self.turn;
             if !self.submit_turn_for_search() {
@@ -60,6 +57,9 @@ impl Game {
                 self.alpha_beta_in_place(depth - 1, alpha, beta, context.root_color, context);
             self.turn = original_turn;
             return Some((Vec::new(), score));
+        }
+        if context.exhausted() {
+            return None;
         }
 
         let limit = self.staged_move_limit(context, root_level);

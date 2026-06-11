@@ -40,6 +40,24 @@ fn alpha_beta_training_strategy_is_always_available() {
 }
 
 #[test]
+fn time_bounded_training_search_returns_only_applicable_turns() {
+    let mut config = trainer_test_config();
+    config.nodes = 20;
+    config.training_time_ms = 1;
+    let weights = EvalWeights::default_tuned();
+
+    for seed in 0..20 {
+        let game = seeded_start_position(seed, &config, None);
+        if let Some(plan) = training_turn_plan(&game, weights, &config, None) {
+            assert!(
+                game.apply_turn_plan_for_search(&plan).is_some(),
+                "seed {seed} produced an inapplicable training plan"
+            );
+        }
+    }
+}
+
+#[test]
 #[ignore = "release-mode training throughput smoke test; run with --ignored --nocapture"]
 fn fast_training_search_reaches_turn_fifteen() {
     let mut game = Game::new();
