@@ -43,7 +43,7 @@ impl TrainerConfig {
             effort: "expert".to_string(),
             generations: usize::MAX,
             population: auto_population(),
-            depth: effort.training_depth,
+            training_time_ms: effort.training_time_ms,
             nodes: effort.training_nodes.max(auto_nodes()),
             seed,
             max_seconds: None,
@@ -90,7 +90,12 @@ impl TrainerConfig {
                     index += 2;
                 }
                 "--depth" => {
-                    config.depth = parse_arg(value, config.depth);
+                    // Training search is now time bounded. Keep consuming the
+                    // retired flag so older scripts do not skew later args.
+                    index += 2;
+                }
+                "--training-time-ms" | "--turn-time-ms" => {
+                    config.training_time_ms = parse_arg(value, config.training_time_ms);
                     index += 2;
                 }
                 "--nodes" => {
@@ -207,24 +212,26 @@ impl TrainerConfig {
         config
     }
 
-    pub(crate) fn with_search(&self, depth: i32, nodes: usize) -> Self {
+    pub(crate) fn with_search(&self, nodes: usize, training_time_ms: u64) -> Self {
         let mut config = self.clone();
-        config.depth = depth;
         config.nodes = nodes;
+        config.training_time_ms = training_time_ms;
         config
     }
 
     pub(crate) fn screening_search(&self) -> Self {
         let mut config = self.clone();
-        config.depth = (self.depth - 1).max(1);
         config.nodes = (self.nodes / 4).max(20).min(self.nodes);
+        config.training_time_ms = (self.training_time_ms / 4)
+            .max(1)
+            .min(self.training_time_ms);
         config
     }
 
     pub(crate) fn apply_effort(&mut self, name: &str) {
         if let Some(effort) = ai_effort_config(name) {
             self.effort = name.to_string();
-            self.depth = effort.training_depth;
+            self.training_time_ms = effort.training_time_ms;
             self.nodes = effort.training_nodes;
         }
     }

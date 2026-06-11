@@ -168,10 +168,9 @@ pub(crate) fn train_weights_until(
         // average, and improvement logs are comparable within the run.
         let started = SearchInstant::now();
         let elapsed = training_started.elapsed().as_secs();
-        let depth_boost = (elapsed / 600).min(2) as i32;
-        let search_depth = config.depth + depth_boost;
-        let search_nodes = config.nodes * search_depth as usize;
-        let scoring_config = config.with_search(search_depth, search_nodes);
+        let node_boost = (elapsed / 600).min(2) as usize + 1;
+        let search_nodes = config.nodes * node_boost;
+        let scoring_config = config.with_search(search_nodes, config.training_time_ms);
         let screening_config = scoring_config.screening_search();
         let baseline_report = fitness_until_named(
             EvalWeights::default_tuned(),
@@ -202,8 +201,8 @@ pub(crate) fn train_weights_until(
                     done,
                     population_len,
                     format!(
-                        "depth={} nodes={} remaining={}s",
-                        screening_config.depth,
+                        "turn_ms={} nodes={} remaining={}s",
+                        screening_config.training_time_ms,
                         screening_config.nodes,
                         remaining_seconds(deadline)
                     ),
@@ -242,8 +241,8 @@ pub(crate) fn train_weights_until(
                     done,
                     finalist_count,
                     format!(
-                        "depth={} nodes={} remaining={}s",
-                        search_depth,
+                        "turn_ms={} nodes={} remaining={}s",
+                        scoring_config.training_time_ms,
                         search_nodes,
                         remaining_seconds(deadline)
                     ),
@@ -275,9 +274,10 @@ pub(crate) fn train_weights_until(
         previous_best = Some(best);
         let remaining = remaining_seconds(deadline);
         training_note(format!(
-            "generation {generation}: screen_depth={} screen_nodes={} depth={search_depth} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
-            screening_config.depth,
+            "generation {generation}: screen_turn_ms={} screen_nodes={} turn_ms={} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
+            screening_config.training_time_ms,
             screening_config.nodes,
+            scoring_config.training_time_ms,
             screened.len(),
             scored.len(),
             generation_match_stats.summary(),
@@ -459,7 +459,7 @@ pub(crate) fn play_match_until(
             .apply_turn_plan_for_search(&plan)
             .expect("training search returned an applicable turn");
         plies_played += 1;
-        let eval = game.evaluate(color, &weights);
+        let eval = game.evaluate_heuristic_for_nodes(color, &weights, config.nodes);
         let mover_label = if mover == color {
             candidate_label
         } else {
@@ -504,7 +504,7 @@ pub(crate) fn play_match_until(
             };
         }
     }
-    let final_score = score + game.evaluate(color, &weights) / 4;
+    let final_score = score + game.evaluate_heuristic_for_nodes(color, &weights, config.nodes) / 4;
     let result = if final_score > 300 {
         MatchResult::Win
     } else if final_score < -300 {

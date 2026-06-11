@@ -9,7 +9,7 @@
     "depth": 3,
     "nodes": 20000,
     "timeMs": 10000,
-    "trainingDepth": 3,
+    "trainingTimeMs": 1000,
     "trainingNodes": 20000
   },
   "balanced": {
@@ -22,7 +22,7 @@
     "depth": 4,
     "nodes": 80000,
     "timeMs": 50000,
-    "trainingDepth": 4,
+    "trainingTimeMs": 3000,
     "trainingNodes": 80000
   },
   "expert": {
@@ -35,7 +35,7 @@
     "depth": 5,
     "nodes": 200000,
     "timeMs": 250000,
-    "trainingDepth": 5,
+    "trainingTimeMs": 5000,
     "trainingNodes": 200000
   }
 }

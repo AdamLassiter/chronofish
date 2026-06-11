@@ -10,7 +10,7 @@ impl Game {
             if !self.is_active_timeline(timeline.id) {
                 continue;
             }
-            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
+            let Some(board) = timeline.boards.last() else {
                 continue;
             };
             let side = if board.side_to_move == color { 1 } else { -1 };

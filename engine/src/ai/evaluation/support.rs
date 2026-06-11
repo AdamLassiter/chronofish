@@ -98,7 +98,7 @@ impl Game {
     pub(crate) fn latest_pieces(&self) -> Vec<(Position, Piece)> {
         let mut pieces = Vec::new();
         for timeline in &self.timelines {
-            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
+            let Some(board) = timeline.boards.last() else {
                 continue;
             };
             for y in 0..8 {
@@ -123,7 +123,7 @@ impl Game {
     pub(crate) fn latest_board_positions(&self) -> Vec<Position> {
         let mut positions = Vec::new();
         for timeline in &self.timelines {
-            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
+            let Some(board) = timeline.boards.last() else {
                 continue;
             };
             for y in 0..8 {

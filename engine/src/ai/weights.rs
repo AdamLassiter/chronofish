@@ -6,7 +6,7 @@ use super::*;
 impl EvalWeights {
     pub(crate) fn default_tuned() -> Self {
         serde_json::from_str(&active_parameters_json())
-            .expect("committed AI parameters should be valid JSON")
+            .expect("runtime AI parameters or built-in defaults should be valid JSON")
     }
 
     pub(crate) fn active_tuned() -> Self {
@@ -48,17 +48,26 @@ thread_local! {
 pub(crate) fn active_parameters_json() -> String {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("models/cpu-v1/parameters.json");
+        let path = cpu_model_dir().join("parameters.json");
         if let Ok(json) = std::fs::read_to_string(&path) {
             return json;
         }
     }
-    include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/models/cpu-v1/parameters.json"
-    ))
-    .to_string()
+    "{}".to_string()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn cpu_model_dir() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("CHRONOFISH_CPU_MODEL_DIR") {
+        return path.into();
+    }
+
+    let workspace_path = std::path::PathBuf::from("engine/models/cpu-v1");
+    if workspace_path.is_dir() {
+        workspace_path
+    } else {
+        std::path::PathBuf::from("models/cpu-v1")
+    }
 }
 
 #[allow(dead_code)]

@@ -91,8 +91,7 @@ impl Game {
             }
             let Some(board) = timeline
                 .boards
-                .iter()
-                .max_by_key(|board| board.time)
+                .last()
                 .filter(|board| board.time == present_time && board.side_to_move == color)
             else {
                 continue;
@@ -214,13 +213,7 @@ impl Game {
         let max_depth = self
             .timelines
             .iter()
-            .filter_map(|timeline| {
-                timeline
-                    .boards
-                    .iter()
-                    .max_by_key(|board| board.time)
-                    .map(|board| (timeline, board))
-            })
+            .filter_map(|timeline| timeline.boards.last().map(|board| (timeline, board)))
             .filter(|(timeline, board)| {
                 self.is_active_timeline(timeline.id) && board.side_to_move == color
             })
@@ -421,8 +414,7 @@ impl Game {
             .filter_map(|timeline| {
                 timeline
                     .boards
-                    .iter()
-                    .max_by_key(|board| board.time)
+                    .last()
                     .filter(|board| board.side_to_move == color)
                     .map(|board| (timeline.id, board.time))
             })

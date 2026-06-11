@@ -80,18 +80,18 @@ impl Game {
     }
 
     pub(crate) fn board(&self, timeline_id: i32, time: i32) -> Option<&BoardSnapshot> {
-        self.timeline(timeline_id)?
-            .boards
-            .iter()
-            .find(|board| board.time == time)
+        let boards = &self.timeline(timeline_id)?.boards;
+        boards
+            .binary_search_by_key(&time, |board| board.time)
+            .ok()
+            .map(|index| &boards[index])
     }
 
     pub(crate) fn latest_time(&self, timeline_id: i32) -> Option<i32> {
         self.timeline(timeline_id)?
             .boards
-            .iter()
+            .last()
             .map(|board| board.time)
-            .max()
     }
 
     pub(crate) fn is_latest_board(&self, timeline_id: i32, time: i32) -> bool {
@@ -662,7 +662,7 @@ impl Game {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
-            .filter_map(|timeline| timeline.boards.iter().max_by_key(|board| board.time))
+            .filter_map(|timeline| timeline.boards.last())
             .min_by_key(|board| board.time)
     }
 
@@ -677,7 +677,7 @@ impl Game {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
-            .filter_map(|timeline| timeline.boards.iter().max_by_key(|board| board.time))
+            .filter_map(|timeline| timeline.boards.last())
             .any(|board| board.time == present_time && board.side_to_move == color)
     }
 

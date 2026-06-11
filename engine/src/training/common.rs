@@ -15,12 +15,14 @@ pub(crate) fn training_banner(config: &TrainerConfig) {
     pretty_log::label_value("population", config.population);
     pretty_log::label_value("finalists", config.finalist_count);
     pretty_log::label_value("pair batch", config.pair_batch);
-    pretty_log::label_value("depth", config.depth);
+    pretty_log::label_value("turn time ms", config.training_time_ms);
     pretty_log::label_value("nodes", config.nodes);
     pretty_log::label_value("search", config.search_strategy.as_str());
     pretty_log::label_value("min pairs", config.min_pairs);
     pretty_log::label_value("max pairs", config.max_pairs);
 }
+
+pub(crate) const MAX_TRAINING_SEARCH_DEPTH: i32 = 64;
 
 pub(crate) fn training_progress(
     stage: &str,
@@ -48,7 +50,7 @@ pub(crate) struct TrainerConfig {
     pub(crate) effort: String,
     pub(crate) generations: usize,
     pub(crate) population: usize,
-    pub(crate) depth: i32,
+    pub(crate) training_time_ms: u64,
     pub(crate) nodes: usize,
     pub(crate) seed: u64,
     pub(crate) max_seconds: Option<u64>,

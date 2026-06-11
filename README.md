@@ -186,7 +186,7 @@ For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --config fast --generations 1 --population 4 --depth 1 --nodes 20 \
+  --config fast --generations 1 --population 4 --training-time-ms 100 --nodes 20 \
   --min-pairs 4 --max-pairs 8 --max-seconds 20
 ```
 

@@ -6,7 +6,7 @@ fn trainer_test_config() -> TrainerConfig {
         effort: "expert".to_string(),
         generations: 1,
         population: 4,
-        depth: 1,
+        training_time_ms: 10,
         nodes: 5,
         seed: 7,
         max_seconds: Some(1),
@@ -37,6 +37,30 @@ fn alpha_beta_training_strategy_is_always_available() {
         TrainingSearchStrategy::parse("alpha-beta"),
         Ok(TrainingSearchStrategy::AlphaBeta)
     );
+}
+
+#[test]
+#[ignore = "release-mode training throughput smoke test; run with --ignored --nocapture"]
+fn fast_training_search_reaches_turn_fifteen() {
+    let mut game = Game::new();
+    let mut config = trainer_test_config();
+    config.training_time_ms = 1_000;
+    config.nodes = 2_000;
+    let weights = EvalWeights::default_tuned();
+
+    for turn in 1..=15 {
+        let started = SearchInstant::now();
+        let plan = training_turn_plan(&game, weights, &config, None)
+            .expect("training search should find a turn");
+        let elapsed = SearchInstant::now().duration_since(started).as_millis();
+        eprintln!(
+            "training smoke turn {turn}: {elapsed}ms notation={}",
+            turn_plan_notation(&game, &plan),
+        );
+        game = game
+            .apply_turn_plan_for_search(&plan)
+            .expect("training plan should apply and submit");
+    }
 }
 
 #[cfg(not(feature = "training-beam-search"))]

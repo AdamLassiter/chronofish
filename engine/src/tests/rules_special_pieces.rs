@@ -581,6 +581,79 @@ fn ai_search_perf_stockfish_style_steps_do_not_regress() {
     }
 }
 
+#[test]
+#[ignore = "wall-clock late-game performance check; run in release mode with --ignored --nocapture"]
+fn late_history_search_cost_stays_bounded() {
+    let early = five_board_perf_position();
+    let late = with_repeated_history(&early, 12);
+    let weights = EvalWeights::default_tuned();
+
+    let full_started = SearchInstant::now();
+    let mut full_score = 0;
+    for _ in 0..3 {
+        full_score = late.evaluate_heuristic(Color::White, &weights);
+    }
+    let full_elapsed = SearchInstant::now()
+        .duration_since(full_started)
+        .as_micros();
+
+    let bounded_started = SearchInstant::now();
+    let mut bounded_score = 0;
+    for _ in 0..3 {
+        bounded_score = late.evaluate_heuristic_for_nodes(Color::White, &weights, 2_000);
+    }
+    let bounded_elapsed = SearchInstant::now()
+        .duration_since(bounded_started)
+        .as_micros();
+
+    let (_, early_sample) = early.best_ai_turn_with_options(
+        3,
+        2_000,
+        None,
+        SearchOptions::optimized(),
+        Some("early-history"),
+    );
+    let (late_result, late_sample) = late.best_ai_turn_with_options(
+        3,
+        2_000,
+        None,
+        SearchOptions::optimized(),
+        Some("late-history"),
+    );
+    let early_sample = early_sample.expect("perf sample");
+    let late_sample = late_sample.expect("perf sample");
+
+    eprintln!(
+        "full_eval={}us bounded_eval={}us scores={full_score}/{bounded_score}; early={}us late={}us eval_calls={} cache_hits={} eval_moves={} setup_probes={} eval_clones={}",
+        full_elapsed,
+        bounded_elapsed,
+        early_sample.elapsed_micros,
+        late_sample.elapsed_micros,
+        late_sample.stats.evaluation_calls,
+        late_sample.stats.evaluation_cache_hits,
+        late_sample.stats.evaluated_turn_moves,
+        late_sample.stats.evaluation_setup_probes,
+        late_sample.stats.evaluation_clones,
+    );
+
+    assert!(
+        bounded_elapsed.saturating_mul(2) <= full_elapsed,
+        "bounded evaluation was not at least 2x faster: {bounded_elapsed}us vs {full_elapsed}us"
+    );
+    assert!(
+        late_sample.elapsed_micros <= early_sample.elapsed_micros.saturating_mul(3),
+        "late search regressed beyond 3x: {}us vs {}us",
+        late_sample.elapsed_micros,
+        early_sample.elapsed_micros,
+    );
+    assert_eq!(late_result.status, "ok");
+    let mut replay = late;
+    for movement in late_result.moves {
+        assert!(replay.make_search_move(movement).is_some());
+    }
+    assert!(replay.submit_turn_for_search());
+}
+
 fn five_board_perf_position() -> Game {
     let mut game = Game::new();
     game.timelines.clear();
@@ -608,6 +681,40 @@ fn five_board_perf_position() -> Game {
         });
     }
 
+    game
+}
+
+fn with_repeated_history(game: &Game, latest_time: i32) -> Game {
+    let mut game = game.clone_for_search();
+    for timeline in &mut game.timelines {
+        let board = timeline.boards[0].clone();
+        for time in 1..=latest_time {
+            let mut historical = board.clone();
+            historical.time = time;
+            historical.side_to_move = if time == latest_time || time % 2 == 0 {
+                Color::White
+            } else {
+                Color::Black
+            };
+            if time < latest_time {
+                for row in &mut historical.board {
+                    for square in row {
+                        if square.is_some_and(|piece| {
+                            piece.color == Color::White && piece.piece_type == PieceType::Pawn
+                        }) {
+                            *square = None;
+                        }
+                    }
+                }
+                historical.board[2 + time as usize / 8][time as usize % 8] = Some(Piece {
+                    color: Color::White,
+                    piece_type: PieceType::Pawn,
+                });
+            }
+            timeline.boards.push(historical);
+        }
+    }
+    game.position_hash = game.recompute_position_hash();
     game
 }
 

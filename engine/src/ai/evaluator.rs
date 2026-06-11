@@ -36,8 +36,20 @@ pub(crate) struct NeuralEncodedPosition {
 }
 
 impl HeuristicEvaluator {
+    #[allow(dead_code)]
     pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         game.evaluate_heuristic(color, weights)
+    }
+
+    pub(crate) fn evaluate_with_limits(
+        &self,
+        game: &Game,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        game.evaluate_heuristic_with_limits(color, weights, limits, stats)
     }
 }
 
@@ -112,6 +124,7 @@ impl NeuralEvaluator {
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         self.predict(game, color)
             .unwrap_or_else(|| HeuristicEvaluator.evaluate(game, color, weights))
@@ -129,6 +142,7 @@ impl NeuralEvaluator {
 }
 
 impl HybridEvaluator {
+    #[allow(dead_code)]
     pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         let heuristic = HeuristicEvaluator.evaluate(game, color, weights);
         let Some(neural) = self.neural.predict(game, color) else {
@@ -182,11 +196,40 @@ impl ValueEvaluator {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn evaluate(&self, game: &Game, color: Color, weights: &EvalWeights) -> i32 {
         match self {
             Self::Heuristic(evaluator) => evaluator.evaluate(game, color, weights),
             Self::Neural(evaluator) => evaluator.evaluate(game, color, weights),
             Self::Hybrid(evaluator) => evaluator.evaluate(game, color, weights),
+        }
+    }
+
+    pub(crate) fn evaluate_with_limits(
+        &self,
+        game: &Game,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        match self {
+            Self::Heuristic(evaluator) => {
+                evaluator.evaluate_with_limits(game, color, weights, limits, stats)
+            }
+            Self::Neural(evaluator) => evaluator.predict(game, color).unwrap_or_else(|| {
+                HeuristicEvaluator.evaluate_with_limits(game, color, weights, limits, stats)
+            }),
+            Self::Hybrid(evaluator) => {
+                let heuristic =
+                    HeuristicEvaluator.evaluate_with_limits(game, color, weights, limits, stats);
+                let Some(neural) = evaluator.neural.predict(game, color) else {
+                    return heuristic;
+                };
+                let total_weight = (evaluator.heuristic_weight + evaluator.neural_weight).max(1);
+                (heuristic * evaluator.heuristic_weight + neural * evaluator.neural_weight)
+                    / total_weight
+            }
         }
     }
 

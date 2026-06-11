@@ -551,37 +551,36 @@ impl Game {
             if !self.is_active_timeline(timeline.id) {
                 continue;
             }
-            for board in &timeline.boards {
-                if deadline_expired(deadline) {
-                    return moves;
-                }
-                if !self.is_latest_board(timeline.id, board.time) || board.side_to_move != self.turn
-                {
-                    continue;
-                }
-                for y in 0..8 {
-                    for x in 0..8 {
-                        let from = Position {
-                            timeline_id: timeline.id,
-                            time: board.time,
-                            x,
-                            y,
-                        };
-                        let Some(piece) =
-                            self.piece_at(from).filter(|piece| piece.color == self.turn)
-                        else {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            if deadline_expired(deadline) {
+                return moves;
+            }
+            if board.side_to_move != self.turn {
+                continue;
+            }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x,
+                        y,
+                    };
+                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
+                    else {
+                        continue;
+                    };
+                    for to in self.piece_candidate_destinations(from, piece) {
+                        if deadline_expired(deadline) {
+                            return self.order_moves(moves, weights);
+                        }
+                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
                             continue;
                         };
-                        for to in self.piece_candidate_destinations(from, piece) {
-                            if deadline_expired(deadline) {
-                                return self.order_moves(moves, weights);
-                            }
-                            let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                                continue;
-                            };
-                            if self.allows_search_move(from, to, piece, move_kind) {
-                                moves.push(MoveStep { from, to });
-                            }
+                        if self.allows_search_move(from, to, piece, move_kind) {
+                            moves.push(MoveStep { from, to });
                         }
                     }
                 }

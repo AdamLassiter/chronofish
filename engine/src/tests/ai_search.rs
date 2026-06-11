@@ -2,6 +2,44 @@ use super::*;
 use crate::training::{train_weights, TrainerConfig, TrainingSearchStrategy};
 
 #[test]
+fn bounded_evaluation_is_deterministic_and_respects_fast_limits() {
+    let game = Game::new();
+    let weights = EvalWeights::default_tuned();
+    let limits = EvaluationLimits::for_nodes(2_000);
+    let mut first_stats = EvaluationStats::default();
+    let mut second_stats = EvaluationStats::default();
+
+    let first =
+        game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut first_stats);
+    let second =
+        game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut second_stats);
+
+    assert_eq!(first, second);
+    assert_eq!(first_stats.turn_moves, second_stats.turn_moves);
+    assert_eq!(first_stats.setup_probes, second_stats.setup_probes);
+    assert!(first_stats.turn_moves <= 12);
+    assert!(first_stats.setup_probes <= 2_000);
+    assert!(first_stats.clones <= 2);
+}
+
+#[test]
+fn full_evaluation_limits_preserve_direct_evaluation_score() {
+    let game = Game::new();
+    let weights = EvalWeights::default_tuned();
+    let mut stats = EvaluationStats::default();
+
+    assert_eq!(
+        game.evaluate_heuristic(Color::White, &weights),
+        game.evaluate_heuristic_with_limits(
+            Color::White,
+            &weights,
+            EvaluationLimits::FULL,
+            &mut stats,
+        )
+    );
+}
+
+#[test]
 fn direct_candidate_generation_keeps_all_default_legal_moves() {
     let game = Game::new();
 
@@ -744,7 +782,7 @@ fn training_mutation_is_seeded() {
         effort: "expert".to_string(),
         generations: 1,
         population: 4,
-        depth: 1,
+        training_time_ms: 10,
         nodes: 5,
         seed: 7,
         max_seconds: Some(1),

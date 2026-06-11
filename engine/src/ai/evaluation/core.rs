@@ -28,14 +28,66 @@ impl Game {
     }
 
     pub(crate) fn evaluate_heuristic(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.pruned_for_evaluation()
-            .evaluate_heuristic_without_pruning(color, weights)
+        let mut stats = EvaluationStats::default();
+        self.evaluate_heuristic_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn evaluate_heuristic_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        stats.calls += 1;
+        if self
+            .timelines
+            .iter()
+            .all(|timeline| self.is_active_timeline(timeline.id))
+        {
+            self.evaluate_heuristic_without_pruning_with_limits(color, weights, limits, stats)
+        } else {
+            stats.clones += 1;
+            self.pruned_for_evaluation()
+                .evaluate_heuristic_without_pruning_with_limits(color, weights, limits, stats)
+        }
+    }
+
+    pub(crate) fn evaluate_heuristic_for_nodes(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        max_nodes: usize,
+    ) -> i32 {
+        let mut stats = EvaluationStats::default();
+        self.evaluate_heuristic_with_limits(
+            color,
+            weights,
+            EvaluationLimits::for_nodes(max_nodes),
+            &mut stats,
+        )
     }
 
     pub(crate) fn evaluate_heuristic_without_pruning(
         &self,
         color: Color,
         weights: &EvalWeights,
+    ) -> i32 {
+        let mut stats = EvaluationStats::default();
+        self.evaluate_heuristic_without_pruning_with_limits(
+            color,
+            weights,
+            EvaluationLimits::FULL,
+            &mut stats,
+        )
+    }
+
+    pub(crate) fn evaluate_heuristic_without_pruning_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
     ) -> i32 {
         if let Some(score) = self.terminal_score(color) {
             return score;
@@ -50,7 +102,7 @@ impl Game {
                 weights.inactive_timeline
             } * owner_factor(timeline.owner, color);
 
-            let Some(board) = timeline.boards.iter().max_by_key(|board| board.time) else {
+            let Some(board) = timeline.boards.last() else {
                 continue;
             };
             for (y, rank) in board.board.iter().enumerate() {
@@ -79,13 +131,13 @@ impl Game {
             score += weights.check_penalty;
         }
         score
-            + self.extended_multiverse_balance(color, weights)
+            + self.extended_multiverse_balance_with_limits(color, weights, limits, stats)
             + self.present_progress(color) * weights.present_progress
             + self.strategic_balance(color, weights)
             + self.timeline_coordination(color, weights)
             + self.royal_capture_pressure(color, weights)
             + self.temporal_royal_corridor_balance(color, weights)
-            + self.royal_capture_setup_balance(color, weights)
+            + self.royal_capture_setup_balance_with_limits(color, weights, limits, stats)
             + self.royal_safety_balance(color, weights)
             + self.fork_pressure_balance(color, weights)
             + self.forcing_pressure_balance(color, weights)

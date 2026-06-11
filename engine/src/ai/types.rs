@@ -51,7 +51,7 @@ pub(crate) struct AiEffort {
     pub(crate) depth: i32,
     pub(crate) nodes: usize,
     pub(crate) time_ms: u64,
-    pub(crate) training_depth: i32,
+    pub(crate) training_time_ms: u64,
     pub(crate) training_nodes: usize,
 }
 
@@ -288,6 +288,53 @@ pub(crate) struct SearchContext {
     pub(crate) stats: SearchStats,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct EvaluationLimits {
+    pub(crate) turn_moves: usize,
+    pub(crate) completion_results: usize,
+    pub(crate) zugzwang_moves_per_board: usize,
+    pub(crate) setup_results: usize,
+    pub(crate) setup_probes: usize,
+}
+
+impl EvaluationLimits {
+    pub(crate) const FULL: Self = Self {
+        turn_moves: 48,
+        completion_results: 6,
+        zugzwang_moves_per_board: usize::MAX,
+        setup_results: 48,
+        setup_probes: usize::MAX,
+    };
+
+    pub(crate) fn for_nodes(max_nodes: usize) -> Self {
+        if max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
+            Self {
+                turn_moves: 8,
+                completion_results: 2,
+                zugzwang_moves_per_board: 4,
+                setup_results: 4,
+                setup_probes: 96,
+            }
+        } else {
+            Self {
+                turn_moves: 24,
+                completion_results: 4,
+                zugzwang_moves_per_board: 8,
+                setup_results: 8,
+                setup_probes: 256,
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct EvaluationStats {
+    pub(crate) calls: usize,
+    pub(crate) turn_moves: usize,
+    pub(crate) setup_probes: usize,
+    pub(crate) clones: usize,
+}
+
 pub(crate) struct EvaluationCache {
     pub(crate) slots: Vec<Option<EvaluationSlot>>,
     pub(crate) mask: usize,
@@ -348,6 +395,11 @@ pub(crate) struct SearchStats {
     pub(crate) beta_cutoffs: usize,
     pub(crate) reduced_searches: usize,
     pub(crate) aspiration_researches: usize,
+    pub(crate) evaluation_calls: usize,
+    pub(crate) evaluation_cache_hits: usize,
+    pub(crate) evaluated_turn_moves: usize,
+    pub(crate) evaluation_setup_probes: usize,
+    pub(crate) evaluation_clones: usize,
 }
 
 #[derive(Clone)]

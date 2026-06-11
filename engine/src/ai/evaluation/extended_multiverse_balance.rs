@@ -1,9 +1,27 @@
 use super::*;
 
 impl Game {
+    #[allow(dead_code)]
     pub(crate) fn extended_multiverse_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
-        let own_turn = self.turn_feature_summary(color, weights);
-        let opp_turn = self.turn_feature_summary(color.opposite(), weights);
+        let mut stats = EvaluationStats::default();
+        self.extended_multiverse_balance_with_limits(
+            color,
+            weights,
+            EvaluationLimits::FULL,
+            &mut stats,
+        )
+    }
+
+    pub(crate) fn extended_multiverse_balance_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        let own_turn = self.turn_feature_summary_with_limits(color, weights, limits, stats);
+        let opp_turn =
+            self.turn_feature_summary_with_limits(color.opposite(), weights, limits, stats);
         let own_scores = self.individual_royal_safety_scores(color);
         let opp_scores = self.individual_royal_safety_scores(color.opposite());
         let own_weakest = own_scores
@@ -116,10 +134,22 @@ impl Game {
                 * weights.board_importance_weight
     }
 
+    #[allow(dead_code)]
     pub(crate) fn turn_feature_summary(
         &self,
         color: Color,
         weights: &EvalWeights,
+    ) -> TurnFeatureSummary {
+        let mut stats = EvaluationStats::default();
+        self.turn_feature_summary_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn turn_feature_summary_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
     ) -> TurnFeatureSummary {
         let obligations = self.present_obligation_count(color);
         let mut summary = TurnFeatureSummary {
@@ -131,15 +161,25 @@ impl Game {
         }
 
         let mut search = self.clone_for_search();
+        stats.clones += 1;
         search.turn = color;
-        summary.completion_count = search.estimated_turn_completion_count(color, weights, 6) as i32;
+        summary.completion_count = search.estimated_turn_completion_count_with_limit(
+            color,
+            weights,
+            limits.completion_results,
+        ) as i32;
         let current_material = search.latest_material_for(color, weights);
         let current_royal_safety = search.royal_safety_for(color, weights);
         let current_temporal_pressure = search.opponent_temporal_tactic_pressure(color, weights);
         let current_timeline_economy = search.timeline_economy_for(color, weights);
         let current_active_timelines = search.active_timeline_count();
-        let current_royal_capture_setup =
-            search.royal_capture_setup_pressure_for_limited(color, weights, 8);
+        let current_royal_capture_setup = search.royal_capture_setup_pressure_bounded(
+            color,
+            weights,
+            limits.setup_results,
+            limits.setup_probes,
+            stats,
+        );
         let present_time = search.present_time();
 
         if let Some(present_time) = present_time {
@@ -147,42 +187,66 @@ impl Game {
                 if time != present_time {
                     continue;
                 }
-                let moves = search.legal_single_moves_from_board(timeline_id, time, color, weights);
-                if !moves.is_empty()
-                    && moves.iter().all(|movement| {
-                        let mut next = search.clone_for_search();
-                        next.apply_move_for_search(movement.from, movement.to)
-                            && (next.royal_safety_for(color, weights) < current_royal_safety
-                                || next.latest_material_for(color, weights) < current_material
-                                || next.opponent_temporal_tactic_pressure(color, weights)
-                                    > current_temporal_pressure)
-                    })
-                {
+                let moves = search.legal_single_moves_from_board(
+                    timeline_id,
+                    time,
+                    color,
+                    weights,
+                    limits.zugzwang_moves_per_board,
+                );
+                let mut all_moves_are_bad = !moves.is_empty();
+                for movement in moves {
+                    let Some(undo) = search.make_search_move(movement) else {
+                        all_moves_are_bad = false;
+                        break;
+                    };
+                    stats.turn_moves += 1;
+                    let move_is_bad = search.royal_safety_for(color, weights)
+                        < current_royal_safety
+                        || search.latest_material_for(color, weights) < current_material
+                        || search.opponent_temporal_tactic_pressure(color, weights)
+                            > current_temporal_pressure;
+                    search.unmake_search_move(undo);
+                    if !move_is_bad {
+                        all_moves_are_bad = false;
+                        break;
+                    }
+                }
+                if all_moves_are_bad {
                     summary.zugzwang_boards += 1;
                 }
             }
         }
 
-        for movement in search.current_turn_moves_for(color, weights, 48) {
+        for movement in search.current_turn_moves_for(color, weights, limits.turn_moves) {
             let Some((piece, _move_kind)) = search.legal_move_kind(movement.from, movement.to)
             else {
                 continue;
             };
             let is_temporal = movement.from.timeline_id != movement.to.timeline_id
                 || movement.from.time != movement.to.time;
-            let mut next = search.clone_for_search();
-            if !next.apply_move_for_search(movement.from, movement.to) {
+            let capture_bonus = search
+                .piece_at(movement.to)
+                .map(|target| weights.piece_value(target.piece_type) / 100)
+                .unwrap_or(0);
+            let Some(undo) = search.make_search_move(movement) else {
                 continue;
-            }
+            };
+            stats.turn_moves += 1;
 
-            let next_royal_safety = next.royal_safety_for(color, weights);
-            let next_material = next.latest_material_for(color, weights);
-            let next_temporal_pressure = next.opponent_temporal_tactic_pressure(color, weights);
-            let gives_check = next.is_in_check(color.opposite());
-            let makes_mate_net = next.royal_capture_available(color)
-                || next.royal_capture_setup_pressure_for_limited(color, weights, 8)
-                    > current_royal_capture_setup;
-            let next_active_timelines = next.active_timeline_count();
+            let next_royal_safety = search.royal_safety_for(color, weights);
+            let next_material = search.latest_material_for(color, weights);
+            let next_temporal_pressure = search.opponent_temporal_tactic_pressure(color, weights);
+            let gives_check = search.is_in_check(color.opposite());
+            let makes_mate_net = search.royal_capture_available(color)
+                || search.royal_capture_setup_pressure_bounded(
+                    color,
+                    weights,
+                    limits.setup_results,
+                    limits.setup_probes,
+                    stats,
+                ) > current_royal_capture_setup;
+            let next_active_timelines = search.active_timeline_count();
             let is_safe_move = next_royal_safety >= current_royal_safety
                 && next_material >= current_material
                 && next_temporal_pressure <= current_temporal_pressure;
@@ -198,10 +262,6 @@ impl Game {
 
             if is_temporal {
                 summary.branch_moves += 1;
-                let capture_bonus = search
-                    .piece_at(movement.to)
-                    .map(|target| weights.piece_value(target.piece_type) / 100)
-                    .unwrap_or(0);
                 let payload = capture_bonus
                     + (next_royal_safety - current_royal_safety).max(0) / 50
                     + gives_check as i32
@@ -216,9 +276,9 @@ impl Game {
                     summary.escape_branches += 1;
                 }
                 if let Some(arrival) =
-                    next.latest_arrival_position(color, movement.to.x, movement.to.y)
+                    search.latest_arrival_position(color, movement.to.x, movement.to.y)
                 {
-                    if !next.is_square_attacked(arrival, color.opposite()) {
+                    if !search.is_square_attacked(arrival, color.opposite()) {
                         summary.safe_arrivals += 1;
                     }
                 }
@@ -233,7 +293,7 @@ impl Game {
             if gives_check {
                 let quality = 1
                     + (next_royal_safety >= current_royal_safety) as i32
-                    + (next.timeline_economy_for(color, weights) >= current_timeline_economy)
+                    + (search.timeline_economy_for(color, weights) >= current_timeline_economy)
                         as i32
                     + makes_mate_net as i32;
                 summary.check_quality += quality;
@@ -252,6 +312,7 @@ impl Game {
                 + gives_check as i32
                 + makes_mate_net as i32
                 + (next_active_timelines > current_active_timelines) as i32;
+            search.unmake_search_move(undo);
         }
 
         summary.anti_mate_resources = summary.completion_count
@@ -268,13 +329,24 @@ impl Game {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
-            .filter_map(|timeline| timeline.boards.iter().max_by_key(|board| board.time))
+            .filter_map(|timeline| timeline.boards.last())
             .filter(|board| board.time == present_time && board.side_to_move == color)
             .count() as i32
     }
 
+    #[allow(dead_code)]
     pub(crate) fn estimated_turn_completion_count(
         &self,
+        color: Color,
+        weights: &EvalWeights,
+        limit: usize,
+    ) -> usize {
+        let mut search = self.clone_for_search();
+        search.estimated_turn_completion_count_with_limit(color, weights, limit)
+    }
+
+    pub(crate) fn estimated_turn_completion_count_with_limit(
+        &mut self,
         color: Color,
         weights: &EvalWeights,
         limit: usize,
@@ -292,7 +364,7 @@ impl Game {
     }
 
     pub(crate) fn estimated_turn_completion_count_at_depth(
-        &self,
+        &mut self,
         color: Color,
         weights: &EvalWeights,
         depth: usize,
@@ -311,17 +383,17 @@ impl Game {
 
         let mut total = 0;
         for movement in self.prioritized_turn_moves(color, weights, None, MAX_MOVES_PER_NODE) {
-            let mut next = self.clone_for_search();
-            if !next.apply_move_for_search(movement.from, movement.to) {
+            let Some(undo) = self.make_search_move(movement) else {
                 continue;
-            }
-            total += next.estimated_turn_completion_count_at_depth(
+            };
+            total += self.estimated_turn_completion_count_at_depth(
                 color,
                 weights,
                 depth + 1,
                 max_depth,
                 limit - total,
             );
+            self.unmake_search_move(undo);
             if total >= limit {
                 break;
             }
@@ -340,9 +412,53 @@ impl Game {
         }
         let mut search = self.clone_for_search();
         search.turn = color;
-        let mut moves = search.legal_single_moves_until(weights, None);
-        moves.truncate(limit);
-        moves
+        if limit == EvaluationLimits::FULL.turn_moves {
+            let mut moves = search.legal_single_moves_until(weights, None);
+            moves.truncate(limit);
+            return moves;
+        }
+        search.sampled_current_turn_moves(weights, limit)
+    }
+
+    fn sampled_current_turn_moves(&self, weights: &EvalWeights, limit: usize) -> Vec<MoveStep> {
+        let mut moves = Vec::with_capacity(limit);
+        for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            if board.side_to_move != self.turn {
+                continue;
+            }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x,
+                        y,
+                    };
+                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
+                    else {
+                        continue;
+                    };
+                    for to in self.piece_candidate_destinations(from, piece) {
+                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                            continue;
+                        };
+                        if self.allows_search_move(from, to, piece, move_kind) {
+                            moves.push(MoveStep { from, to });
+                            if moves.len() >= limit {
+                                return self.order_moves(moves, weights);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.order_moves(moves, weights)
     }
 
     pub(crate) fn legal_single_moves_from_board(
@@ -351,6 +467,7 @@ impl Game {
         time: i32,
         color: Color,
         weights: &EvalWeights,
+        limit: usize,
     ) -> Vec<MoveStep> {
         let Some(board) = self.board(timeline_id, time) else {
             return Vec::new();
@@ -377,35 +494,20 @@ impl Game {
                 if piece.color != color {
                     continue;
                 }
-                for target_timeline in &self.timelines {
-                    for target_board in &target_timeline.boards {
-                        for target_y in 0..8 {
-                            for target_x in 0..8 {
-                                let to = Position {
-                                    timeline_id: target_timeline.id,
-                                    time: target_board.time,
-                                    x: target_x,
-                                    y: target_y,
-                                };
-                                let Some((piece, move_kind)) = self.legal_move_kind(from, to)
-                                else {
-                                    continue;
-                                };
-                                if self.allows_search_move(from, to, piece, move_kind) {
-                                    moves.push(MoveStep { from, to });
-                                }
-                            }
+                for to in self.piece_candidate_destinations(from, piece) {
+                    let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                        continue;
+                    };
+                    if self.allows_search_move(from, to, piece, move_kind) {
+                        moves.push(MoveStep { from, to });
+                        if moves.len() >= limit {
+                            return self.order_moves(moves, weights);
                         }
                     }
                 }
             }
         }
-        moves.sort_by(|left, right| {
-            self.cheap_move_order_score(right, weights)
-                .cmp(&self.cheap_move_order_score(left, weights))
-                .then_with(|| Self::move_cmp(left, right))
-        });
-        moves
+        self.order_moves(moves, weights)
     }
 
     pub(crate) fn latest_material_for(&self, color: Color, weights: &EvalWeights) -> i32 {
@@ -554,13 +656,7 @@ impl Game {
         self.timelines
             .iter()
             .filter(|timeline| self.is_active_timeline(timeline.id))
-            .filter_map(|timeline| {
-                timeline
-                    .boards
-                    .iter()
-                    .max_by_key(|board| board.time)
-                    .map(|board| (timeline, board))
-            })
+            .filter_map(|timeline| timeline.boards.last().map(|board| (timeline, board)))
             .filter(|(_, board)| board.time == present_time)
             .map(|(_, board)| {
                 board
@@ -884,7 +980,7 @@ impl Game {
             .timelines
             .iter()
             .filter(|timeline| timeline.owner == owner)
-            .filter_map(|timeline| timeline.boards.iter().max_by_key(|board| board.time))
+            .filter_map(|timeline| timeline.boards.last())
             .map(|board| {
                 let key = Self::board_repetition_key(board);
                 let count = counts.entry(key).or_insert(0);

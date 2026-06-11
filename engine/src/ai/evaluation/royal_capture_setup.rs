@@ -1,11 +1,35 @@
 use super::*;
 
 impl Game {
+    #[allow(dead_code)]
     pub(crate) fn royal_capture_setup_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
         self.royal_capture_setup_pressure_for(color, weights)
             - self.royal_capture_setup_pressure_for(color.opposite(), weights)
     }
 
+    pub(crate) fn royal_capture_setup_balance_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        self.royal_capture_setup_pressure_bounded(
+            color,
+            weights,
+            limits.setup_results,
+            limits.setup_probes,
+            stats,
+        ) - self.royal_capture_setup_pressure_bounded(
+            color.opposite(),
+            weights,
+            limits.setup_results,
+            limits.setup_probes,
+            stats,
+        )
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn royal_capture_setup_pressure_for(
         &self,
         color: Color,
@@ -20,14 +44,39 @@ impl Game {
         weights: &EvalWeights,
         limit: usize,
     ) -> i32 {
+        let mut stats = EvaluationStats::default();
+        self.royal_capture_setup_pressure_bounded(color, weights, limit, usize::MAX, &mut stats)
+    }
+
+    pub(crate) fn royal_capture_setup_pressure_bounded(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        result_limit: usize,
+        probe_limit: usize,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
         if weights.royal_capture_setup == 0 || self.royal_capture_available(color) {
             return 0;
         }
 
         let royal_targets = self.royal_pieces(color.opposite());
+        let mut pieces = self.latest_pieces();
+        if probe_limit != usize::MAX {
+            pieces.sort_by_key(|(position, piece)| {
+                (
+                    std::cmp::Reverse(weights.piece_value(piece.piece_type)),
+                    position.timeline_id,
+                    position.time,
+                    position.y,
+                    position.x,
+                )
+            });
+        }
         let mut score = 0;
         let mut counted = 0;
-        'pieces: for (from, piece) in self.latest_pieces() {
+        let mut probes = 0;
+        'pieces: for (from, piece) in pieces {
             if piece.color != color
                 || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
             {
@@ -45,9 +94,11 @@ impl Game {
 
             for y in 0..8 {
                 for x in 0..8 {
-                    if counted >= limit {
+                    if counted >= result_limit || probes >= probe_limit {
                         break 'pieces;
                     }
+                    probes += 1;
+                    stats.setup_probes += 1;
                     let to = Position {
                         timeline_id: from.timeline_id,
                         time: from.time,

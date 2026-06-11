@@ -58,30 +58,29 @@ impl Game {
                 if !search.is_active_timeline(timeline.id) {
                     continue;
                 }
-                for board in &timeline.boards {
-                    if !search.is_latest_board(timeline.id, board.time)
-                        || board.side_to_move != color
-                    {
-                        continue;
-                    }
+                let Some(board) = timeline.boards.last() else {
+                    continue;
+                };
+                if board.side_to_move != color {
+                    continue;
+                }
 
-                    for y in 0..8 {
-                        for x in 0..8 {
-                            let from = Position {
-                                timeline_id: timeline.id,
-                                time: board.time,
-                                x,
-                                y,
-                            };
-                            if !search
-                                .piece_at(from)
-                                .is_some_and(|piece| piece.color == color)
-                            {
-                                continue;
-                            }
-                            if search.legal_move_kind(from, target).is_some() {
-                                return true;
-                            }
+                for y in 0..8 {
+                    for x in 0..8 {
+                        let from = Position {
+                            timeline_id: timeline.id,
+                            time: board.time,
+                            x,
+                            y,
+                        };
+                        if !search
+                            .piece_at(from)
+                            .is_some_and(|piece| piece.color == color)
+                        {
+                            continue;
+                        }
+                        if search.legal_move_kind(from, target).is_some() {
+                            return true;
                         }
                     }
                 }
@@ -101,12 +100,23 @@ impl Game {
             .filter(|timeline| self.is_active_timeline(timeline.id))
             .count()
             + 4;
-        self.has_legal_turn_completion_at_depth(color, 0, max_depth)
+        let mut search = self.clone_for_search();
+        search.has_legal_turn_completion_in_place(color, 0, max_depth)
     }
 
     #[allow(dead_code)]
     pub(crate) fn has_legal_turn_completion_at_depth(
         &self,
+        color: Color,
+        depth: usize,
+        max_depth: usize,
+    ) -> bool {
+        let mut search = self.clone_for_search();
+        search.has_legal_turn_completion_in_place(color, depth, max_depth)
+    }
+
+    fn has_legal_turn_completion_in_place(
+        &mut self,
         color: Color,
         depth: usize,
         max_depth: usize,
@@ -119,63 +129,54 @@ impl Game {
             return false;
         }
 
+        let mut moves = Vec::new();
         for timeline in &self.timelines {
             if !self.is_active_timeline(timeline.id) {
                 continue;
             }
-            for board in &timeline.boards {
-                if !self.is_latest_board(timeline.id, board.time) || board.side_to_move != color {
-                    continue;
-                }
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            if board.side_to_move != color {
+                continue;
+            }
 
-                for y in 0..8 {
-                    for x in 0..8 {
-                        let from = Position {
-                            timeline_id: timeline.id,
-                            time: board.time,
-                            x,
-                            y,
-                        };
-                        if !self
-                            .piece_at(from)
-                            .is_some_and(|piece| piece.color == color)
-                        {
+            for y in 0..8 {
+                for x in 0..8 {
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x,
+                        y,
+                    };
+                    if !self
+                        .piece_at(from)
+                        .is_some_and(|piece| piece.color == color)
+                    {
+                        continue;
+                    }
+
+                    let piece = self.piece_at(from).expect("source piece was checked");
+                    for to in self.piece_candidate_destinations(from, piece) {
+                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
                             continue;
-                        }
-
-                        for target_timeline in &self.timelines {
-                            for target_board in &target_timeline.boards {
-                                for target_y in 0..8 {
-                                    for target_x in 0..8 {
-                                        let to = Position {
-                                            timeline_id: target_timeline.id,
-                                            time: target_board.time,
-                                            x: target_x,
-                                            y: target_y,
-                                        };
-                                        let Some((piece, move_kind)) =
-                                            self.legal_move_kind(from, to)
-                                        else {
-                                            continue;
-                                        };
-                                        if !self.allows_search_move(from, to, piece, move_kind) {
-                                            continue;
-                                        }
-                                        let mut next = self.clone_for_search();
-                                        next.apply_move_unchecked(from, to, piece, move_kind);
-                                        if next.has_legal_turn_completion_at_depth(
-                                            color,
-                                            depth + 1,
-                                            max_depth,
-                                        ) {
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
+                        };
+                        if self.allows_search_move(from, to, piece, move_kind) {
+                            moves.push(MoveStep { from, to });
                         }
                     }
                 }
+            }
+        }
+
+        for movement in moves {
+            let Some(undo) = self.make_search_move(movement) else {
+                continue;
+            };
+            let completes = self.has_legal_turn_completion_in_place(color, depth + 1, max_depth);
+            self.unmake_search_move(undo);
+            if completes {
+                return true;
             }
         }
 

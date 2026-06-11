@@ -89,9 +89,21 @@ impl SearchContext {
     pub(crate) fn evaluate(&mut self, game: &Game, color: Color) -> i32 {
         let key = game.position_hash ^ color_hash(color).rotate_left(29);
         if let Some(score) = self.evaluation_cache.get(key) {
+            self.stats.evaluation_cache_hits += 1;
             return score;
         }
-        let score = self.evaluator.evaluate(game, color, &self.weights);
+        let mut evaluation_stats = EvaluationStats::default();
+        let score = self.evaluator.evaluate_with_limits(
+            game,
+            color,
+            &self.weights,
+            EvaluationLimits::for_nodes(self.max_nodes),
+            &mut evaluation_stats,
+        );
+        self.stats.evaluation_calls += evaluation_stats.calls;
+        self.stats.evaluated_turn_moves += evaluation_stats.turn_moves;
+        self.stats.evaluation_setup_probes += evaluation_stats.setup_probes;
+        self.stats.evaluation_clones += evaluation_stats.clones;
         self.evaluation_cache.insert(key, score);
         score
     }
@@ -210,6 +222,11 @@ impl SearchPerfSample {
             + self.stats.reduced_searches as u128
             + self.stats.aspiration_researches as u128
             + self.stats.expensive_order_probes as u128
+            + self.stats.evaluation_calls as u128
+            + self.stats.evaluation_cache_hits as u128
+            + self.stats.evaluated_turn_moves as u128
+            + self.stats.evaluation_setup_probes as u128
+            + self.stats.evaluation_clones as u128
             + self.label.len() as u128
     }
 }
