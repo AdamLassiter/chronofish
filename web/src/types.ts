@@ -83,6 +83,19 @@ export interface Move {
   to: Position;
 }
 
+export interface PlannedArrow {
+  from: Position;
+  to: Position;
+  kind: "planned" | "bot-review";
+}
+
+export interface GhostBoard {
+  nodeId: string;
+  timelineId: number;
+  board: BoardSnapshot;
+  kind: "planned" | "bot-review";
+}
+
 export interface WasmString {
   ptr: number;
   len: number;

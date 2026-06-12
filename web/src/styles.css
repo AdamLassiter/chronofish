@@ -49,7 +49,7 @@ button {
   align-items: center;
   gap: 10px;
   min-height: 42px;
-  padding: 6px 0;
+  padding: 6px;
   flex-wrap: wrap;
 }
 
@@ -678,8 +678,26 @@ button {
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.65));
 }
 
-.move-arrows marker path {
+.move-arrow-planned {
+  stroke: rgba(255, 196, 87, 0.82);
+  stroke-dasharray: 12 8;
+}
+
+.move-arrow-bot-review {
+  stroke: rgba(115, 203, 255, 0.86);
+  stroke-dasharray: 4 7;
+}
+
+.move-arrows #move-arrow-head path {
   fill: rgba(220, 241, 255, 0.72);
+}
+
+.move-arrows #planned-arrow-head path {
+  fill: rgba(255, 196, 87, 0.9);
+}
+
+.move-arrows #bot-review-arrow-head path {
+  fill: rgba(115, 203, 255, 0.9);
 }
 
 .timeline-row {
@@ -748,6 +766,23 @@ button {
 .board-card[data-present="true"] {
   outline: 3px solid rgba(242, 209, 95, 0.72);
   outline-offset: 5px;
+}
+
+.ghost-board {
+  opacity: 0.72;
+  transform: translate(14px, 14px);
+  border-style: dashed;
+  z-index: 2;
+}
+
+.ghost-board-planned {
+  border-color: rgba(255, 196, 87, 0.88);
+  background: rgba(48, 35, 12, 0.92);
+}
+
+.ghost-board-bot-review {
+  border-color: rgba(115, 203, 255, 0.9);
+  background: rgba(12, 32, 48, 0.92);
 }
 
 .present-line {

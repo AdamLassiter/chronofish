@@ -73,6 +73,7 @@ impl Game {
         if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
             let score = plan.score_hint;
             let result = AiSearchResult {
+                principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
                 score,
                 depth: 1,
@@ -97,6 +98,7 @@ impl Game {
             depth: 0,
             nodes: 0,
             status: "noLegalTurn",
+            principal_variation: Vec::new(),
         };
 
         // Iterative deepening preserves a usable shallower answer if the node
@@ -116,6 +118,7 @@ impl Game {
             };
             previous_score = score;
             best = AiSearchResult {
+                principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
                 score,
                 depth: current_depth,
@@ -138,6 +141,7 @@ impl Game {
                 .next()
             {
                 best = AiSearchResult {
+                    principal_variation: vec![plan.moves.clone()],
                     moves: plan.moves,
                     score: plan.score_hint,
                     depth: 1,
@@ -201,6 +205,7 @@ impl Game {
 
         if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
             return AiSearchResult {
+                principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
                 score: plan.score_hint,
                 depth: 1,
@@ -218,6 +223,7 @@ impl Game {
             depth: 0,
             nodes: 0,
             status: "noLegalTurn",
+            principal_variation: Vec::new(),
         };
         let mut previous_score = 0;
         for current_depth in 1..=depth {
@@ -236,6 +242,7 @@ impl Game {
             };
             previous_score = score;
             best = AiSearchResult {
+                principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
                 score,
                 depth: current_depth,

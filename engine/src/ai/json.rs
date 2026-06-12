@@ -10,7 +10,7 @@ impl Game {
 impl AiSearchResult {
     pub(crate) fn to_json(&self) -> String {
         format!(
-            "{{\"moves\":[{}],\"score\":{},\"depth\":{},\"nodes\":{},\"status\":\"{}\"}}",
+            "{{\"moves\":[{}],\"score\":{},\"depth\":{},\"nodes\":{},\"status\":\"{}\",\"principalVariation\":[{}]}}",
             self.moves
                 .iter()
                 .map(move_step_json)
@@ -19,7 +19,18 @@ impl AiSearchResult {
             self.score,
             self.depth,
             self.nodes,
-            self.status
+            self.status,
+            self.principal_variation
+                .iter()
+                .map(|turn| format!(
+                    "[{}]",
+                    turn.iter()
+                        .map(move_step_json)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
         )
     }
 }

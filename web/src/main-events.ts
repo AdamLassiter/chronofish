@@ -22,6 +22,7 @@ interface MainEventOptions {
   cloneMove(move: Move): Move;
   rebuildStagedClientState(moves: Move[]): Promise<void>;
   submitVisibleTurn(actor: Color): Promise<string | null>;
+  clearPlannedMoves(): void;
   isMatchOver(): boolean;
   enterPostMatchReview(message: string): void;
   syncState(kind: string, message: string): void;
@@ -49,6 +50,7 @@ export function wireMainEvents({
   cloneMove,
   rebuildStagedClientState,
   submitVisibleTurn,
+  clearPlannedMoves,
   isMatchOver,
   enterPostMatchReview,
   syncState,
@@ -67,6 +69,7 @@ export function wireMainEvents({
   const resetButton = requireElement(elements.resetButton, "reset-game");
   const undoMoveButton = requireElement(elements.undoMoveButton, "undo-move");
   const submitTurnButton = requireElement(elements.submitTurnButton, "submit-turn");
+  const clearPlansButton = requireElement(elements.clearPlansButton, "clear-plans");
   const concedeButton = requireElement(elements.concedeButton, "concede-game");
   const toggleHudButton = requireElement(elements.toggleHudButton, "toggle-hud");
   const hud = requireElement(elements.hud, "hud");
@@ -146,6 +149,10 @@ export function wireMainEvents({
     }
     syncState("state", turnMessage);
     maybeStartBotTurn();
+  });
+
+  clearPlansButton.addEventListener("click", () => {
+    clearPlannedMoves();
   });
 
   concedeButton.addEventListener("click", () => {

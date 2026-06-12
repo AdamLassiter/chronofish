@@ -40,6 +40,7 @@ pub(crate) struct AiSearchResult {
     pub(crate) depth: i32,
     pub(crate) nodes: usize,
     pub(crate) status: &'static str,
+    pub(crate) principal_variation: Vec<Vec<MoveStep>>,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
@@ -295,6 +296,7 @@ pub(crate) struct EvaluationLimits {
     pub(crate) zugzwang_moves_per_board: usize,
     pub(crate) setup_results: usize,
     pub(crate) setup_probes: usize,
+    pub(crate) deadline: Option<SearchInstant>,
 }
 
 impl EvaluationLimits {
@@ -304,6 +306,7 @@ impl EvaluationLimits {
         zugzwang_moves_per_board: usize::MAX,
         setup_results: 48,
         setup_probes: usize::MAX,
+        deadline: None,
     };
 
     pub(crate) fn for_nodes(max_nodes: usize) -> Self {
@@ -314,6 +317,7 @@ impl EvaluationLimits {
                 zugzwang_moves_per_board: 4,
                 setup_results: 4,
                 setup_probes: 96,
+                deadline: None,
             }
         } else {
             Self {
@@ -322,8 +326,14 @@ impl EvaluationLimits {
                 zugzwang_moves_per_board: 8,
                 setup_results: 8,
                 setup_probes: 256,
+                deadline: None,
             }
         }
+    }
+
+    pub(crate) fn with_deadline(mut self, deadline: Option<SearchInstant>) -> Self {
+        self.deadline = deadline;
+        self
     }
 }
 

@@ -6,10 +6,11 @@ import { appendNotationLine, postMatchLog, postBotLossLog } from "./match-log.js
 import { readWasmString, writeWasmString } from "./engine-io.js";
 import { createTrainingController } from "./training-ui.js";
 import { createBotController } from "./bot-controller.js";
+import type { BotDecisionRecord } from "./bot-controller.js";
 import { createEvaluationUi } from "./evaluation-ui.js";
 import { wireMainEvents } from "./main-events.js";
 import { APP_VERSION } from "./app-version.js";
-import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, Position } from "./types.js";
+import type { BoardSnapshot, ChronofishEngine, Color, GameSnapshot, GhostBoard, Move, Piece, PlannedArrow, Position } from "./types.js";
 
 const LOCAL_GAME_STORAGE_KEY = "chronofish.localGameState.v1";
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
@@ -47,7 +48,7 @@ interface BotEffortConfig {
 }
 
 type BotEffortName = "fast" | "balanced" | "expert";
-type BotEffortConfigs = Record<BotEffortName, BotEffortConfig>;
+type BotEffortConfigs = Partial<Record<BotEffortName, BotEffortConfig>>;
 
 interface MultiplayerState {
   roomId: string;
@@ -94,6 +95,27 @@ interface LegalTargetSelection {
   targets: Position[];
 }
 
+interface PlannedMoveNode {
+  id: string;
+  parentId: string | null;
+  move: Move;
+  beforeSnapshot: GameSnapshot;
+  afterSnapshot: GameSnapshot;
+  children: string[];
+  kind: "planned" | "bot-review";
+}
+
+interface PlannedMoveAnchor {
+  nodeId: string | null;
+  position: Position;
+}
+
+interface BotReviewProjection {
+  finalGame: GameSnapshot;
+  finalCommittedGame: GameSnapshot;
+  decision: BotDecisionRecord;
+}
+
 interface RenderOptions {
   preserveScroll?: boolean;
 }
@@ -107,29 +129,7 @@ interface ScrollState {
 
 let engine: ChronofishEngine | null = null;
 let aiParameters: unknown = null;
-let aiEffortConfigs: BotEffortConfigs = {
-  fast: {
-    label: "Bot: Fast",
-    displayNames: ["Bullet Fischer", "Speedrun Steinitz", "Blitz Botvinnik"],
-    depth: 2,
-    nodes: 20_000,
-    timeMs: 10_000
-  },
-  balanced: {
-    label: "Bot: Balanced",
-    displayNames: ["Multiverse Magnus", "Timeline Tal", "Causality Capablanca"],
-    depth: 4,
-    nodes: 80_000,
-    timeMs: 50_000
-  },
-  expert: {
-    label: "Bot: Expert",
-    displayNames: ["Kasparadox", "Premovaru Checkamura", "Anandromeda"],
-    depth: 5,
-    nodes: 200_000,
-    timeMs: 250_000
-  }
-};
+let aiEffortConfigs: BotEffortConfigs = {};
 
 const gpuBotDisplayNames: Record<BotEffortName, string[]> = {
   fast: [
@@ -183,6 +183,11 @@ let legalTargets: Position[] = [];
 let submittedTurns: Move[][] = [];
 let submittedNotation = "";
 let stagedMoves: Move[] = [];
+let plannedMoveAnchor: PlannedMoveAnchor | null = null;
+let plannedMoveNodes = new Map<string, PlannedMoveNode>();
+let plannedMoveRoots: string[] = [];
+let nextPlannedMoveNodeId = 1;
+let botReviewProjection: BotReviewProjection | null = null;
 let legalTargetRequestId = 0;
 let phase: Phase = "lobby";
 let lastRenderedPhase: Phase = phase;
@@ -342,8 +347,8 @@ function botEffortName(value: unknown): BotEffortName {
   return "balanced";
 }
 
-function botEffort(value: unknown): BotEffortConfig {
-  return aiEffortConfigs[botEffortName(value)] ?? aiEffortConfigs.balanced;
+function botEffort(value: unknown): BotEffortConfig | null {
+  return aiEffortConfigs[botEffortName(value)] ?? aiEffortConfigs.balanced ?? null;
 }
 
 function botBackendName(value: unknown): "gpu" | "cpu" {
@@ -368,7 +373,7 @@ function botDisplayName(color: Color): string {
     ? cpuBotDisplayNames[effortName]
     : gpuBotDisplayNames[effortName];
   return names[stableIndex(`${multiplayer.roomId}:${color}:${backend}:${effortName}`, names.length)]
-    ?? effort.label
+    ?? effort?.label
     ?? "Bot";
 }
 
@@ -407,6 +412,7 @@ function gamePayload(nextPhase: Phase = phase): RoomGamePayload {
     phase: nextPhase,
     assignments,
     notation: submittedNotation,
+    turns: submittedTurns,
     snapshot: game
   };
 }
@@ -525,6 +531,8 @@ function resetEngine(): void {
   submittedTurns = [];
   submittedNotation = "";
   stagedMoves = [];
+  clearPlannedMoveTree();
+  botReviewProjection = null;
   botController.clearDecisionLog();
   lastMatchAlertMessage = "";
 }
@@ -596,6 +604,261 @@ function cloneMove(move: Move): Move {
 
 function cloneGame(snapshot: GameSnapshot): GameSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as GameSnapshot;
+}
+
+function sameMove(left: Move, right: Move): boolean {
+  return samePosition(left.from, right.from) && samePosition(left.to, right.to);
+}
+
+function boardKey(timelineId: number, board: BoardSnapshot): string {
+  return `${timelineId}:${board.time}`;
+}
+
+function boardSnapshotKey(board: BoardSnapshot): string {
+  return JSON.stringify({
+    sideToMove: board.sideToMove,
+    castling: board.castling,
+    enPassant: board.enPassant,
+    origin: board.origin,
+    board: board.board
+  });
+}
+
+function boardAt(snapshot: GameSnapshot, timelineId: number, time: number): BoardSnapshot | null {
+  return snapshot.timelines
+    .find((timeline) => timeline.id === timelineId)
+    ?.boards.find((board) => board.time === time) ?? null;
+}
+
+function snapshotHasBoard(snapshot: GameSnapshot, position: Position): boolean {
+  return Boolean(boardAt(snapshot, position.timelineId, position.time));
+}
+
+function plannedBaseSnapshot(nodeId: string | null): GameSnapshot {
+  return nodeId ? plannedMoveNodes.get(nodeId)?.afterSnapshot ?? committedGame : committedGame;
+}
+
+function restoreVisibleEngineState(): void {
+  if (engine) {
+    syncEngineSnapshot(game);
+  }
+}
+
+function previewPlannedMove(beforeSnapshot: GameSnapshot, move: Move): GameSnapshot | null {
+  if (!engine) {
+    return null;
+  }
+  const wasm = activeEngine();
+  try {
+    syncEngineSnapshot(beforeSnapshot);
+    const ok = wasm.chronofish_apply_move(
+      move.from.timelineId,
+      move.from.time,
+      move.from.x,
+      move.from.y,
+      move.to.timelineId,
+      move.to.time,
+      move.to.x,
+      move.to.y
+    );
+    if (!ok) {
+      return null;
+    }
+    const movedSnapshot = engineSnapshot();
+    if (wasm.chronofish_submit_turn()) {
+      return engineSnapshot();
+    }
+    return movedSnapshot;
+  } finally {
+    restoreVisibleEngineState();
+  }
+}
+
+function changedGhostBoards(before: GameSnapshot, after: GameSnapshot, nodeId: string, kind: PlannedMoveNode["kind"]): GhostBoard[] {
+  const ghosts: GhostBoard[] = [];
+  const seen = new Set<string>();
+  for (const timeline of after.timelines) {
+    for (const board of timeline.boards) {
+      const key = boardKey(timeline.id, board);
+      const previous = boardAt(before, timeline.id, board.time);
+      if (!previous || boardSnapshotKey(previous) !== boardSnapshotKey(board)) {
+        const dedupeKey = `${nodeId}:${key}`;
+        if (!seen.has(dedupeKey)) {
+          ghosts.push({
+            nodeId,
+            timelineId: timeline.id,
+            board,
+            kind
+          });
+          seen.add(dedupeKey);
+        }
+      }
+    }
+  }
+  return ghosts;
+}
+
+function addPlannedMove(parentId: string | null, move: Move, beforeSnapshot: GameSnapshot, kind: PlannedMoveNode["kind"]): PlannedMoveNode | null {
+  const afterSnapshot = previewPlannedMove(beforeSnapshot, move);
+  if (!afterSnapshot) {
+    return null;
+  }
+  const id = `plan-${nextPlannedMoveNodeId++}`;
+  const node: PlannedMoveNode = {
+    id,
+    parentId,
+    move: cloneMove(move),
+    beforeSnapshot: cloneGame(beforeSnapshot),
+    afterSnapshot: cloneGame(afterSnapshot),
+    children: [],
+    kind
+  };
+  plannedMoveNodes.set(id, node);
+  if (parentId) {
+    plannedMoveNodes.get(parentId)?.children.push(id);
+  } else {
+    plannedMoveRoots.push(id);
+  }
+  return node;
+}
+
+function clearPlannedMoveTree(): void {
+  plannedMoveAnchor = null;
+  plannedMoveNodes = new Map();
+  plannedMoveRoots = [];
+  nextPlannedMoveNodeId = 1;
+}
+
+function clearPlannedMoves(): void {
+  clearPlannedMoveTree();
+  if (botReviewProjection) {
+    game = botReviewProjection.finalGame;
+    committedGame = botReviewProjection.finalCommittedGame;
+    botReviewProjection = null;
+    if (engine) {
+      syncEngineSnapshot(game);
+    }
+    elements.message.textContent = "Returned to final position.";
+  } else {
+    elements.message.textContent = "Cleared planned moves.";
+  }
+  selected = null;
+  legalTargets = [];
+  render({ preserveScroll: true });
+}
+
+function reachablePlannedNodeIds(roots: string[]): Set<string> {
+  const reachable = new Set<string>();
+  const stack = [...roots];
+  while (stack.length) {
+    const id = stack.pop();
+    if (!id || reachable.has(id)) {
+      continue;
+    }
+    reachable.add(id);
+    stack.push(...(plannedMoveNodes.get(id)?.children ?? []));
+  }
+  return reachable;
+}
+
+function prunePlannedMovesForCommittedTurn(turn: Move[]): void {
+  if (turn.length === 0 || plannedMoveRoots.length === 0) {
+    return;
+  }
+  let candidates = plannedMoveRoots
+    .map((id) => plannedMoveNodes.get(id))
+    .filter((node): node is PlannedMoveNode => Boolean(node));
+  let matched: PlannedMoveNode | null = null;
+  for (const move of turn) {
+    const next = candidates.find((node) => sameMove(node.move, move));
+    if (!next) {
+      clearPlannedMoveTree();
+      return;
+    }
+    matched = next;
+    candidates = next.children
+      .map((id) => plannedMoveNodes.get(id))
+      .filter((node): node is PlannedMoveNode => Boolean(node));
+  }
+  plannedMoveAnchor = null;
+  plannedMoveRoots = matched?.children.slice() ?? [];
+  for (const root of plannedMoveRoots) {
+    const node = plannedMoveNodes.get(root);
+    if (node) {
+      node.parentId = null;
+    }
+  }
+  const reachable = reachablePlannedNodeIds(plannedMoveRoots);
+  plannedMoveNodes = new Map(Array.from(plannedMoveNodes.entries()).filter(([id]) => reachable.has(id)));
+}
+
+function collectPlannedRenderData(): { plannedArrows: PlannedArrow[]; ghostBoards: GhostBoard[] } {
+  const plannedArrows: PlannedArrow[] = [];
+  const ghostBoards: GhostBoard[] = [];
+  const visit = (id: string) => {
+    const node = plannedMoveNodes.get(id);
+    if (!node) {
+      return;
+    }
+    plannedArrows.push({
+      from: node.move.from,
+      to: node.move.to,
+      kind: node.kind
+    });
+    ghostBoards.push(...changedGhostBoards(node.beforeSnapshot, node.afterSnapshot, node.id, node.kind));
+    for (const child of node.children) {
+      visit(child);
+    }
+  };
+  for (const root of plannedMoveRoots) {
+    visit(root);
+  }
+  return { plannedArrows, ghostBoards };
+}
+
+function buildBotReviewPlan(decision: BotDecisionRecord): void {
+  clearPlannedMoveTree();
+  let parentId: string | null = null;
+  let snapshot = cloneGame(decision.game);
+  for (const turn of decision.principalVariation) {
+    for (const move of turn) {
+      const node = addPlannedMove(parentId, move, snapshot, "bot-review");
+      if (!node) {
+        return;
+      }
+      parentId = node.id;
+      snapshot = node.afterSnapshot;
+    }
+  }
+}
+
+function showBotPlanForPosition(position: Position): boolean {
+  if (phase !== "review") {
+    return false;
+  }
+  const clickedBoard = boardAt(game, position.timelineId, position.time);
+  const originMove = clickedBoard?.origin?.from && clickedBoard.origin.to
+    ? { from: clickedBoard.origin.from, to: clickedBoard.origin.to }
+    : null;
+  const decisions = botController.allDecisions().slice().reverse();
+  const decision = (originMove
+    ? decisions.find((candidate) => candidate.selectedMoves.some((move) => sameMove(move, originMove)))
+    : null)
+    ?? decisions.find((candidate) => snapshotHasBoard(candidate.game, position));
+  if (!decision) {
+    return false;
+  }
+  botReviewProjection = {
+    finalGame: botReviewProjection?.finalGame ?? cloneGame(game),
+    finalCommittedGame: botReviewProjection?.finalCommittedGame ?? cloneGame(committedGame),
+    decision
+  };
+  game = cloneGame(decision.game);
+  committedGame = cloneGame(decision.game);
+  buildBotReviewPlan(decision);
+  elements.message.textContent = `${botDisplayName(decision.botColor)} depth ${decision.selectedDepth ?? "?"} plan from turn ${decision.ply}.`;
+  render({ preserveScroll: true });
+  return true;
 }
 
 function turnSignature(): string {
@@ -690,6 +953,7 @@ async function submitVisibleTurn(actor: Color): Promise<string | null> {
   game = engineSnapshot();
   committedGame = game;
   submittedTurns.push(submitted);
+  prunePlannedMovesForCommittedTurn(submitted);
   appendSubmittedNotation(turnNotation, actor);
   stagedMoves = [];
   selected = null;
@@ -719,9 +983,47 @@ async function rebuildStagedClientState(moves: Move[]): Promise<void> {
   }
 }
 
-async function handleSquareClick(position: Position): Promise<void> {
+async function handlePlannedMoveClick(position: Position, nodeId: string | null): Promise<void> {
+  if (!engine) {
+    return;
+  }
+  if (!plannedMoveAnchor) {
+    plannedMoveAnchor = { nodeId, position };
+    selected = null;
+    legalTargets = [];
+    elements.message.textContent = "Planning source selected. Shift-click a target square.";
+    render({ preserveScroll: true });
+    return;
+  }
+
+  const parentId = plannedMoveAnchor.nodeId;
+  const move = {
+    from: { ...plannedMoveAnchor.position },
+    to: { ...position }
+  };
+  const beforeSnapshot = plannedBaseSnapshot(parentId);
+  const node = addPlannedMove(parentId, move, beforeSnapshot, "planned");
+  plannedMoveAnchor = null;
+  selected = null;
+  legalTargets = [];
+  elements.message.textContent = node
+    ? "Planned move added."
+    : "That planned move is not legal from the selected ghost state.";
+  render({ preserveScroll: true });
+}
+
+async function handleSquareClick(position: Position, event: MouseEvent, nodeId: string | null = null): Promise<void> {
   if (!engine) {
     elements.message.textContent = "Build the WASM engine first with `cargo build --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown`.";
+    return;
+  }
+
+  if (event.shiftKey && phase !== "review") {
+    await handlePlannedMoveClick(position, nodeId);
+    return;
+  }
+
+  if (phase === "review" && showBotPlanForPosition(position)) {
     return;
   }
 
@@ -791,8 +1093,10 @@ function render(options: RenderOptions = {}): void {
   elements.resetButton.disabled = !canActNow() || !hasStagedMoves();
   elements.undoMoveButton.disabled = !canActNow() || !hasStagedMoves();
   elements.submitTurnButton.disabled = !canActNow() || !hasStagedMoves();
+  elements.clearPlansButton.disabled = plannedMoveNodes.size === 0 && !botReviewProjection;
   elements.concedeButton.disabled = !canActNow();
   training.renderButtons();
+  const plannedRenderData = collectPlannedRenderData();
 
   // State and IO live here; renderGame only rebuilds the DOM from supplied data.
   renderGame({
@@ -802,6 +1106,8 @@ function render(options: RenderOptions = {}): void {
     legalTargets,
     multiplayer,
     elements,
+    plannedArrows: plannedRenderData.plannedArrows,
+    ghostBoards: plannedRenderData.ghostBoards,
     onSquareClick: handleSquareClick,
     setMultiplayerStatus
   });
@@ -864,6 +1170,7 @@ function isRoomGamePayload(value: RoomState["game"]): value is RoomGamePayload {
 function applyRemoteRoom(room: RoomState, message = ""): void {
   currentRoom = room;
   botController.resetAiWorker();
+  const previousTurnCount = submittedTurns.length;
 
   if (isRoomGamePayload(room.game) && room.game.phase) {
     phase = room.game.phase;
@@ -878,12 +1185,16 @@ function applyRemoteRoom(room: RoomState, message = ""): void {
     submittedTurns = room.game.turns ?? [];
     submittedNotation = room.game.notation ?? "";
     stagedMoves = [];
+    if (submittedTurns.length > previousTurnCount) {
+      prunePlannedMovesForCommittedTurn(submittedTurns.at(-1) ?? []);
+    }
   } else if (room.game && "timelines" in room.game) {
     game = room.game as GameSnapshot;
     committedGame = game;
     submittedTurns = [];
     submittedNotation = "";
     stagedMoves = [];
+    clearPlannedMoveTree();
   }
 
   if (engine && game.timelines.length) {
@@ -995,6 +1306,7 @@ async function enterPostMatchReview(message: string, credentials: BotCredentials
   phase = "review";
   selected = null;
   legalTargets = [];
+  plannedMoveAnchor = null;
   elements.message.textContent = message;
   persistLocalGameState();
   render();
@@ -1171,7 +1483,7 @@ async function loadServerStatus(): Promise<void> {
       aiParameters = await parametersResponse.json();
     }
     if (effortResponse.ok) {
-      aiEffortConfigs = await effortResponse.json() as BotEffortConfigs;
+      aiEffortConfigs = await effortResponse.json() as Record<BotEffortName, BotEffortConfig>;
     }
 
     elements.serverStatus.textContent = `🖥 v${payload.version}`;
@@ -1200,6 +1512,7 @@ wireMainEvents({
   cloneMove,
   rebuildStagedClientState,
   submitVisibleTurn,
+  clearPlannedMoves,
   isMatchOver,
   enterPostMatchReview,
   syncState,
@@ -1215,7 +1528,9 @@ wireMainEvents({
   syncLobby
 });
 
-loadWasmStatus();
-loadServerStatus();
+void (async () => {
+  await loadServerStatus();
+  await loadWasmStatus();
+})();
 setHudCollapsed(localStorage.getItem("chronofish.hudCollapsed") === "true");
 render();

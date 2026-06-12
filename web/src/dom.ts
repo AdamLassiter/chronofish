@@ -26,6 +26,7 @@ export const elements = {
   resetButton: queryElement<HTMLButtonElement>("#reset-game"),
   undoMoveButton: queryElement<HTMLButtonElement>("#undo-move"),
   submitTurnButton: queryElement<HTMLButtonElement>("#submit-turn"),
+  clearPlansButton: queryElement<HTMLButtonElement>("#clear-plans"),
   concedeButton: queryElement<HTMLButtonElement>("#concede-game"),
   roomInput: queryElement<HTMLInputElement>("#room-id"),
   whitePlayerSelect: queryElement<HTMLSelectElement>("#white-player"),

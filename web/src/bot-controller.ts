@@ -27,6 +27,8 @@ interface AiChoice {
   cpuSearch?: string | null;
 }
 
+type PrincipalVariation = Move[][];
+
 interface AiSearchResult {
   status: AiStatus;
   moves: Move[];
@@ -34,6 +36,7 @@ interface AiSearchResult {
   depth?: number | null;
   nodes?: number | null;
   choices?: AiChoice[];
+  principalVariation?: PrincipalVariation;
   gpuSearch?: string | null;
   cpuSearch?: string | null;
   trainingDecision?: BotDecisionRecord | null;
@@ -92,7 +95,7 @@ interface BotDecisionChoice {
   cpuSearch: string | null;
 }
 
-interface BotDecisionRecord {
+export interface BotDecisionRecord {
   ply: number;
   botColor: BotColor;
   effort: string;
@@ -101,6 +104,7 @@ interface BotDecisionRecord {
   selectedScore: number | null;
   selectedDepth: number | null;
   selectedNodes: number | null;
+  principalVariation: PrincipalVariation;
   choices: BotDecisionChoice[];
 }
 
@@ -126,7 +130,7 @@ interface BotControllerOptions {
   getRoomId(): string;
   isBotAssignment(value: unknown): boolean;
   botEffortName(value: unknown): string;
-  botEffort(value: unknown): BotEffort;
+  botEffort(value: unknown): BotEffort | null;
   botDisplayName(color: BotColor): string;
   cloneGame(game: GameSnapshot): GameSnapshot;
   cloneMove(move: Move): Move;
@@ -151,6 +155,7 @@ export interface BotController {
   resetAiWorker(): void;
   moveCredentials(color: BotColor): BotCredentials;
   decisionsFor(color: BotColor): BotDecisionRecord[];
+  allDecisions(): BotDecisionRecord[];
   clearDecisionLog(): void;
 }
 
@@ -306,6 +311,9 @@ export function createBotController({
     const effortName = botEffortName(getAssignments()[botColor]);
     const backend = botBackend(getAssignments()[botColor]);
     const effort = botEffort(getAssignments()[botColor]);
+    if (!effort) {
+      return;
+    }
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
@@ -598,6 +606,7 @@ export function createBotController({
       selectedScore: result.score ?? null,
       selectedDepth: result.depth ?? null,
       selectedNodes: result.nodes ?? null,
+      principalVariation: normalizePrincipalVariation(result.principalVariation, result.moves),
       choices: rankedBotChoices(pending.results, result).map((choice) => ({
         moves: choice.moves.map(cloneMove),
         score: choice.score ?? null,
@@ -607,6 +616,13 @@ export function createBotController({
         cpuSearch: choice.cpuSearch ?? null
       }))
     };
+  }
+
+  function normalizePrincipalVariation(variation: PrincipalVariation | undefined, fallback: Move[]): PrincipalVariation {
+    const cleaned = (variation ?? [])
+      .map((turn) => turn.filter((move) => move?.from && move.to).map(cloneMove))
+      .filter((turn) => turn.length > 0);
+    return cleaned.length ? cleaned : [fallback.map(cloneMove)];
   }
 
   function recordBotDecision(result: AiSearchResult): void {
@@ -735,6 +751,7 @@ export function createBotController({
     resetAiWorker,
     moveCredentials: botMoveCredentials,
     decisionsFor: (color: BotColor) => botDecisionLog.filter((decision) => decision.botColor === color),
+    allDecisions: () => botDecisionLog.slice(),
     clearDecisionLog: () => {
       botDecisionLog = [];
     }

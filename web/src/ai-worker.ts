@@ -80,6 +80,7 @@ interface SearchResult {
   moves: Move[];
   score?: number | undefined;
   choices?: SearchChoice[] | undefined;
+  principalVariation?: Move[][] | undefined;
   depth?: number | undefined;
   nodes?: number | undefined;
   gpu?: boolean | undefined;
@@ -178,6 +179,7 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
         moves: [selected.move],
         score: selected.score,
         choices: selected.choices,
+        principalVariation: [[selected.move]],
         depth: requestedDepth,
         nodes: ranked.length,
         status: "ok",
@@ -212,6 +214,7 @@ async function searchSingleMoveRepliesOnGpu(
     const candidate: SearchResult = {
       moves: [entry.move],
       score,
+      principalVariation: [[entry.move]],
       depth: Math.min(requestedDepth, 2),
       nodes: mutated.length,
       status: "ok",
@@ -338,6 +341,7 @@ function withCompletedTurnChoice(result: SearchResult, moves: Move[], gpuSearch 
     ...result,
     moves,
     gpuSearch,
+    principalVariation: result.principalVariation ?? [moves],
     choices: [
       completedChoice,
       ...existingChoices
@@ -657,6 +661,7 @@ async function tryFullGpuSearch(
     const candidate: SearchResult = {
       moves: [entry.move],
       score,
+      principalVariation: [[entry.move]],
       depth: Math.min(requestedDepth, 2),
       nodes: supported.length,
       status: "ok",

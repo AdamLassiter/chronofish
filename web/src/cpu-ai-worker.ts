@@ -18,6 +18,7 @@ interface CpuAiResult {
   score?: number;
   depth?: number;
   nodes?: number;
+  principalVariation?: Move[][];
   cpuSearch?: string;
 }
 
@@ -43,6 +44,7 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
       Math.max(1, Math.floor(timeMs))
     );
     const result = JSON.parse(readWasmString(engine, ptr)) as CpuAiResult;
+    result.principalVariation ??= result.moves.length ? [result.moves] : [];
     result.cpuSearch = "heuristic";
     self.postMessage({ id, ok: true, result, partitionIndex });
   } catch (error) {

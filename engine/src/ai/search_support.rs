@@ -97,7 +97,7 @@ impl SearchContext {
             game,
             color,
             &self.weights,
-            EvaluationLimits::for_nodes(self.max_nodes),
+            EvaluationLimits::for_nodes(self.max_nodes).with_deadline(self.deadline),
             &mut evaluation_stats,
         );
         self.stats.evaluation_calls += evaluation_stats.calls;

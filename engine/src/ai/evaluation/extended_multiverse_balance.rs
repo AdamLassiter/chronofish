@@ -159,15 +159,22 @@ impl Game {
         if obligations == 0 {
             return summary;
         }
+        if deadline_expired(limits.deadline) {
+            return summary;
+        }
 
         let mut search = self.clone_for_search();
         stats.clones += 1;
         search.turn = color;
-        summary.completion_count = search.estimated_turn_completion_count_with_limit(
+        summary.completion_count = search.estimated_turn_completion_count_with_limit_until(
             color,
             weights,
             limits.completion_results,
+            limits.deadline,
         ) as i32;
+        if deadline_expired(limits.deadline) {
+            return summary;
+        }
         let current_material = search.latest_material_for(color, weights);
         let current_royal_safety = search.royal_safety_for(color, weights);
         let current_temporal_pressure = search.opponent_temporal_tactic_pressure(color, weights);
@@ -193,9 +200,13 @@ impl Game {
                     color,
                     weights,
                     limits.zugzwang_moves_per_board,
+                    limits.deadline,
                 );
                 let mut all_moves_are_bad = !moves.is_empty();
                 for movement in moves {
+                    if deadline_expired(limits.deadline) {
+                        return summary;
+                    }
                     let Some(undo) = search.make_search_move(movement) else {
                         all_moves_are_bad = false;
                         break;
@@ -218,7 +229,12 @@ impl Game {
             }
         }
 
-        for movement in search.current_turn_moves_for(color, weights, limits.turn_moves) {
+        for movement in
+            search.current_turn_moves_for(color, weights, limits.turn_moves, limits.deadline)
+        {
+            if deadline_expired(limits.deadline) {
+                return summary;
+            }
             let Some((piece, _move_kind)) = search.legal_move_kind(movement.from, movement.to)
             else {
                 continue;
@@ -351,7 +367,17 @@ impl Game {
         weights: &EvalWeights,
         limit: usize,
     ) -> usize {
-        if limit == 0 || !self.has_pending_present_board(color) {
+        self.estimated_turn_completion_count_with_limit_until(color, weights, limit, None)
+    }
+
+    pub(crate) fn estimated_turn_completion_count_with_limit_until(
+        &mut self,
+        color: Color,
+        weights: &EvalWeights,
+        limit: usize,
+        deadline: Option<SearchInstant>,
+    ) -> usize {
+        if limit == 0 || deadline_expired(deadline) || !self.has_pending_present_board(color) {
             return 0;
         }
         let max_depth = self
@@ -360,7 +386,7 @@ impl Game {
             .filter(|timeline| self.is_active_timeline(timeline.id))
             .count()
             + 1;
-        self.estimated_turn_completion_count_at_depth(color, weights, 0, max_depth, limit)
+        self.estimated_turn_completion_count_at_depth(color, weights, 0, max_depth, limit, deadline)
     }
 
     pub(crate) fn estimated_turn_completion_count_at_depth(
@@ -370,8 +396,9 @@ impl Game {
         depth: usize,
         max_depth: usize,
         limit: usize,
+        deadline: Option<SearchInstant>,
     ) -> usize {
-        if limit == 0 {
+        if limit == 0 || deadline_expired(deadline) {
             return 0;
         }
         if !self.has_pending_present_board(color) {
@@ -382,7 +409,10 @@ impl Game {
         }
 
         let mut total = 0;
-        for movement in self.prioritized_turn_moves(color, weights, None, MAX_MOVES_PER_NODE) {
+        for movement in self.prioritized_turn_moves(color, weights, deadline, MAX_MOVES_PER_NODE) {
+            if deadline_expired(deadline) {
+                break;
+            }
             let Some(undo) = self.make_search_move(movement) else {
                 continue;
             };
@@ -392,6 +422,7 @@ impl Game {
                 depth + 1,
                 max_depth,
                 limit - total,
+                deadline,
             );
             self.unmake_search_move(undo);
             if total >= limit {
@@ -406,23 +437,32 @@ impl Game {
         color: Color,
         weights: &EvalWeights,
         limit: usize,
+        deadline: Option<SearchInstant>,
     ) -> Vec<MoveStep> {
-        if !self.has_pending_present_board(color) {
+        if deadline_expired(deadline) || !self.has_pending_present_board(color) {
             return Vec::new();
         }
         let mut search = self.clone_for_search();
         search.turn = color;
         if limit == EvaluationLimits::FULL.turn_moves {
-            let mut moves = search.legal_single_moves_until(weights, None);
+            let mut moves = search.legal_single_moves_until(weights, deadline);
             moves.truncate(limit);
             return moves;
         }
-        search.sampled_current_turn_moves(weights, limit)
+        search.sampled_current_turn_moves(weights, limit, deadline)
     }
 
-    fn sampled_current_turn_moves(&self, weights: &EvalWeights, limit: usize) -> Vec<MoveStep> {
+    fn sampled_current_turn_moves(
+        &self,
+        weights: &EvalWeights,
+        limit: usize,
+        deadline: Option<SearchInstant>,
+    ) -> Vec<MoveStep> {
         let mut moves = Vec::with_capacity(limit);
         for timeline in &self.timelines {
+            if deadline_expired(deadline) {
+                return self.order_moves(moves, weights);
+            }
             if !self.is_active_timeline(timeline.id) {
                 continue;
             }
@@ -445,6 +485,9 @@ impl Game {
                         continue;
                     };
                     for to in self.piece_candidate_destinations(from, piece) {
+                        if deadline_expired(deadline) {
+                            return self.order_moves(moves, weights);
+                        }
                         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
                             continue;
                         };
@@ -468,6 +511,7 @@ impl Game {
         color: Color,
         weights: &EvalWeights,
         limit: usize,
+        deadline: Option<SearchInstant>,
     ) -> Vec<MoveStep> {
         let Some(board) = self.board(timeline_id, time) else {
             return Vec::new();
@@ -481,6 +525,9 @@ impl Game {
 
         let mut moves = Vec::new();
         for y in 0..8 {
+            if deadline_expired(deadline) {
+                return self.order_moves(moves, weights);
+            }
             for x in 0..8 {
                 let from = Position {
                     timeline_id,
@@ -495,6 +542,9 @@ impl Game {
                     continue;
                 }
                 for to in self.piece_candidate_destinations(from, piece) {
+                    if deadline_expired(deadline) {
+                        return self.order_moves(moves, weights);
+                    }
                     let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
                         continue;
                     };
