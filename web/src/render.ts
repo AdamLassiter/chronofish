@@ -39,6 +39,7 @@ interface RenderGameOptions {
   presentGame: GameSnapshot;
   selected: Position | null;
   legalTargets: Position[];
+  plannedSelectionNodeId?: string | null;
   multiplayer: MultiplayerState;
   elements: RenderElements;
   plannedArrows?: PlannedArrow[];
@@ -360,7 +361,7 @@ function renderMoveArrows(grid: HTMLElement, arrows: Arrow[]): void {
   }
 }
 
-function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, highlights, ghostBoards, onSquareClick }: {
+function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTime, selected, legalTargets, plannedSelectionNodeId, highlights, ghostBoards, onSquareClick }: {
   game: GameSnapshot;
   presentGame: GameSnapshot;
   timeline: Timeline;
@@ -368,6 +369,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   currentPresentTime: number;
   selected: Position | null;
   legalTargets: Position[];
+  plannedSelectionNodeId: string | null;
   highlights: HighlightMap;
   ghostBoards: GhostBoard[];
   onSquareClick(position: Position, event: MouseEvent, nodeId: string | null): void;
@@ -396,7 +398,18 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   }
 
   for (const ghost of ghostBoards.filter((candidate) => candidate.timelineId === timeline.id)) {
-    const boardEl = renderBoard({ game, presentGame, timeline, board: ghost.board, currentPresentTime, selected, legalTargets: [], highlights, ghost, onSquareClick });
+    const boardEl = renderBoard({
+      game,
+      presentGame,
+      timeline,
+      board: ghost.board,
+      currentPresentTime,
+      selected,
+      legalTargets: plannedSelectionNodeId === ghost.nodeId ? legalTargets : [],
+      highlights,
+      ghost,
+      onSquareClick
+    });
     boardEl.style.gridColumn = String(ghost.board.time + 2);
     row.append(boardEl);
   }
@@ -404,7 +417,7 @@ function renderTimeline({ game, presentGame, timeline, maxTime, currentPresentTi
   return row;
 }
 
-export function renderGame({ game, presentGame, selected, legalTargets, multiplayer, elements, plannedArrows = [], ghostBoards = [], onSquareClick, setMultiplayerStatus }: RenderGameOptions): void {
+export function renderGame({ game, presentGame, selected, legalTargets, plannedSelectionNodeId = null, multiplayer, elements, plannedArrows = [], ghostBoards = [], onSquareClick, setMultiplayerStatus }: RenderGameOptions): void {
   // The timeline grid is small enough that replacing DOM children is clearer than
   // incremental reconciliation.
   const maxTime = Math.max(
@@ -442,6 +455,7 @@ export function renderGame({ game, presentGame, selected, legalTargets, multipla
       currentPresentTime,
       selected,
       legalTargets,
+      plannedSelectionNodeId,
       highlights,
       ghostBoards,
       onSquareClick

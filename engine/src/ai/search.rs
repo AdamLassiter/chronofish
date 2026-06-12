@@ -113,12 +113,14 @@ impl Game {
             } else {
                 None
             };
-            let Some((plan, score)) = self.search_root(current_depth, &mut context, window) else {
+            let Some((plan, score, principal_variation)) =
+                self.search_root_staged_with_pv(current_depth, &mut context, window, None)
+            else {
                 break;
             };
             previous_score = score;
             best = AiSearchResult {
-                principal_variation: vec![plan.moves.clone()],
+                principal_variation,
                 moves: plan.moves,
                 score,
                 depth: current_depth,
@@ -235,14 +237,14 @@ impl Game {
             } else {
                 None
             };
-            let Some((plan, score)) =
-                self.search_root_partitioned(current_depth, &mut context, window, partition)
+            let Some((plan, score, principal_variation)) =
+                self.search_root_staged_with_pv(current_depth, &mut context, window, partition)
             else {
                 break;
             };
             previous_score = score;
             best = AiSearchResult {
-                principal_variation: vec![plan.moves.clone()],
+                principal_variation,
                 moves: plan.moves,
                 score,
                 depth: current_depth,
@@ -325,7 +327,7 @@ impl Game {
     ) -> i32 {
         // Children are whole submitted turn plans, not individual piece moves.
         context.nodes += 1;
-        if let Some(score) = self.terminal_score(maximizing_color) {
+        if let Some(score) = self.terminal_score_until(maximizing_color, context.deadline) {
             return score;
         }
         if context.exhausted() {
@@ -469,7 +471,7 @@ impl Game {
         context: &mut SearchContext,
         depth: i32,
     ) -> i32 {
-        if let Some(score) = self.terminal_score(maximizing_color) {
+        if let Some(score) = self.terminal_score_until(maximizing_color, context.deadline) {
             return score;
         }
         let stand_pat = context.evaluate(self, maximizing_color);

@@ -15,6 +15,9 @@ impl SearchContext {
             nodes: 0,
             deadline,
             options: SearchOptions::optimized(),
+            root_plan_cap: None,
+            child_plan_cap: None,
+            evaluation_limits: None,
             table: TranspositionTable::new(max_nodes),
             evaluation_cache: EvaluationCache::new(max_nodes),
             turn_plan_cache: std::collections::HashMap::new(),
@@ -33,19 +36,21 @@ impl SearchContext {
     }
 
     pub(crate) fn root_plan_limit(&self) -> usize {
-        if self.max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
+        let limit = if self.max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
             FAST_ROOT_TURN_PLANS
         } else {
             MAX_ROOT_TURN_PLANS
-        }
+        };
+        self.root_plan_cap.map_or(limit, |cap| limit.min(cap))
     }
 
     pub(crate) fn child_plan_limit(&self) -> usize {
-        if self.max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
+        let limit = if self.max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
             FAST_CHILD_TURN_PLANS
         } else {
             MAX_CHILD_TURN_PLANS
-        }
+        };
+        self.child_plan_cap.map_or(limit, |cap| limit.min(cap))
     }
 
     pub(crate) fn quiescence_depth(&self) -> i32 {
@@ -93,11 +98,15 @@ impl SearchContext {
             return score;
         }
         let mut evaluation_stats = EvaluationStats::default();
+        let limits = self
+            .evaluation_limits
+            .unwrap_or_else(|| EvaluationLimits::for_nodes(self.max_nodes))
+            .with_deadline(self.deadline);
         let score = self.evaluator.evaluate_with_limits(
             game,
             color,
             &self.weights,
-            EvaluationLimits::for_nodes(self.max_nodes).with_deadline(self.deadline),
+            limits,
             &mut evaluation_stats,
         );
         self.stats.evaluation_calls += evaluation_stats.calls;
@@ -188,6 +197,10 @@ impl SearchOptions {
             capture_sanity: true,
             turn_plan_cache: true,
         }
+    }
+
+    pub(crate) fn training() -> Self {
+        Self::optimized()
     }
 
     pub(crate) fn minimal() -> Self {

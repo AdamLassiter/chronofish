@@ -108,6 +108,7 @@ interface PlannedMoveNode {
 interface PlannedMoveAnchor {
   nodeId: string | null;
   position: Position;
+  targets: Position[];
 }
 
 interface BotReviewProjection {
@@ -118,6 +119,7 @@ interface BotReviewProjection {
 
 interface RenderOptions {
   preserveScroll?: boolean;
+  focusPosition?: Position;
 }
 
 interface ScrollState {
@@ -816,11 +818,22 @@ function collectPlannedRenderData(): { plannedArrows: PlannedArrow[]; ghostBoard
   return { plannedArrows, ghostBoards };
 }
 
-function buildBotReviewPlan(decision: BotDecisionRecord): void {
+function applyBotReviewTurn(snapshot: GameSnapshot, moves: Move[]): GameSnapshot | null {
+  let nextSnapshot: GameSnapshot | null = cloneGame(snapshot);
+  for (const move of moves) {
+    nextSnapshot = previewPlannedMove(nextSnapshot, move);
+    if (!nextSnapshot) {
+      return null;
+    }
+  }
+  return nextSnapshot;
+}
+
+function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnapshot, skipTurns = 0): void {
   clearPlannedMoveTree();
   let parentId: string | null = null;
-  let snapshot = cloneGame(decision.game);
-  for (const turn of decision.principalVariation) {
+  let snapshot = cloneGame(baseSnapshot);
+  for (const turn of decision.principalVariation.slice(skipTurns)) {
     for (const move of turn) {
       const node = addPlannedMove(parentId, move, snapshot, "bot-review");
       if (!node) {
@@ -836,6 +849,10 @@ function showBotPlanForPosition(position: Position): boolean {
   if (phase !== "review") {
     return false;
   }
+  if (botReviewProjection && snapshotHasBoard(game, position)) {
+    clearPlannedMoves();
+    return true;
+  }
   const clickedBoard = boardAt(game, position.timelineId, position.time);
   const originMove = clickedBoard?.origin?.from && clickedBoard.origin.to
     ? { from: clickedBoard.origin.from, to: clickedBoard.origin.to }
@@ -848,16 +865,33 @@ function showBotPlanForPosition(position: Position): boolean {
   if (!decision) {
     return false;
   }
+  const selectedTurnClicked = Boolean(originMove
+    && decision.selectedMoves.some((move) => sameMove(move, originMove)));
+  const baseSnapshot = selectedTurnClicked
+    ? applyBotReviewTurn(decision.game, decision.selectedMoves)
+    : cloneGame(decision.game);
+  if (!baseSnapshot) {
+    return false;
+  }
+  const skippedTurns = selectedTurnClicked ? 1 : 0;
   botReviewProjection = {
     finalGame: botReviewProjection?.finalGame ?? cloneGame(game),
     finalCommittedGame: botReviewProjection?.finalCommittedGame ?? cloneGame(committedGame),
     decision
   };
-  game = cloneGame(decision.game);
-  committedGame = cloneGame(decision.game);
-  buildBotReviewPlan(decision);
+  game = cloneGame(baseSnapshot);
+  committedGame = cloneGame(baseSnapshot);
+  buildBotReviewPlan(decision, baseSnapshot, skippedTurns);
   elements.message.textContent = `${botDisplayName(decision.botColor)} depth ${decision.selectedDepth ?? "?"} plan from turn ${decision.ply}.`;
-  render({ preserveScroll: true });
+  const focusMove = originMove
+    ? decision.selectedMoves.find((move) => sameMove(move, originMove))
+    : null;
+  const focusPosition = selectedTurnClicked && snapshotHasBoard(baseSnapshot, position)
+    ? position
+    : focusMove?.from
+    ?? decision.selectedMoves[0]?.from
+    ?? (snapshotHasBoard(baseSnapshot, position) ? position : null);
+  render(focusPosition ? { focusPosition } : {});
   return true;
 }
 
@@ -871,15 +905,22 @@ function turnSignature(): string {
   });
 }
 
-function targetFor(position: Position): Position | undefined {
-  return legalTargets.find((target) => samePosition(target, position));
+function activeLegalTargetsFor(nodeId: string | null = null): Position[] {
+  if (!plannedMoveAnchor) {
+    return legalTargets;
+  }
+  return plannedMoveAnchor.nodeId === nodeId ? plannedMoveAnchor.targets : [];
 }
 
-function legalTargetsFor(position: Position): Promise<LegalTargetSelection> {
+function targetFor(position: Position, nodeId: string | null = null): Position | undefined {
+  return activeLegalTargetsFor(nodeId).find((target) => samePosition(target, position));
+}
+
+function legalTargetsFor(position: Position, snapshot: GameSnapshot = game): Promise<LegalTargetSelection> {
   if (!engine) {
     return Promise.resolve({ source: null, targets: [] });
   }
-  syncEngineSnapshot(game);
+  syncEngineSnapshot(snapshot);
   return Promise.resolve(JSON.parse(readWasmString(engine, engine.chronofish_legal_selection_json(
     position.timelineId,
     position.time,
@@ -988,15 +1029,50 @@ async function handlePlannedMoveClick(position: Position, nodeId: string | null)
     return;
   }
   if (!plannedMoveAnchor) {
-    plannedMoveAnchor = { nodeId, position };
+    const snapshot = plannedBaseSnapshot(nodeId);
+    const requestId = ++legalTargetRequestId;
     selected = null;
     legalTargets = [];
-    elements.message.textContent = "Planning source selected. Shift-click a target square.";
     render({ preserveScroll: true });
-    return;
+    try {
+      const selection = await legalTargetsFor(position, snapshot);
+      restoreVisibleEngineState();
+      if (requestId !== legalTargetRequestId) {
+        return;
+      }
+      if (!selection.source) {
+        plannedMoveAnchor = null;
+        elements.message.textContent = "Select a piece on a planned board.";
+        render({ preserveScroll: true });
+        return;
+      }
+      plannedMoveAnchor = {
+        nodeId,
+        position,
+        targets: selection.targets ?? []
+      };
+      const piece = selection.source.piece;
+      elements.message.textContent = `Planning ${capitalize(piece.color)} ${piece.type}. ${plannedMoveAnchor.targets.length} legal target${plannedMoveAnchor.targets.length === 1 ? "" : "s"}.`;
+      render({ preserveScroll: true });
+      return;
+    } catch (error) {
+      restoreVisibleEngineState();
+      if (requestId !== legalTargetRequestId) {
+        return;
+      }
+      plannedMoveAnchor = null;
+      elements.message.textContent = errorMessage(error);
+      render({ preserveScroll: true });
+      return;
+    }
   }
 
   const parentId = plannedMoveAnchor.nodeId;
+  if (!targetFor(position, parentId)) {
+    elements.message.textContent = "Shift-click a highlighted planned target.";
+    render({ preserveScroll: true });
+    return;
+  }
   const move = {
     from: { ...plannedMoveAnchor.position },
     to: { ...position }
@@ -1102,8 +1178,9 @@ function render(options: RenderOptions = {}): void {
   renderGame({
     game,
     presentGame: committedGame,
-    selected,
-    legalTargets,
+    selected: plannedMoveAnchor?.position ?? selected,
+    legalTargets: activeLegalTargetsFor(plannedMoveAnchor?.nodeId ?? null),
+    plannedSelectionNodeId: plannedMoveAnchor?.nodeId ?? null,
     multiplayer,
     elements,
     plannedArrows: plannedRenderData.plannedArrows,
@@ -1115,6 +1192,9 @@ function render(options: RenderOptions = {}): void {
 
   if (scrollState) {
     restoreScrollState(scrollState);
+  }
+  if (options.focusPosition) {
+    scrollBoardIntoView(options.focusPosition);
   }
   evaluationUi.maybeScrollToPresent({
     phase,
@@ -1138,6 +1218,18 @@ function restoreScrollState(state: ScrollState): void {
   elements.multiverse.scrollLeft = state.multiverseX;
   elements.multiverse.scrollTop = state.multiverseY;
   window.scrollTo(state.windowX, state.windowY);
+}
+
+function scrollBoardIntoView(position: Position): void {
+  const key = `${position.timelineId}:${position.time}:${position.x}:${position.y}`;
+  const square = Array.from(elements.timelineGrid.querySelectorAll<HTMLElement>("[data-position-key]"))
+    .find((candidate) => candidate.dataset.positionKey === key);
+  const board = square?.closest<HTMLElement>(".board-card");
+  board?.scrollIntoView({
+    block: "center",
+    inline: "nearest",
+    behavior: "smooth"
+  });
 }
 
 function setHudCollapsed(collapsed: boolean): void {

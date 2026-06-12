@@ -92,6 +92,11 @@ interface SearchResult {
   pendingPresentBoardCount?: number | undefined;
 }
 
+interface ReplySearchResult {
+  score: number;
+  move?: Move | undefined;
+}
+
 interface LegalTargetSelection {
   source: { piece: Piece; position: Position } | null;
   targets: Position[];
@@ -207,14 +212,19 @@ async function searchSingleMoveRepliesOnGpu(
   const candidates: SearchResult[] = [];
   for (const entry of mutated.filter(hasSupportedChildBoards)) {
     let score = entry.score;
+    let principalVariation: Move[][] = [[entry.move]];
     if (entry.mutationStatus !== GPU_MUTATION_STATUS_ROYAL_CAPTURE && entry.mutationStatus !== GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE) {
       const childSnapshot = snapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
-      score -= await bestReplyScoreOnGpu(device, childSnapshot, nodes);
+      const reply = await bestReplyOnGpu(device, childSnapshot, nodes);
+      score -= reply.score;
+      if (reply.move) {
+        principalVariation = [[entry.move], [reply.move]];
+      }
     }
     const candidate: SearchResult = {
       moves: [entry.move],
       score,
-      principalVariation: [[entry.move]],
+      principalVariation,
       depth: Math.min(requestedDepth, 2),
       nodes: mutated.length,
       status: "ok",
@@ -341,7 +351,10 @@ function withCompletedTurnChoice(result: SearchResult, moves: Move[], gpuSearch 
     ...result,
     moves,
     gpuSearch,
-    principalVariation: result.principalVariation ?? [moves],
+    principalVariation: [
+      moves,
+      ...(result.principalVariation ?? []).slice(1)
+    ],
     choices: [
       completedChoice,
       ...existingChoices
@@ -653,15 +666,19 @@ async function tryFullGpuSearch(
   const candidates: SearchResult[] = [];
   for (const entry of supported.slice(0, Math.min(32, Math.max(8, nodes ?? 64)))) {
     let score = entry.score;
+    let principalVariation: Move[][] = [[entry.move]];
     if (requestedDepth > 1 && entry.mutationStatus !== GPU_MUTATION_STATUS_ROYAL_CAPTURE && entry.mutationStatus !== GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE) {
       const childSnapshot = snapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
-      const replyScore = await bestReplyScoreOnGpu(device, childSnapshot, nodes);
-      score -= replyScore;
+      const reply = await bestReplyOnGpu(device, childSnapshot, nodes);
+      score -= reply.score;
+      if (reply.move) {
+        principalVariation = [[entry.move], [reply.move]];
+      }
     }
     const candidate: SearchResult = {
       moves: [entry.move],
       score,
-      principalVariation: [[entry.move]],
+      principalVariation,
       depth: Math.min(requestedDepth, 2),
       nodes: supported.length,
       status: "ok",
@@ -680,20 +697,22 @@ async function tryFullGpuSearch(
   return selected;
 }
 
-async function bestReplyScoreOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: number): Promise<number> {
+async function bestReplyOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: number): Promise<ReplySearchResult> {
   const inputs = buildGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
   if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
-    return 0;
+    return { score: 0 };
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
   let best = 0;
+  let bestMove: Move | undefined;
   for (let index = 0; index < scored.scores.length; index += 1) {
     const score = scored.scores[index] ?? -2147483647;
     if (score > best) {
       best = score;
+      bestMove = moveFromCandidateRecord(scored.records, index);
     }
   }
-  return best;
+  return { score: best, move: bestMove };
 }
 
 function selectSearchCandidate<T extends SearchChoice>(candidates: T[], temperature = 0, randomSeed = 0): (T & { choices: SearchChoice[] }) | null {

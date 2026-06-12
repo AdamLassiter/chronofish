@@ -59,11 +59,21 @@ impl Game {
         weights: &EvalWeights,
         max_nodes: usize,
     ) -> i32 {
+        self.evaluate_heuristic_for_nodes_until(color, weights, max_nodes, None)
+    }
+
+    pub(crate) fn evaluate_heuristic_for_nodes_until(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        max_nodes: usize,
+        deadline: Option<SearchInstant>,
+    ) -> i32 {
         let mut stats = EvaluationStats::default();
         self.evaluate_heuristic_with_limits(
             color,
             weights,
-            EvaluationLimits::for_nodes(max_nodes),
+            EvaluationLimits::for_nodes(max_nodes).with_deadline(deadline),
             &mut stats,
         )
     }
@@ -89,7 +99,7 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        if let Some(score) = self.terminal_score(color) {
+        if let Some(score) = self.terminal_score_until(color, limits.deadline) {
             return score;
         }
 
@@ -156,6 +166,14 @@ impl Game {
     }
 
     pub(crate) fn terminal_score(&self, color: Color) -> Option<i32> {
+        self.terminal_score_until(color, None)
+    }
+
+    pub(crate) fn terminal_score_until(
+        &self,
+        color: Color,
+        deadline: Option<SearchInstant>,
+    ) -> Option<i32> {
         if let Some(result) = self.result {
             return match result.winner {
                 Some(winner) if winner == color => Some(CHECKMATE_SCORE),
@@ -167,7 +185,9 @@ impl Game {
             Some(CHECKMATE_SCORE)
         } else if self.staged_royal_capture_by == Some(color.opposite()) {
             Some(-CHECKMATE_SCORE)
-        } else if self.has_threefold_repetition() || self.is_classic_stalemate(self.turn) {
+        } else if self.has_threefold_repetition()
+            || (!deadline_expired(deadline) && self.is_classic_stalemate_until(self.turn, deadline))
+        {
             Some(0)
         } else {
             None

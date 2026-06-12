@@ -39,13 +39,21 @@ impl Game {
     }
 
     pub(crate) fn is_classic_stalemate(&self, color: Color) -> bool {
+        self.is_classic_stalemate_until(color, None)
+    }
+
+    pub(crate) fn is_classic_stalemate_until(
+        &self,
+        color: Color,
+        deadline: Option<SearchInstant>,
+    ) -> bool {
         if self.royal_piece_positions(color).is_empty() || self.is_in_check(color) {
             return false;
         }
 
         let mut search = self.clone_for_search();
         search.turn = color;
-        !search.has_legal_turn_completion(color)
+        !search.has_legal_turn_completion_until(color, deadline)
     }
 
     #[allow(dead_code)]
@@ -92,6 +100,14 @@ impl Game {
 
     #[allow(dead_code)]
     pub(crate) fn has_legal_turn_completion(&self, color: Color) -> bool {
+        self.has_legal_turn_completion_until(color, None)
+    }
+
+    pub(crate) fn has_legal_turn_completion_until(
+        &self,
+        color: Color,
+        deadline: Option<SearchInstant>,
+    ) -> bool {
         // Escaping check may require a whole-turn sequence, not just one move, so
         // mate search follows staged moves until the present line changes color.
         let max_depth = self
@@ -101,7 +117,7 @@ impl Game {
             .count()
             + 4;
         let mut search = self.clone_for_search();
-        search.has_legal_turn_completion_in_place(color, 0, max_depth)
+        search.has_legal_turn_completion_in_place(color, 0, max_depth, deadline)
     }
 
     #[allow(dead_code)]
@@ -112,7 +128,7 @@ impl Game {
         max_depth: usize,
     ) -> bool {
         let mut search = self.clone_for_search();
-        search.has_legal_turn_completion_in_place(color, depth, max_depth)
+        search.has_legal_turn_completion_in_place(color, depth, max_depth, None)
     }
 
     fn has_legal_turn_completion_in_place(
@@ -120,12 +136,13 @@ impl Game {
         color: Color,
         depth: usize,
         max_depth: usize,
+        deadline: Option<SearchInstant>,
     ) -> bool {
         if !self.has_pending_present_board(color) {
             return !self.is_in_check(color);
         }
 
-        if depth >= max_depth {
+        if depth >= max_depth || deadline_expired(deadline) {
             return false;
         }
 
@@ -158,6 +175,9 @@ impl Game {
 
                     let piece = self.piece_at(from).expect("source piece was checked");
                     for to in self.piece_candidate_destinations(from, piece) {
+                        if deadline_expired(deadline) {
+                            return false;
+                        }
                         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
                             continue;
                         };
@@ -170,10 +190,14 @@ impl Game {
         }
 
         for movement in moves {
+            if deadline_expired(deadline) {
+                return false;
+            }
             let Some(undo) = self.make_search_move(movement) else {
                 continue;
             };
-            let completes = self.has_legal_turn_completion_in_place(color, depth + 1, max_depth);
+            let completes =
+                self.has_legal_turn_completion_in_place(color, depth + 1, max_depth, deadline);
             self.unmake_search_move(undo);
             if completes {
                 return true;

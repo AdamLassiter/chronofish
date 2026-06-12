@@ -281,6 +281,9 @@ pub(crate) struct SearchContext {
     pub(crate) nodes: usize,
     pub(crate) deadline: Option<SearchInstant>,
     pub(crate) options: SearchOptions,
+    pub(crate) root_plan_cap: Option<usize>,
+    pub(crate) child_plan_cap: Option<usize>,
+    pub(crate) evaluation_limits: Option<EvaluationLimits>,
     pub(crate) table: TranspositionTable,
     pub(crate) evaluation_cache: EvaluationCache,
     pub(crate) turn_plan_cache: std::collections::HashMap<u64, Vec<TurnPlan>>,
@@ -329,6 +332,16 @@ impl EvaluationLimits {
                 deadline: None,
             }
         }
+    }
+
+    pub(crate) fn training_late_game(max_nodes: usize) -> Self {
+        let mut limits = Self::for_nodes(max_nodes);
+        limits.turn_moves = limits.turn_moves.min(8);
+        limits.completion_results = limits.completion_results.min(2);
+        limits.zugzwang_moves_per_board = limits.zugzwang_moves_per_board.min(4);
+        limits.setup_results = limits.setup_results.min(4);
+        limits.setup_probes = limits.setup_probes.min(96);
+        limits
     }
 
     pub(crate) fn with_deadline(mut self, deadline: Option<SearchInstant>) -> Self {

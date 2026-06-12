@@ -451,6 +451,27 @@ fn ai_timed_json_has_expected_shape() {
 }
 
 #[test]
+fn ai_timed_json_reports_principal_variation_beyond_selected_turn() {
+    let mut game = Game::new();
+    game.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];
+    let json = game.ai_turn_timed_json(2, 20_000, 500);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
+    let principal_variation = value["principalVariation"]
+        .as_array()
+        .expect("principalVariation should be an array");
+
+    assert_eq!(
+        value["depth"].as_i64(),
+        Some(2),
+        "depth-2 search should complete: {json}"
+    );
+    assert!(
+        principal_variation.len() >= 2,
+        "depth-2 search should include the selected turn and the searched reply: {json}"
+    );
+}
+
+#[test]
 fn ai_prefers_immediate_high_value_capture() {
     let mut game = Game::new();
     let mut board = empty_board_with_kings();

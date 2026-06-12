@@ -42,19 +42,96 @@ fn alpha_beta_training_strategy_is_always_available() {
 #[test]
 fn time_bounded_training_search_returns_only_applicable_turns() {
     let mut config = trainer_test_config();
-    config.nodes = 20;
-    config.training_time_ms = 1;
+    config.nodes = 200;
+    config.training_time_ms = 20;
     let weights = EvalWeights::default_tuned();
+    let seeds: Vec<u64> = (0..8).chain([3_471_131_662_115_554_319]).collect();
 
-    for seed in 0..20 {
-        let game = seeded_start_position(seed, &config, None);
-        if let Some(plan) = training_turn_plan(&game, weights, &config, None) {
-            assert!(
-                game.apply_turn_plan_for_search(&plan).is_some(),
-                "seed {seed} produced an inapplicable training plan"
-            );
+    for seed in seeds {
+        let mut game = seeded_start_position(seed, &config, None);
+        for turn in 1..=12 {
+            let Some(plan) = training_turn_plan(&game, weights, &config, None) else {
+                break;
+            };
+            game = game.apply_turn_plan_for_search(&plan).unwrap_or_else(|| {
+                panic!("seed {seed} turn {turn} produced an inapplicable training plan")
+            });
         }
     }
+}
+
+fn multi_present_training_game(count: i32) -> Game {
+    let mut game = Game::new();
+    game.timelines = (0..count)
+        .map(|id| Timeline {
+            id,
+            row: id,
+            label: format!("L{id}"),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(0, Color::White, empty_board_with_kings())],
+        })
+        .collect();
+    game
+}
+
+#[test]
+fn training_search_profile_caps_late_game_branching() {
+    let weights = EvalWeights::default_tuned();
+    let normal = multi_present_training_game(1);
+    let mut normal_context = SearchContext::new(weights, normal.turn, 20_000, None);
+    let normal_profile = apply_training_search_profile(&normal, &mut normal_context, 0);
+    assert_eq!(normal_profile.obligations, 1);
+    assert_eq!(normal_context.root_plan_limit(), MAX_ROOT_TURN_PLANS);
+    assert_eq!(normal_context.child_plan_limit(), MAX_CHILD_TURN_PLANS);
+
+    let busy = multi_present_training_game(3);
+    let mut busy_context = SearchContext::new(weights, busy.turn, 20_000, None);
+    let busy_profile = apply_training_search_profile(&busy, &mut busy_context, 0);
+    assert_eq!(busy_profile.obligations, 3);
+    assert_eq!(busy_context.root_plan_limit(), 4);
+    assert_eq!(busy_context.child_plan_limit(), 2);
+
+    let late = multi_present_training_game(4);
+    let mut late_context = SearchContext::new(weights, late.turn, 20_000, None);
+    let late_profile = apply_training_search_profile(&late, &mut late_context, 24);
+    assert_eq!(late_profile.obligations, 4);
+    assert_eq!(late_context.root_plan_limit(), 2);
+    assert_eq!(late_context.child_plan_limit(), 1);
+    assert!(late_context.evaluation_limits.is_some());
+}
+
+#[test]
+#[ignore = "reported overnight seed throughput smoke test; run in release mode with --ignored --nocapture"]
+fn reported_seed_reaches_late_training_turns_with_bounded_search() {
+    let mut config = trainer_test_config();
+    config.nodes = 2_000;
+    config.training_time_ms = 1_000;
+    let weights = EvalWeights::default_tuned();
+    let mut game = seeded_start_position(10_848_506_003_217_676_803, &config, None);
+
+    let mut completed_turns = 0;
+    for turn in 1..=30 {
+        if game.terminal_score(game.turn).is_some() {
+            break;
+        }
+        let started = SearchInstant::now();
+        let Some(outcome) = training_turn_search(&game, weights, &config, None, turn - 1) else {
+            panic!("training search should keep producing full turns through turn {turn}");
+        };
+        let elapsed = SearchInstant::now().duration_since(started).as_millis();
+        assert!(
+            elapsed < 5_000,
+            "reported seed turn {turn} took {elapsed}ms with bounded training search"
+        );
+        game = game
+            .apply_turn_plan_for_search(&outcome.plan)
+            .expect("training plan should apply and submit");
+        completed_turns = turn;
+    }
+    assert!(
+        completed_turns >= 15 || game.terminal_score(game.turn).is_some(),
+        "reported seed should either reach late training turns or finish naturally"
+    );
 }
 
 #[test]

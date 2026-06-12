@@ -437,7 +437,9 @@ pub(crate) fn play_match_until(
         }
         let mover = game.turn;
         let side_weights = if mover == color { weights } else { opponent };
-        let Some(plan) = training_turn_plan(&game, side_weights, config, deadline) else {
+        let Some(search) =
+            training_turn_search(&game, side_weights, config, deadline, plies_played as usize)
+        else {
             let result = if game.turn == color {
                 MatchResult::Loss
             } else {
@@ -454,36 +456,86 @@ pub(crate) fn play_match_until(
                 blunder: result == MatchResult::Loss,
             };
         };
-        let notation = turn_plan_notation(&game, &plan);
-        game = game
-            .apply_turn_plan_for_search(&plan)
-            .expect("training search returned an applicable turn");
+        let notation = turn_plan_notation(&game, &search.plan);
+        let Some(next_game) = game.apply_turn_plan_for_search(&search.plan) else {
+            transient(format!(
+                "{match_label} discarded inapplicable {} plan: {notation}",
+                mover.as_str()
+            ));
+            let result = if game.turn == color {
+                MatchResult::Loss
+            } else {
+                MatchResult::Win
+            };
+            return MatchReport {
+                score: score
+                    + if result == MatchResult::Win {
+                        20_000 - plies_played * 10
+                    } else {
+                        -20_000 + plies_played * 10
+                    },
+                result,
+                blunder: result == MatchResult::Loss,
+            };
+        };
+        game = next_game;
         plies_played += 1;
-        let eval = game.evaluate_heuristic_for_nodes(color, &weights, config.nodes);
+        if search.elapsed_ms >= slow_training_turn_threshold_ms(config) {
+            training_note(format!(
+                "slow training turn: {match_label} turn {plies_played} {} elapsed={}ms depth={} nodes={} obligations={} playable={} root_limit={} child_limit={} generated_moves={} generated_plans={} eval_calls={} eval_cache_hits={} tt_hits={} cutoffs={}",
+                mover.as_str(),
+                search.elapsed_ms,
+                search.depth,
+                search.nodes,
+                search.obligations,
+                search.playable_boards,
+                search.root_plan_limit,
+                search.child_plan_limit,
+                search.stats.generated_moves,
+                search.stats.generated_plans,
+                search.stats.evaluation_calls,
+                search.stats.evaluation_cache_hits,
+                search.stats.tt_hits,
+                search.stats.beta_cutoffs,
+            ));
+        }
         let mover_label = if mover == color {
             candidate_label
         } else {
             opponent_label
         };
         transient(format!(
-            "{match_label} turn {plies_played} {} {mover_label}: {notation}",
-            mover.as_str()
+            "{match_label} turn {plies_played} {} {mover_label}: {notation} [{}ms d{} n{} p{}/{}]",
+            mover.as_str(),
+            search.elapsed_ms,
+            search.depth,
+            search.nodes,
+            search.obligations,
+            search.playable_boards
         ));
-        score += eval / 20;
-        if game.terminal_score(color) == Some(CHECKMATE_SCORE) {
+        if let Some(terminal) = game.terminal_score(color) {
+            if terminal == CHECKMATE_SCORE {
+                return MatchReport {
+                    score: score + CHECKMATE_SCORE / 10 - plies_played * 10,
+                    result: MatchResult::Win,
+                    blunder: false,
+                };
+            }
+            if terminal == -CHECKMATE_SCORE {
+                return MatchReport {
+                    score: score - CHECKMATE_SCORE / 10 + plies_played * 10,
+                    result: MatchResult::Loss,
+                    blunder: true,
+                };
+            }
             return MatchReport {
-                score: score + CHECKMATE_SCORE / 10 - plies_played * 10,
-                result: MatchResult::Win,
+                score,
+                result: MatchResult::Draw,
                 blunder: false,
             };
         }
-        if game.terminal_score(color) == Some(-CHECKMATE_SCORE) {
-            return MatchReport {
-                score: score - CHECKMATE_SCORE / 10 + plies_played * 10,
-                result: MatchResult::Loss,
-                blunder: true,
-            };
-        }
+        let eval = game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, deadline);
+        score += eval / 20;
         stable_advantage = if eval.abs() > 4_000 {
             stable_advantage + eval.signum()
         } else {
@@ -504,7 +556,8 @@ pub(crate) fn play_match_until(
             };
         }
     }
-    let final_score = score + game.evaluate_heuristic_for_nodes(color, &weights, config.nodes) / 4;
+    let final_score = score
+        + game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, deadline) / 4;
     let result = if final_score > 300 {
         MatchResult::Win
     } else if final_score < -300 {
@@ -517,6 +570,10 @@ pub(crate) fn play_match_until(
         result,
         blunder: false,
     }
+}
+
+fn slow_training_turn_threshold_ms(config: &TrainerConfig) -> u128 {
+    5_000.min((config.training_time_ms.max(1) as u128).max(1))
 }
 
 pub(crate) fn turn_plan_notation(start: &Game, plan: &TurnPlan) -> String {
