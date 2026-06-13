@@ -9,11 +9,11 @@ To understand the game it is important to understand how the board operates. The
 * Turn (T): This is moving to the past or to the future. This can be seen as moving to boards on the left or to the right.
 * Timeline (L): This is moving between different timelines. This can be seen as moving to boards up or down.
 
-From these 4 dimensions, x and y are spacial dimensions, while T and L are temporal dimensions.
+Of these four dimensions, x and y are spatial dimensions, while T and L are temporal dimensions.
 
-Spacial dimensions are constrained to a board itself. For example, a board that is 8x8 will always be 8x8 regardless of how many turns have been played.
+Spatial dimensions are constrained to a board itself. For example, an 8x8 board remains 8x8 regardless of how many turns have been played.
 
-Temporal dimensions increase as moves are done. For example, as the game progresses, the number of boards in the past increase over time. Note that a given (T, L) coordinate corresponds to two boards: one for White's turn, and one for Black's.
+Temporal dimensions grow as moves are made. As the game progresses, the number of boards in the past increases. A given (T, L) coordinate corresponds to two boards: one for White's turn and one for Black's.
 
 ## Pieces
 
@@ -27,7 +27,7 @@ The pawn can attack forward one square along row/column (spacelike) and timeline
 
 The brawn is an alternative interpretation of the pawn that allows more capturing diagonals.
 It can attack along any diagonal that includes a forward direction and does not include any backward direction.
-This is another valid interpretation of the traditional pawn, and hs more available attacks than just purely spacelike or purely timelike attacks.
+This is another valid interpretation of the traditional pawn and has more available attacks than purely spacelike or purely timelike attacks.
 The brawn is denoted by an upside-down pawn.
 
 ### Knight
@@ -93,7 +93,7 @@ When a player moves a piece to a historical board (there are boards after it in 
 New timelines are created adjacent to the current ones.
 Timelines created by White extend in one direction, whereas timelines created by Black extend in the opposite direction.
 
-Each player is allowed to create arbitrary amount of timelines.
+Each player is allowed to create an arbitrary number of timelines.
 However, if one player creates two or more timelines than the other, the extra timelines will be inactive.
 Such timelines are functionally optional, as shifting the Present does not demand any interaction with them.
 

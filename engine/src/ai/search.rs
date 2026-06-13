@@ -1,6 +1,8 @@
 use super::*;
 
 impl Game {
+    pub(crate) const DEFAULT_MIN_AI_SEARCH_DEPTH: i32 = default_min_ai_search_depth();
+
     #[allow(dead_code)]
     pub(crate) fn ai_turn_json(&self, max_depth: i32, max_nodes: i32) -> String {
         self.best_ai_turn(max_depth, max_nodes, None).to_json()
@@ -57,6 +59,7 @@ impl Game {
     ) -> (AiSearchResult, Option<SearchPerfSample>) {
         let started = SearchInstant::now();
         let depth = max_depth.max(1);
+        let min_completed_depth = depth.min(Self::DEFAULT_MIN_AI_SEARCH_DEPTH);
         let nodes = max_nodes.max(1) as usize;
         let weights = EvalWeights::active_tuned();
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
@@ -103,8 +106,14 @@ impl Game {
 
         // Iterative deepening preserves a usable shallower answer if the node
         // limit is hit before the requested depth completes.
+        let requested_deadline = context.deadline;
         let mut previous_score = 0;
         for current_depth in 1..=depth {
+            context.deadline = if current_depth <= min_completed_depth {
+                None
+            } else {
+                requested_deadline
+            };
             let window = if context.use_aspiration_windows() && current_depth > 1 {
                 Some((
                     previous_score - ASPIRATION_WINDOW,
@@ -127,7 +136,9 @@ impl Game {
                 nodes: context.nodes,
                 status: "ok",
             };
-            if context.exhausted() || score.abs() >= CHECKMATE_SCORE / 2 {
+            if (context.exhausted() && current_depth >= min_completed_depth)
+                || score.abs() >= CHECKMATE_SCORE / 2
+            {
                 break;
             }
         }
@@ -1019,9 +1030,15 @@ impl Game {
         let mut score = 0;
         let is_branch = movement.from.timeline_id != movement.to.timeline_id
             || movement.from.time != movement.to.time;
-        if let Some(piece) = self.piece_at(movement.to) {
-            score += weights.piece_value(piece.piece_type) * 4;
-            if Self::is_royal_piece(piece.piece_type) {
+        if let Some(victim) = self.piece_at(movement.to) {
+            let victim_value = weights.piece_value(victim.piece_type);
+            score += victim_value * 4;
+            if is_branch {
+                if let Some(attacker) = self.piece_at(movement.from) {
+                    score -= (weights.piece_value(attacker.piece_type) - victim_value).max(0);
+                }
+            }
+            if Self::is_royal_piece(victim.piece_type) {
                 score += CHECKMATE_SCORE / 4;
             }
         }

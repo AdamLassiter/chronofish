@@ -33,6 +33,10 @@ interface MainEventOptions {
   training: TrainingController;
   joinRoom(role: LobbyRole): Promise<void>;
   startGame(): Promise<void>;
+  openCustomCpuModal(): void;
+  closeCustomCpuModal(): void;
+  applyCustomCpuModal(): void;
+  resetCustomCpuModal(): void;
   writeAssignments(assignments: unknown): void;
   readAssignments(): unknown;
   syncLobby(): void;
@@ -61,6 +65,10 @@ export function wireMainEvents({
   training,
   joinRoom,
   startGame,
+  openCustomCpuModal,
+  closeCustomCpuModal,
+  applyCustomCpuModal,
+  resetCustomCpuModal,
   writeAssignments,
   readAssignments,
   syncLobby
@@ -84,6 +92,10 @@ export function wireMainEvents({
   const stopTrainingButton = requireElement(elements.stopTrainingButton, "stop-training");
   const whitePlayerSelect = requireElement(elements.whitePlayerSelect, "white-player");
   const blackPlayerSelect = requireElement(elements.blackPlayerSelect, "black-player");
+  const customCpuModal = requireElement(elements.customCpuModal, "custom-cpu-modal");
+  const closeCustomCpuButton = requireElement(elements.closeCustomCpuButton, "close-custom-cpu");
+  const saveCustomCpuButton = requireElement(elements.saveCustomCpuButton, "save-custom-cpu");
+  const resetCustomCpuButton = requireElement(elements.resetCustomCpuButton, "reset-custom-cpu");
 
   resetButton.addEventListener("click", () => {
     if (!getEngine()) {
@@ -229,11 +241,32 @@ export function wireMainEvents({
     training.stop();
   });
 
+  closeCustomCpuButton.addEventListener("click", () => {
+    closeCustomCpuModal();
+  });
+
+  saveCustomCpuButton.addEventListener("click", () => {
+    applyCustomCpuModal();
+  });
+
+  resetCustomCpuButton.addEventListener("click", () => {
+    resetCustomCpuModal();
+  });
+
+  customCpuModal.addEventListener("click", (event) => {
+    if (event.target === customCpuModal) {
+      closeCustomCpuModal();
+    }
+  });
+
   for (const select of [whitePlayerSelect, blackPlayerSelect]) {
     select.addEventListener("change", () => {
       writeAssignments(readAssignments());
       render();
       syncLobby();
+      if (select.value === "bot-cpu-custom") {
+        openCustomCpuModal();
+      }
     });
   }
 }

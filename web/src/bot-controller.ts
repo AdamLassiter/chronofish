@@ -2,6 +2,7 @@ import { elements } from "./dom.js";
 import type { Color, GameSnapshot, Move, Piece, PieceType, Position } from "./types.js";
 
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
+const DEFAULT_MIN_BOT_SEARCH_DEPTH = 2;
 
 type BotColor = Color;
 type AiStatus = "ok" | "noLegalTurn" | string;
@@ -14,6 +15,7 @@ interface BotCredentials {
 
 interface BotEffort {
   depth?: number;
+  minDepth?: number;
   nodes?: number;
   timeMs?: number;
 }
@@ -54,6 +56,7 @@ interface PendingSearch {
   backend: BotBackend;
   game: GameSnapshot;
   targetDepth: number;
+  minDepth: number;
   currentDepth: number;
   workerCount: number;
   nodes: number;
@@ -315,6 +318,11 @@ export function createBotController({
       return;
     }
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
+    const targetDepth = Math.max(1, effort.depth ?? 1);
+    const minDepth = Math.min(
+      targetDepth,
+      Math.max(1, Math.floor(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH))
+    );
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
     bot.thinking = true;
@@ -323,7 +331,8 @@ export function createBotController({
       botColor,
       backend,
       game: cloneGame(getGame()),
-      targetDepth: Math.max(1, effort.depth ?? 1),
+      targetDepth,
+      minDepth,
       currentDepth: 0,
       workerCount,
       nodes: Math.max(1, effort.nodes ?? 64),
@@ -349,7 +358,10 @@ export function createBotController({
       return;
     }
     const nextDepth = pending.currentDepth + 1;
-    if (nextDepth > pending.targetDepth || Date.now() >= pending.deadlineAt) {
+    if (
+      nextDepth > pending.targetDepth
+      || (Date.now() >= pending.deadlineAt && pending.currentDepth >= pending.minDepth)
+    ) {
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
       return;
     }
@@ -357,7 +369,9 @@ export function createBotController({
     pending.depthExpected = 0;
     pending.depthReceived = 0;
     pending.depthResults = [];
-    const remainingMs = Math.max(1, pending.deadlineAt - Date.now());
+    const remainingMs = pending.currentDepth < pending.minDepth
+      ? pending.timeMs
+      : Math.max(1, pending.deadlineAt - Date.now());
     const workerTimeMs = botWorkerSearchTimeMs(remainingMs);
     for (let partitionIndex = 0; partitionIndex < pending.workerCount; partitionIndex += 1) {
       try {
@@ -455,7 +469,10 @@ export function createBotController({
       pending.bestByDepth.set(pending.currentDepth, depthBest);
     }
 
-    if (pending.currentDepth >= pending.targetDepth || Date.now() >= pending.deadlineAt) {
+    if (
+      pending.currentDepth >= pending.targetDepth
+      || (Date.now() >= pending.deadlineAt && pending.currentDepth >= pending.minDepth)
+    ) {
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
       return;
     }

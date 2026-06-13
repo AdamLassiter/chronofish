@@ -274,6 +274,13 @@ button {
   color: #dce5df;
 }
 
+.custom-cpu {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  color: #dce5df;
+}
+
 .modal-overlay {
   position: fixed;
   inset: 0;
@@ -292,6 +299,100 @@ button {
   border-radius: 8px;
   background: rgba(14, 17, 20, 0.96);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.custom-cpu-modal-panel {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 8px;
+  background: rgba(14, 17, 20, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.custom-cpu label {
+  display: grid;
+  gap: 5px;
+}
+
+.custom-cpu input {
+  width: min(100%, 220px);
+}
+
+.custom-cpu-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.custom-cpu-button,
+.custom-cpu-close {
+  min-height: 38px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: background-color 140ms ease, border-color 140ms ease, transform 140ms ease;
+}
+
+.custom-cpu-button {
+  min-width: 132px;
+  padding: 0 16px;
+}
+
+.custom-cpu-button-primary {
+  border-color: #72e58f;
+  background: #72e58f;
+  color: #07180d;
+}
+
+.custom-cpu-button-primary:hover {
+  border-color: #96efa9;
+  background: #96efa9;
+}
+
+.custom-cpu-button-secondary {
+  border-color: rgba(125, 183, 255, 0.55);
+  background: rgba(125, 183, 255, 0.12);
+  color: #bcd9ff;
+}
+
+.custom-cpu-button-secondary:hover {
+  border-color: #7db7ff;
+  background: rgba(125, 183, 255, 0.22);
+  color: #e7f1ff;
+}
+
+.custom-cpu-close {
+  width: 38px;
+  min-width: 38px;
+  padding: 0;
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #dce5df;
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.custom-cpu-close:hover {
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+.custom-cpu-button:active,
+.custom-cpu-close:active {
+  transform: translateY(1px);
+}
+
+.custom-cpu-button:focus-visible,
+.custom-cpu-close:focus-visible {
+  outline: 3px solid rgba(125, 183, 255, 0.45);
+  outline-offset: 2px;
 }
 
 .training-modal-header {
@@ -1014,5 +1115,14 @@ button {
 
   .training-progress-detail {
     text-align: left;
+  }
+
+  .custom-cpu-actions {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .custom-cpu-button {
+    width: 100%;
   }
 }

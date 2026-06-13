@@ -1,5 +1,8 @@
 use super::*;
-use crate::training::{train_weights, TrainerConfig, TrainingSearchStrategy};
+use crate::{
+    ai::effort::ai_effort_config,
+    training::{train_weights, TrainerConfig, TrainingSearchStrategy},
+};
 
 #[test]
 fn bounded_evaluation_is_deterministic_and_respects_fast_limits() {
@@ -472,6 +475,40 @@ fn ai_timed_json_reports_principal_variation_beyond_selected_turn() {
 }
 
 #[test]
+fn timed_ai_search_completes_default_minimum_depth_before_timing_out() {
+    let game = Game::new();
+    let json = game.ai_turn_timed_json(3, 20_000, 1);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
+
+    assert_eq!(
+        value["depth"].as_i64(),
+        Some(Game::DEFAULT_MIN_AI_SEARCH_DEPTH as i64),
+        "timed search should complete the default minimum depth before returning: {json}"
+    );
+}
+
+#[test]
+fn timed_ai_search_respects_lower_requested_depth() {
+    let game = Game::new();
+    let json = game.ai_turn_timed_json(1, 20_000, 1);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
+
+    assert_eq!(
+        value["depth"].as_i64(),
+        Some(1),
+        "requested depth 1 should remain a valid explicit cap: {json}"
+    );
+}
+
+#[test]
+fn effort_config_parses_configurable_min_depth() {
+    let effort = ai_effort_config("fast").expect("fast effort config should parse");
+
+    assert_eq!(effort.min_depth, Game::DEFAULT_MIN_AI_SEARCH_DEPTH);
+    assert!(effort.min_depth <= effort.depth);
+}
+
+#[test]
 fn ai_prefers_immediate_high_value_capture() {
     let mut game = Game::new();
     let mut board = empty_board_with_kings();
@@ -552,6 +589,102 @@ fn evaluation_rewards_temporal_royal_capture_trajectory() {
     ];
 
     assert!(game.royal_capture_pressure_for(Color::White, &EvalWeights::default_tuned()) > 0);
+}
+
+fn temporal_trade_game(attacker_type: PieceType) -> (Game, MoveStep) {
+    let mut game = Game::new();
+    game.turn = Color::White;
+    let mut source = empty_board_with_kings();
+    source[3][3] = Some(Piece {
+        color: Color::White,
+        piece_type: attacker_type,
+    });
+    let mut target = empty_board_with_kings();
+    target[3][3] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Pawn,
+    });
+    game.timelines = vec![
+        Timeline {
+            id: 0,
+            row: 0,
+            label: "L0".to_string(),
+            owner: TimelineOwner::Neutral,
+            boards: vec![snapshot(0, Color::White, source)],
+        },
+        Timeline {
+            id: 1,
+            row: 1,
+            label: "L1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![snapshot(0, Color::White, target)],
+        },
+    ];
+    let movement = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 3,
+            y: 3,
+        },
+        to: Position {
+            timeline_id: 1,
+            time: 0,
+            x: 3,
+            y: 3,
+        },
+    };
+    assert!(
+        game.legal_move_kind(movement.from, movement.to).is_some(),
+        "temporal trade fixture must be legal"
+    );
+    (game, movement)
+}
+
+#[test]
+fn evaluation_charges_temporal_source_material_abandonment() {
+    let (game, movement) = temporal_trade_game(PieceType::Queen);
+    let weights = EvalWeights::default_tuned();
+    let summary = game.turn_feature_summary(Color::White, &weights);
+    let piece = game
+        .piece_at(movement.from)
+        .expect("fixture should have attacker");
+
+    assert!(summary.source_abandonment > 0);
+    assert!(
+        summary.source_abandonment
+            >= game.source_material_abandonment_cost(movement.from, piece, &weights)
+    );
+}
+
+#[test]
+fn source_abandonment_scales_with_temporal_mover_value() {
+    let (queen_game, queen_capture) = temporal_trade_game(PieceType::Queen);
+    let (rook_game, rook_capture) = temporal_trade_game(PieceType::Rook);
+    let weights = EvalWeights::default_tuned();
+    let queen = queen_game
+        .piece_at(queen_capture.from)
+        .expect("fixture should have queen");
+    let rook = rook_game
+        .piece_at(rook_capture.from)
+        .expect("fixture should have rook");
+
+    assert!(
+        queen_game.source_material_abandonment_cost(queen_capture.from, queen, &weights)
+            > rook_game.source_material_abandonment_cost(rook_capture.from, rook, &weights)
+    );
+}
+
+#[test]
+fn temporal_capture_ordering_accounts_for_attacker_value() {
+    let (queen_game, queen_capture) = temporal_trade_game(PieceType::Queen);
+    let (rook_game, rook_capture) = temporal_trade_game(PieceType::Rook);
+    let weights = EvalWeights::default_tuned();
+
+    assert!(
+        queen_game.cheap_move_order_score(&queen_capture, &weights)
+            < rook_game.cheap_move_order_score(&rook_capture, &weights)
+    );
 }
 
 #[test]

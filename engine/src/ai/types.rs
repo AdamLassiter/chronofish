@@ -50,10 +50,16 @@ pub(crate) struct AiEffort {
     pub(crate) label: String,
     pub(crate) display_names: Vec<String>,
     pub(crate) depth: i32,
+    #[serde(default = "default_min_ai_search_depth")]
+    pub(crate) min_depth: i32,
     pub(crate) nodes: usize,
     pub(crate) time_ms: u64,
     pub(crate) training_time_ms: u64,
     pub(crate) training_nodes: usize,
+}
+
+pub(crate) const fn default_min_ai_search_depth() -> i32 {
+    2
 }
 
 #[derive(Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]

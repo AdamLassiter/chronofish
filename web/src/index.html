@@ -41,6 +41,7 @@
               <option value="bot-cpu-fast">CPU Bot: Fast</option>
               <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
               <option value="bot-cpu-expert">CPU Bot: Expert</option>
+              <option value="bot-cpu-custom">CPU Bot: Custom</option>
               <option value="open">Open</option>
             </select>
           </label>
@@ -55,6 +56,7 @@
               <option value="bot-cpu-fast">CPU Bot: Fast</option>
               <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
               <option value="bot-cpu-expert">CPU Bot: Expert</option>
+              <option value="bot-cpu-custom">CPU Bot: Custom</option>
               <option value="open">Open</option>
             </select>
           </label>
@@ -87,6 +89,47 @@
         <button id="concede-game" type="button">Concede</button>
       </section>
     </section>
+
+    <div class="modal-overlay" id="custom-cpu-modal" hidden>
+      <section class="custom-cpu custom-cpu-modal-panel" id="custom-cpu-panel" aria-label="Custom CPU bot difficulty">
+        <header class="training-modal-header">
+          <div>
+            <p class="eyebrow">Custom CPU Bot</p>
+            <h2>The Chronofish</h2>
+          </div>
+          <button class="custom-cpu-close" id="close-custom-cpu" type="button" aria-label="Close custom CPU settings" title="Close">&times;</button>
+        </header>
+        <p class="field-help field-help-wide">Tune the native CPU heuristic search. Larger values make The Chronofish stronger, but turns can take longer.</p>
+        <label>
+          Depth
+          <input id="custom-cpu-depth" type="number" min="1" max="16" step="1" value="4"
+            aria-describedby="custom-cpu-depth-help">
+          <span id="custom-cpu-depth-help" class="field-help">Maximum lookahead depth. Higher depth sees farther ahead when time and nodes allow.</span>
+        </label>
+        <label>
+          Minimum depth
+          <input id="custom-cpu-min-depth" type="number" min="1" max="16" step="1" value="2"
+            aria-describedby="custom-cpu-min-depth-help">
+          <span id="custom-cpu-min-depth-help" class="field-help">Depth the bot should complete before honoring the time limit. Depth 2 lets it consider an opponent reply.</span>
+        </label>
+        <label>
+          Nodes
+          <input id="custom-cpu-nodes" type="number" min="1" max="1000000" step="1000" value="80000"
+            aria-describedby="custom-cpu-nodes-help">
+          <span id="custom-cpu-nodes-help" class="field-help">Search work budget. More nodes improve tactical coverage but increase CPU use.</span>
+        </label>
+        <label>
+          Time ms
+          <input id="custom-cpu-time-ms" type="number" min="1" max="600000" step="1000" value="50000"
+            aria-describedby="custom-cpu-time-help">
+          <span id="custom-cpu-time-help" class="field-help">Nominal wall-clock budget per turn in milliseconds. Minimum depth can overrun this if needed.</span>
+        </label>
+        <div class="custom-cpu-actions">
+          <button class="custom-cpu-button custom-cpu-button-primary" id="save-custom-cpu" type="button">Save settings</button>
+          <button class="custom-cpu-button custom-cpu-button-secondary" id="reset-custom-cpu" type="button">Reset defaults</button>
+        </div>
+      </section>
+    </div>
 
     <div class="modal-overlay" id="training-modal" hidden>
       <section class="training training-modal-panel" id="training-panel" aria-label="Neural training controls" hidden>

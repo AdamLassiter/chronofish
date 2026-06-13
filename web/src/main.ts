@@ -14,6 +14,7 @@ import type { BoardSnapshot, ChronofishEngine, Color, GameSnapshot, GhostBoard, 
 
 const LOCAL_GAME_STORAGE_KEY = "chronofish.localGameState.v1";
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
+const CUSTOM_CPU_EFFORT_STORAGE_KEY = "chronofish.customCpuEffort.v1";
 const initialSearchParams = new URLSearchParams(window.location.search);
 const initialUrlHasRoom = initialSearchParams.has("room");
 
@@ -31,7 +32,8 @@ type Assignment =
   | "bot-gpu-expert"
   | "bot-cpu-fast"
   | "bot-cpu-balanced"
-  | "bot-cpu-expert";
+  | "bot-cpu-expert"
+  | "bot-cpu-custom";
 type Assignments = Record<Color, Assignment>;
 
 interface BotCredentials {
@@ -43,12 +45,20 @@ interface BotEffortConfig {
   label: string;
   displayNames: string[];
   depth: number;
+  minDepth?: number;
   nodes: number;
   timeMs: number;
 }
 
-type BotEffortName = "fast" | "balanced" | "expert";
-type BotEffortConfigs = Partial<Record<BotEffortName, BotEffortConfig>>;
+type BotPresetName = "fast" | "balanced" | "expert";
+type BotEffortName = BotPresetName | "custom";
+type BotEffortConfigs = Partial<Record<BotPresetName, BotEffortConfig>>;
+
+interface CustomCpuEffortConfig extends BotEffortConfig {
+  label: "The Chronofish";
+  displayNames: ["The Chronofish"];
+  minDepth: number;
+}
 
 interface MultiplayerState {
   roomId: string;
@@ -61,6 +71,7 @@ interface MultiplayerState {
 interface RoomGamePayload {
   phase?: Phase;
   assignments?: Partial<Record<Color, unknown>>;
+  customCpuEffort?: Partial<BotEffortConfig>;
   notation?: string;
   turns?: Move[][];
   snapshot?: GameSnapshot;
@@ -82,6 +93,7 @@ interface RoomResponse {
 interface PersistedGameState {
   phase?: Phase;
   assignments?: Partial<Record<Color, unknown>>;
+  customCpuEffort?: Partial<BotEffortConfig>;
   notation?: string;
   turns?: Move[][];
   stagedMoves?: Move[];
@@ -133,7 +145,17 @@ let engine: ChronofishEngine | null = null;
 let aiParameters: unknown = null;
 let aiEffortConfigs: BotEffortConfigs = {};
 
-const gpuBotDisplayNames: Record<BotEffortName, string[]> = {
+const DEFAULT_CUSTOM_CPU_EFFORT: CustomCpuEffortConfig = {
+  label: "The Chronofish",
+  displayNames: ["The Chronofish"],
+  depth: 4,
+  minDepth: 2,
+  nodes: 80_000,
+  timeMs: 50_000
+};
+let customCpuEffort: CustomCpuEffortConfig = loadCustomCpuEffort();
+
+const gpuBotDisplayNames: Record<BotPresetName, string[]> = {
   fast: [
     "Stockfish & Chips",
     "Crafty Castler",
@@ -151,7 +173,7 @@ const gpuBotDisplayNames: Record<BotEffortName, string[]> = {
   ]
 };
 
-const cpuBotDisplayNames: Record<BotEffortName, string[]> = {
+const cpuBotDisplayNames: Record<BotPresetName, string[]> = {
   fast: [
     "Bullet Fischer",
     "Speedrun Steinitz",
@@ -328,7 +350,8 @@ function normalizeAssignment(value: unknown, fallback: Assignment = "local"): As
     "bot-gpu-expert",
     "bot-cpu-fast",
     "bot-cpu-balanced",
-    "bot-cpu-expert"
+    "bot-cpu-expert",
+    "bot-cpu-custom"
   ].includes(value as Assignment) ? value as Assignment : fallback;
 }
 
@@ -342,7 +365,7 @@ function botEffortName(value: unknown): BotEffortName {
       .slice("bot-".length)
       .replace(/^gpu-/, "")
       .replace(/^cpu-/, "");
-    if (effort === "fast" || effort === "balanced" || effort === "expert") {
+    if (effort === "fast" || effort === "balanced" || effort === "expert" || effort === "custom") {
       return effort;
     }
   }
@@ -350,11 +373,97 @@ function botEffortName(value: unknown): BotEffortName {
 }
 
 function botEffort(value: unknown): BotEffortConfig | null {
-  return aiEffortConfigs[botEffortName(value)] ?? aiEffortConfigs.balanced ?? null;
+  if (value === "bot-cpu-custom") {
+    return customCpuEffort;
+  }
+  const effortName = botEffortName(value);
+  return effortName === "custom"
+    ? customCpuEffort
+    : aiEffortConfigs[effortName] ?? aiEffortConfigs.balanced ?? null;
 }
 
 function botBackendName(value: unknown): "gpu" | "cpu" {
   return typeof value === "string" && value.startsWith("bot-cpu-") ? "cpu" : "gpu";
+}
+
+function loadCustomCpuEffort(): CustomCpuEffortConfig {
+  try {
+    return normalizeCustomCpuEffort(JSON.parse(localStorage.getItem(CUSTOM_CPU_EFFORT_STORAGE_KEY) ?? "null"));
+  } catch {
+    return DEFAULT_CUSTOM_CPU_EFFORT;
+  }
+}
+
+function normalizeCustomCpuEffort(value: unknown): CustomCpuEffortConfig {
+  const candidate = value && typeof value === "object" ? value as Partial<BotEffortConfig> : {};
+  const depth = clampInteger(candidate.depth, 1, 16, DEFAULT_CUSTOM_CPU_EFFORT.depth);
+  return {
+    label: "The Chronofish",
+    displayNames: ["The Chronofish"],
+    depth,
+    minDepth: Math.min(depth, clampInteger(candidate.minDepth, 1, 16, DEFAULT_CUSTOM_CPU_EFFORT.minDepth)),
+    nodes: clampInteger(candidate.nodes, 1, 1_000_000, DEFAULT_CUSTOM_CPU_EFFORT.nodes),
+    timeMs: clampInteger(candidate.timeMs, 1, 600_000, DEFAULT_CUSTOM_CPU_EFFORT.timeMs)
+  };
+}
+
+function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+function saveCustomCpuEffort(next: CustomCpuEffortConfig): void {
+  customCpuEffort = next;
+  localStorage.setItem(CUSTOM_CPU_EFFORT_STORAGE_KEY, JSON.stringify({
+    depth: next.depth,
+    minDepth: next.minDepth,
+    nodes: next.nodes,
+    timeMs: next.timeMs
+  }));
+}
+
+function syncCustomCpuInputs(): void {
+  elements.customCpuDepthInput.value = String(customCpuEffort.depth);
+  elements.customCpuMinDepthInput.value = String(customCpuEffort.minDepth);
+  elements.customCpuNodesInput.value = String(customCpuEffort.nodes);
+  elements.customCpuTimeMsInput.value = String(customCpuEffort.timeMs);
+}
+
+function readCustomCpuInputs(): CustomCpuEffortConfig {
+  return normalizeCustomCpuEffort({
+    depth: elements.customCpuDepthInput.value,
+    minDepth: elements.customCpuMinDepthInput.value,
+    nodes: elements.customCpuNodesInput.value,
+    timeMs: elements.customCpuTimeMsInput.value
+  });
+}
+
+function openCustomCpuModal(): void {
+  syncCustomCpuInputs();
+  elements.customCpuModal.hidden = false;
+  elements.customCpuDepthInput.focus();
+}
+
+function closeCustomCpuModal(): void {
+  elements.customCpuModal.hidden = true;
+}
+
+function applyCustomCpuModal(): void {
+  saveCustomCpuEffort(readCustomCpuInputs());
+  closeCustomCpuModal();
+  elements.message.textContent = "Custom CPU bot configured. The Chronofish is ready.";
+  persistLocalGameState();
+  void syncLobby();
+}
+
+function resetCustomCpuModal(): void {
+  elements.customCpuDepthInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.depth);
+  elements.customCpuMinDepthInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.minDepth);
+  elements.customCpuNodesInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.nodes);
+  elements.customCpuTimeMsInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.timeMs);
 }
 
 function stableIndex(value: string, count: number): number {
@@ -368,7 +477,13 @@ function stableIndex(value: string, count: number): number {
 
 function botDisplayName(color: Color): string {
   const assignment = assignments[color];
+  if (assignment === "bot-cpu-custom") {
+    return "The Chronofish";
+  }
   const effortName = botEffortName(assignments[color]);
+  if (effortName === "custom") {
+    return "The Chronofish";
+  }
   const backend = botBackendName(assignment);
   const effort = botEffort(assignment);
   const names = backend === "cpu"
@@ -413,6 +528,7 @@ function gamePayload(nextPhase: Phase = phase): RoomGamePayload {
   return {
     phase: nextPhase,
     assignments,
+    customCpuEffort,
     notation: submittedNotation,
     turns: submittedTurns,
     snapshot: game
@@ -435,6 +551,7 @@ function persistLocalGameState(): void {
   localStorage.setItem(LOCAL_GAME_STORAGE_KEY, JSON.stringify({
     phase,
     assignments,
+    customCpuEffort,
     notation: submittedNotation,
     turns: submittedTurns,
     snapshot: game,
@@ -466,6 +583,8 @@ async function restoreLocalGameState(): Promise<boolean> {
       return false;
     }
 
+    customCpuEffort = normalizeCustomCpuEffort(state.customCpuEffort ?? customCpuEffort);
+    saveCustomCpuEffort(customCpuEffort);
     writeAssignments(state.assignments ?? assignments);
     phase = state.phase;
     const restoredSnapshot = Boolean(state.snapshot?.timelines);
@@ -506,6 +625,7 @@ function lobbyPayload(): RoomGamePayload {
   return {
     phase: "lobby",
     assignments,
+    customCpuEffort,
     snapshot: committedGame
   };
 }
@@ -1268,6 +1388,8 @@ function applyRemoteRoom(room: RoomState, message = ""): void {
     phase = room.game.phase;
   }
   if (isRoomGamePayload(room.game) && room.game.assignments) {
+    customCpuEffort = normalizeCustomCpuEffort(room.game.customCpuEffort ?? customCpuEffort);
+    saveCustomCpuEffort(customCpuEffort);
     writeAssignments(room.game.assignments);
   }
 
@@ -1575,7 +1697,7 @@ async function loadServerStatus(): Promise<void> {
       aiParameters = await parametersResponse.json();
     }
     if (effortResponse.ok) {
-      aiEffortConfigs = await effortResponse.json() as Record<BotEffortName, BotEffortConfig>;
+      aiEffortConfigs = await effortResponse.json() as Record<BotPresetName, BotEffortConfig>;
     }
 
     elements.serverStatus.textContent = `🖥 v${payload.version}`;
@@ -1615,6 +1737,10 @@ wireMainEvents({
   training,
   joinRoom,
   startGame,
+  openCustomCpuModal,
+  closeCustomCpuModal,
+  applyCustomCpuModal,
+  resetCustomCpuModal,
   writeAssignments,
   readAssignments,
   syncLobby

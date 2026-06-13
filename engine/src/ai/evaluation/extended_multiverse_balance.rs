@@ -297,6 +297,8 @@ impl Game {
 
             if is_temporal {
                 summary.branch_moves += 1;
+                let source_abandonment =
+                    self.source_material_abandonment_cost(movement.from, piece, weights);
                 let payload = capture_bonus
                     + (next_royal_safety - current_royal_safety).max(0) / 50
                     + gives_check as i32
@@ -323,6 +325,7 @@ impl Game {
                     summary.source_abandonment +=
                         (current_royal_safety - next_royal_safety) / 50 + 1;
                 }
+                summary.source_abandonment += source_abandonment;
             }
 
             if gives_check {
@@ -601,6 +604,21 @@ impl Game {
             .filter(|(_, piece)| piece.color == color)
             .map(|(_, piece)| weights.piece_value(piece.piece_type))
             .sum()
+    }
+
+    pub(crate) fn source_material_abandonment_cost(
+        &self,
+        from: Position,
+        piece: Piece,
+        weights: &EvalWeights,
+    ) -> i32 {
+        self.board(from.timeline_id, from.time)
+            .map(|board| {
+                weights.piece_value(piece.piece_type)
+                    * self.board_importance(from.timeline_id, board)
+                    / 200
+            })
+            .unwrap_or(0)
     }
 
     pub(crate) fn opponent_temporal_tactic_pressure(

@@ -7,6 +7,7 @@
       "Blitz Botvinnik"
     ],
     "depth": 3,
+    "minDepth": 2,
     "nodes": 20000,
     "timeMs": 10000,
     "trainingTimeMs": 10000,
@@ -19,7 +20,8 @@
       "Timeline Tal",
       "Causality Capablanca"
     ],
-    "depth": 4,
+    "depth": 5,
+    "minDepth": 4,
     "nodes": 80000,
     "timeMs": 50000,
     "trainingTimeMs": 50000,
@@ -32,7 +34,8 @@
       "Premovaru Checkamura",
       "Anandromeda"
     ],
-    "depth": 5,
+    "depth": 7,
+    "minDepth": 6,
     "nodes": 200000,
     "timeMs": 250000,
     "trainingTimeMs": 250000,

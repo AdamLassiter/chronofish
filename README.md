@@ -11,8 +11,8 @@ The project currently includes:
 
 - a Rust engine crate with game state, legal moves, turn submission, checkmate
   detection, alpha-beta bot search, and a native training harness;
-- a dependency-free JavaScript frontend npm package for local play, online
-  rooms, spectators, bot-vs-human, and bot-vs-bot games;
+- a TypeScript frontend with local play, online rooms, spectators, CPU and
+  WebGPU bots, bot-vs-human games, bot-vs-bot games, and browser training tools;
 - a Rust `axum` server that serves `web/dist`, the built engine WASM, and room
   APIs;
 - a working rules reference in [`RULES.md`](RULES.md).
@@ -25,19 +25,27 @@ chronofish/
     src/ai/                AI search, evaluation, weights, and parameters
     src/notation/          Notation formatting, parsing, and replay
     src/training/          Native genetic training harness
+    models/cpu-v1/         CPU effort presets and heuristic weights
+    models/gpu-v1/         Compact browser value model and backups
+  pretty-log/              Terminal output helper used by native training
   server/                  Rust static file and multiplayer room server
   web/                     Browser frontend npm project
-    src/                   Frontend source files
+    src/                   TypeScript, CSS, HTML, workers, and WGSL shaders
+    scripts/               Build and source-check scripts
     tests/                 Frontend functional tests
     dist/                  Generated frontend bundle (ignored)
+  logs/                    Match and browser-training logs (ignored)
   RULES.md                 Rules reference
-  run                      Build WASM and start the backend
-  train                    Repeatedly run training/promotion cycles
+  run                      Build the app and start the normal server
+  train                    Build the app and start browser training mode
+  train-cpu                Run native CPU heuristic tuning
+  profile-cpu              Profile native CPU tuning with cargo-flamegraph
 ```
 
 ## Development
 
-Install the WASM target once:
+Local development requires a stable Rust toolchain, Node.js 22 with npm, and
+the Rust WASM target. Install the target once:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -56,8 +64,9 @@ Start the app:
 ```
 
 Then open <http://localhost:5173>. The script builds the engine for
-`wasm32-unknown-unknown`, builds the frontend into `web/dist`, and starts the
-Rust server. Override the bind address for LAN play:
+`wasm32-unknown-unknown` in release mode, installs the locked frontend
+dependencies, builds `web/dist`, and starts the Rust server. Override the bind
+address for LAN play:
 
 ```sh
 HOST=0.0.0.0 PORT=5173 ./run
@@ -98,10 +107,12 @@ Useful checks before committing:
 
 ```sh
 cargo fmt
+cargo check --workspace --all-targets
 cargo test -q
 cargo clippy -- -D warnings
 cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
 npm --prefix web run check
+npm --prefix web run lint
 npm --prefix web test
 npm --prefix web run build
 ```
@@ -112,14 +123,18 @@ The frontend starts in a lobby. A game can be configured as:
 
 - local multiplayer, where one browser controls both sides;
 - online multiplayer, with separate white/black seats and spectators;
-- human vs bot;
+- human vs CPU or WebGPU bot;
 - bot vs bot.
 
 During a turn, moves are staged until submitted. `Undo` removes the most recent
 staged move, while `Reset` clears the current turn's staged moves. Checkmate and
 concessions leave the game in a post-match review state until dismissed.
 
-The server stores rooms in memory. Restarting it clears all rooms.
+GPU bot modes require a browser with WebGPU support. CPU bot modes run the Rust
+search engine through WASM and also expose a custom depth, node, and time preset.
+
+The server stores rooms in memory, so restarting it clears all rooms. Match
+notation is appended to `logs/<room-id>.log`.
 
 ## Engine
 
@@ -140,6 +155,8 @@ stays limited to the WASM C ABI and native training entrypoint:
   strategic features;
 - `engine/models/cpu-v1/parameters.json` contains the active CPU heuristic
   evaluation weights, and `/ai/parameters.json` serves that same file;
+- `engine/models/cpu-v1/effort.json` contains the shared CPU/GPU bot effort
+  presets, and `/ai/effort.json` serves them to the frontend;
 - `wasm_api.rs` exposes the C ABI consumed by the frontend.
 
 The default setup still uses orthodox pieces, but the engine models the variant
@@ -148,13 +165,34 @@ the representation.
 
 ## Training
 
-Run the frontend GPU training server with:
+Chronofish has two separate training workflows.
+
+### Browser Training
+
+Start the server with model-replacement and loss-log endpoints enabled:
 
 ```sh
 ./train
 ```
 
-Run native CPU heuristic tuning with:
+Open <http://localhost:5173> and use the Training control. The browser UI can:
+
+- train the compact GPU value model from GPU search, self-play, distillation,
+  CPU labels, or a mixture of those sources;
+- mutate and score CPU heuristic parameters against CPU search, GPU search, or
+  both;
+- upload accepted GPU models to
+  `engine/models/gpu-v1/value-model.cfnn`;
+- upload accepted CPU parameters to
+  `engine/models/cpu-v1/parameters.json`;
+- write training-loss replay data under `logs/training-losses/`.
+
+Browser GPU search and value-model training require WebGPU. The normal `./run`
+server does not expose writable training endpoints.
+
+### Native CPU Training
+
+Run native heuristic tuning with:
 
 ```sh
 ./train-cpu --max-seconds 3600
@@ -174,15 +212,18 @@ bounded rather than time bounded by default: it runs comparison pairs until a
 candidate is promoted, rejected, or marked inconclusive because it hit the pair
 or draw-stagnation caps. Individual self-play matches are also adjudicated after
 a bounded number of plies so unresolved games cannot occupy worker threads
-forever; override this with `--max-match-plies N` or `--max-match-ms N` when needed. Set
-`TRAIN_MAX_SECONDS` for an optional wall-clock safety limit. If a candidate is promoted, the trainer rewrites
+forever; override this with `--max-match-plies N` or `--max-match-ms N` when
+needed. Set `--max-seconds N` for an optional wall-clock safety limit. If a
+candidate is promoted, the trainer rewrites
 `engine/models/cpu-v1/parameters.json`, appends the candidate to the hall of
 fame, runs verification, and commits the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
 Training uses the shared AI effort presets from `engine/models/cpu-v1/effort.json`.
-`./train` defaults to `expert`; set `TRAIN_CONFIG=fast`, `TRAIN_CONFIG=balanced`,
-or pass `--config fast|balanced|expert` to run another preset.
+`./train-cpu` selects `fast` after all forwarded arguments so its search budget
+is intentionally fixed to that preset. Run the trainer binary directly with
+`--config fast|balanced|expert` or `--effort fast|balanced|expert` when another
+preset is required.
 
 For a short smoke run:
 
@@ -200,6 +241,15 @@ cargo run -q --manifest-path engine/Cargo.toml --features training-beam-search \
   --bin train -- --search-strategy beam --max-seconds 20
 ```
 
+Profile the native workflow with
+[`cargo-flamegraph`](https://github.com/flamegraph-rs/flamegraph):
+
+```sh
+./profile-cpu --max-seconds 60
+```
+
+The default output is `flamegraph.svg`.
+
 ## AI Effort Presets
 
 `engine/models/cpu-v1/effort.json` is shared by the Rust engine/trainer and the
@@ -213,10 +263,11 @@ frontend via `/ai/effort.json`.
 
 ## AI Parameters
 
-`engine/models/cpu-v1/parameters.json` is deserialized into an `EvalWeights` value. Larger positive
-weights generally make the bot care more about that feature. Some fields are
-piece values, while others scale positional, tactical, or multiverse-specific
-terms.
+`engine/models/cpu-v1/parameters.json` is deserialized into an `EvalWeights`
+value. Larger positive weights generally make the bot care more about that
+feature. Some fields are piece values, while others scale positional, tactical,
+or multiverse-specific terms. The tables below use Rust's `snake_case` field
+names; the JSON file uses their Serde `camelCase` equivalents.
 
 ### Basic Parameters
 
