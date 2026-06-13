@@ -172,8 +172,10 @@ mate-training positions, tracks win-rate confidence and Elo-style estimates, and
 keeps recent promoted weights in a JSONL hall of fame. `./train-cpu` is evidence
 bounded rather than time bounded by default: it runs comparison pairs until a
 candidate is promoted, rejected, or marked inconclusive because it hit the pair
-or draw-stagnation caps. Set `TRAIN_MAX_SECONDS` for an optional wall-clock
-safety limit. If a candidate is promoted, the trainer rewrites
+or draw-stagnation caps. Individual self-play matches are also adjudicated after
+a bounded number of plies so unresolved games cannot occupy worker threads
+forever; override this with `--max-match-plies N` or `--max-match-ms N` when needed. Set
+`TRAIN_MAX_SECONDS` for an optional wall-clock safety limit. If a candidate is promoted, the trainer rewrites
 `engine/models/cpu-v1/parameters.json`, appends the candidate to the hall of
 fame, runs verification, and commits the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.

@@ -6,6 +6,8 @@ pub(crate) struct TrainingSearchOutcome {
     pub(crate) elapsed_ms: u128,
     pub(crate) nodes: usize,
     pub(crate) stats: SearchStats,
+    pub(crate) fallback_used: bool,
+    pub(crate) capped: bool,
     pub(crate) root_plan_limit: usize,
     pub(crate) child_plan_limit: usize,
     pub(crate) obligations: usize,
@@ -60,7 +62,7 @@ fn alpha_beta_training_turn_search(
     let fallback = if capped {
         let mut fallback_context = SearchContext::new(weights, game.turn, config.nodes, deadline);
         fallback_context.options = SearchOptions::minimal();
-        fallback_context.evaluation_limits = Some(EvaluationLimits::training_late_game(
+        fallback_context.evaluation_limits = Some(EvaluationLimits::training_fast_late_game(
             fallback_context.max_nodes,
         ));
         fallback_training_turn_plan(game, &mut fallback_context)
@@ -69,9 +71,11 @@ fn alpha_beta_training_turn_search(
     };
 
     let (mut best, mut best_depth) = run_alpha_beta_training_search(game, &mut context);
+    let mut fallback_used = false;
     if best.is_none() {
         best = fallback;
         best_depth = 0;
+        fallback_used = best.is_some();
     }
     best.map(|plan| TrainingSearchOutcome {
         plan,
@@ -79,6 +83,8 @@ fn alpha_beta_training_turn_search(
         elapsed_ms: SearchInstant::now().duration_since(started).as_millis(),
         nodes: context.nodes,
         stats: context.stats,
+        fallback_used,
+        capped,
         root_plan_limit: context.root_plan_limit(),
         child_plan_limit: context.child_plan_limit(),
         obligations: profile.obligations,
@@ -171,7 +177,8 @@ pub(crate) fn apply_training_search_profile(
     if obligations >= 4 || playable_boards >= 4 || plies_played >= 24 {
         context.root_plan_cap = Some(2);
         context.child_plan_cap = Some(1);
-        context.evaluation_limits = Some(EvaluationLimits::training_late_game(context.max_nodes));
+        context.evaluation_limits =
+            Some(EvaluationLimits::training_fast_late_game(context.max_nodes));
     } else if obligations >= 3 || playable_boards >= 3 {
         context.root_plan_cap = Some(4);
         context.child_plan_cap = Some(2);
@@ -224,6 +231,8 @@ fn beam_training_turn_search(
             elapsed_ms: SearchInstant::now().duration_since(started).as_millis(),
             nodes: context.nodes,
             stats: context.stats,
+            fallback_used: false,
+            capped: context.root_plan_cap.is_some() || context.child_plan_cap.is_some(),
             root_plan_limit: context.root_plan_limit(),
             child_plan_limit: context.child_plan_limit(),
             obligations: profile.obligations,

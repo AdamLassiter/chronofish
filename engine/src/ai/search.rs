@@ -581,16 +581,20 @@ impl Game {
                     else {
                         continue;
                     };
-                    for to in self.piece_candidate_destinations(from, piece) {
+                    self.for_each_piece_candidate_destination(from, piece, |to| {
                         if deadline_expired(deadline) {
-                            return self.order_moves(moves, weights);
+                            return false;
                         }
                         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                            continue;
+                            return true;
                         };
                         if self.allows_search_move(from, to, piece, move_kind) {
-                            moves.push(MoveStep { from, to });
+                            push_unique_move(&mut moves, MoveStep { from, to });
                         }
+                        true
+                    });
+                    if deadline_expired(deadline) {
+                        return self.order_moves(moves, weights);
                     }
                 }
             }
@@ -633,20 +637,118 @@ impl Game {
                 else {
                     continue;
                 };
-                for to in self.piece_candidate_destinations(from, piece) {
+                self.for_each_piece_candidate_destination(from, piece, |to| {
                     if deadline_expired(deadline) {
-                        return self.order_moves(moves, weights);
+                        return false;
                     }
                     let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                        continue;
+                        return true;
                     };
                     if self.allows_search_move(from, to, piece, move_kind) {
-                        moves.push(MoveStep { from, to });
+                        push_unique_move(&mut moves, MoveStep { from, to });
                     }
+                    true
+                });
+                if deadline_expired(deadline) {
+                    return self.order_moves(moves, weights);
                 }
             }
         }
         self.order_moves(moves, weights)
+    }
+
+    pub(crate) fn legal_single_moves_for_board_limited_until(
+        &self,
+        timeline_id: i32,
+        time: i32,
+        context: &mut SearchContext,
+        limit: usize,
+    ) -> Vec<MoveStep> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        let Some(board) = self.board(timeline_id, time) else {
+            return Vec::new();
+        };
+        if !self.is_active_timeline(timeline_id)
+            || !self.is_latest_board(timeline_id, time)
+            || board.side_to_move != self.turn
+            || self.present_time() != Some(time)
+        {
+            return Vec::new();
+        }
+
+        let weights = context.weights;
+        let deadline = context.deadline;
+        let mut scored: Vec<(i32, MoveStep)> = Vec::new();
+        let mut candidate_destinations = 0;
+        let mut legal_move_attempts = 0;
+        let mut expired = false;
+
+        'squares: for y in 0..8 {
+            for x in 0..8 {
+                let from = Position {
+                    timeline_id,
+                    time,
+                    x,
+                    y,
+                };
+                let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
+                else {
+                    continue;
+                };
+                self.for_each_piece_candidate_destination(from, piece, |to| {
+                    candidate_destinations += 1;
+                    if deadline_expired(deadline) {
+                        expired = true;
+                        return false;
+                    }
+                    legal_move_attempts += 1;
+                    let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                        return true;
+                    };
+                    if self.allows_search_move(from, to, piece, move_kind) {
+                        self.push_limited_ordered_move(
+                            &mut scored,
+                            MoveStep { from, to },
+                            &weights,
+                            limit,
+                        );
+                    }
+                    true
+                });
+                if expired {
+                    break 'squares;
+                }
+            }
+        }
+
+        context.stats.candidate_destinations += candidate_destinations;
+        context.stats.legal_move_attempts += legal_move_attempts;
+        scored.into_iter().map(|(_, movement)| movement).collect()
+    }
+
+    fn push_limited_ordered_move(
+        &self,
+        scored: &mut Vec<(i32, MoveStep)>,
+        movement: MoveStep,
+        weights: &EvalWeights,
+        limit: usize,
+    ) {
+        if scored
+            .iter()
+            .any(|(_, existing)| existing.from == movement.from && existing.to == movement.to)
+        {
+            return;
+        }
+        let score = self.cheap_move_order_score(&movement, weights);
+        scored.push((score, movement));
+        scored.sort_by(|(left_score, left), (right_score, right)| {
+            right_score
+                .cmp(left_score)
+                .then_with(|| Self::move_cmp(left, right))
+        });
+        scored.truncate(limit);
     }
 
     pub(crate) fn order_moves(&self, moves: Vec<MoveStep>, weights: &EvalWeights) -> Vec<MoveStep> {
@@ -662,15 +764,35 @@ impl Game {
         scored.into_iter().map(|(_, movement)| movement).collect()
     }
 
+    #[cfg(test)]
     pub(crate) fn piece_candidate_destinations(
         &self,
         from: Position,
         piece: Piece,
     ) -> Vec<Position> {
         let mut targets = Vec::new();
+        self.for_each_piece_candidate_destination(from, piece, |target| {
+            targets.push(target);
+            true
+        });
+        targets.sort_by_key(|position| position_key(*position));
+        targets.dedup();
+        targets
+    }
+
+    pub(crate) fn for_each_piece_candidate_destination(
+        &self,
+        from: Position,
+        piece: Piece,
+        mut visit: impl FnMut(Position) -> bool,
+    ) {
         match piece.piece_type {
-            PieceType::Pawn => self.push_pawn_candidates(from, piece.color, false, &mut targets),
-            PieceType::Brawn => self.push_pawn_candidates(from, piece.color, true, &mut targets),
+            PieceType::Pawn => {
+                self.visit_pawn_candidates(from, piece.color, false, &mut visit);
+            }
+            PieceType::Brawn => {
+                self.visit_pawn_candidates(from, piece.color, true, &mut visit);
+            }
             PieceType::Knight => {
                 for long_axis in 0..4 {
                     for short_axis in 0..4 {
@@ -682,40 +804,58 @@ impl Game {
                                 let mut offset = [0; 4];
                                 offset[long_axis] = long_sign * 2;
                                 offset[short_axis] = short_sign;
-                                self.push_offset_target(from, offset, &mut targets);
+                                if let Some(target) = self.offset_target(from, offset) {
+                                    if !visit(target) {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
             PieceType::King | PieceType::CommonKing => {
-                self.push_direction_targets(from, 1, 4, 1, &mut targets);
+                if !self.visit_direction_targets(from, 1, 4, 1, &mut visit) {
+                    return;
+                }
                 if piece.piece_type == PieceType::King {
-                    self.push_offset_target(from, [2, 0, 0, 0], &mut targets);
-                    self.push_offset_target(from, [-2, 0, 0, 0], &mut targets);
+                    for offset in [[2, 0, 0, 0], [-2, 0, 0, 0]] {
+                        if let Some(target) = self.offset_target(from, offset) {
+                            if !visit(target) {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
-            PieceType::Rook => self.push_slider_targets(from, 1, 1, &mut targets),
-            PieceType::Bishop => self.push_slider_targets(from, 2, 2, &mut targets),
-            PieceType::Unicorn => self.push_slider_targets(from, 3, 3, &mut targets),
-            PieceType::Dragon => self.push_slider_targets(from, 4, 4, &mut targets),
-            PieceType::Princess => self.push_slider_targets(from, 1, 2, &mut targets),
+            PieceType::Rook => {
+                self.visit_slider_targets(from, 1, 1, &mut visit);
+            }
+            PieceType::Bishop => {
+                self.visit_slider_targets(from, 2, 2, &mut visit);
+            }
+            PieceType::Unicorn => {
+                self.visit_slider_targets(from, 3, 3, &mut visit);
+            }
+            PieceType::Dragon => {
+                self.visit_slider_targets(from, 4, 4, &mut visit);
+            }
+            PieceType::Princess => {
+                self.visit_slider_targets(from, 1, 2, &mut visit);
+            }
             PieceType::Queen | PieceType::RoyalQueen => {
-                self.push_slider_targets(from, 1, 4, &mut targets)
+                self.visit_slider_targets(from, 1, 4, &mut visit);
             }
         }
-        targets.sort_by_key(|position| position_key(*position));
-        targets.dedup();
-        targets
     }
 
-    pub(crate) fn push_pawn_candidates(
+    pub(crate) fn visit_pawn_candidates(
         &self,
         from: Position,
         color: Color,
         brawn: bool,
-        targets: &mut Vec<Position>,
-    ) {
+        visit: &mut impl FnMut(Position) -> bool,
+    ) -> bool {
         let forward = if color == Color::White { 1 } else { -1 };
         for offset in [
             [0, forward, 0, 0],
@@ -727,7 +867,11 @@ impl Game {
             [0, 0, -1, forward],
             [0, 0, 1, forward],
         ] {
-            self.push_offset_target(from, offset, targets);
+            if let Some(target) = self.offset_target(from, offset) {
+                if !visit(target) {
+                    return false;
+                }
+            }
         }
         if brawn {
             for dx in -1..=1 {
@@ -741,39 +885,38 @@ impl Game {
                                 && dy != -forward
                                 && dl != -forward
                             {
-                                self.push_offset_target(from, offset, targets);
+                                if let Some(target) = self.offset_target(from, offset) {
+                                    if !visit(target) {
+                                        return false;
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
+        true
     }
 
-    pub(crate) fn push_slider_targets(
+    pub(crate) fn visit_slider_targets(
         &self,
         from: Position,
         min_axes: usize,
         max_axes: usize,
-        targets: &mut Vec<Position>,
-    ) {
-        self.push_direction_targets(
-            from,
-            min_axes,
-            max_axes,
-            self.max_ray_distance(from),
-            targets,
-        );
+        visit: &mut impl FnMut(Position) -> bool,
+    ) -> bool {
+        self.visit_direction_targets(from, min_axes, max_axes, self.max_ray_distance(from), visit)
     }
 
-    pub(crate) fn push_direction_targets(
+    pub(crate) fn visit_direction_targets(
         &self,
         from: Position,
         min_axes: usize,
         max_axes: usize,
         max_distance: i32,
-        targets: &mut Vec<Position>,
-    ) {
+        visit: &mut impl FnMut(Position) -> bool,
+    ) -> bool {
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dt in -1..=1 {
@@ -785,48 +928,44 @@ impl Game {
                         }
                         for distance in 1..=max_distance {
                             let offset = direction.map(|value| value * distance);
-                            if !self.push_offset_target(from, offset, targets) {
+                            let Some(target) = self.offset_target(from, offset) else {
                                 break;
+                            };
+                            if !visit(target) {
+                                return false;
                             }
                         }
                     }
                 }
             }
         }
+        true
     }
 
-    pub(crate) fn push_offset_target(
+    pub(crate) fn offset_target(
         &self,
         from: Position,
         [dx, dy, dt, dl]: [i32; 4],
-        targets: &mut Vec<Position>,
-    ) -> bool {
+    ) -> Option<Position> {
         let x = from.x + dx;
         let y = from.y + dy;
         if !Self::in_bounds(x, y) {
-            return false;
+            return None;
         }
         let from_row = self
             .timeline(from.timeline_id)
             .map_or(0, |timeline| timeline.row);
-        let Some(timeline) = self
+        let timeline = self
             .timelines
             .iter()
-            .find(|timeline| timeline.row == from_row + dl)
-        else {
-            return false;
-        };
+            .find(|timeline| timeline.row == from_row + dl)?;
         let time = from.time + dt * 2;
-        if self.board(timeline.id, time).is_none() {
-            return false;
-        }
-        targets.push(Position {
+        self.board(timeline.id, time).is_some().then_some(Position {
             timeline_id: timeline.id,
             time,
             x,
             y,
-        });
-        true
+        })
     }
 
     pub(crate) fn max_ray_distance(&self, from: Position) -> i32 {
@@ -1142,5 +1281,14 @@ impl Game {
         } else {
             base_depth
         }
+    }
+}
+
+fn push_unique_move(moves: &mut Vec<MoveStep>, movement: MoveStep) {
+    if !moves
+        .iter()
+        .any(|existing| existing.from == movement.from && existing.to == movement.to)
+    {
+        moves.push(movement);
     }
 }

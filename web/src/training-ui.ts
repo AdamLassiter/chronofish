@@ -110,6 +110,8 @@ interface TrainingStatusPayload {
   resolvedModelPath?: string;
 }
 
+const TRAINING_STATUS_TIMEOUT_MS = 1500;
+
 interface TrainingReplacementPayload {
   changed?: boolean;
   resolvedModelPath?: string;
@@ -228,8 +230,10 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   }
 
   async function loadTrainingStatus(): Promise<void> {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), TRAINING_STATUS_TIMEOUT_MS);
     try {
-      const response = await fetch("/api/training/status");
+      const response = await fetch("/api/training/status", { signal: controller.signal });
       if (!response.ok) {
         throw new Error("Training endpoints disabled");
       }
@@ -258,6 +262,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       trainingModal.hidden = true;
       trainingPanel.hidden = true;
       resetTrainingProgress();
+    } finally {
+      window.clearTimeout(timeout);
     }
   }
 

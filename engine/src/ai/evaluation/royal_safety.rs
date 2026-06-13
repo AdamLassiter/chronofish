@@ -1,15 +1,40 @@
 use super::*;
 
+#[allow(dead_code)]
 impl Game {
     pub(crate) fn royal_safety_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.royal_safety_for(color, weights) - self.royal_safety_for(color.opposite(), weights)
+        let mut stats = EvaluationStats::default();
+        self.royal_safety_balance_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn royal_safety_balance_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        self.royal_safety_for_with_limits(color, weights, limits, stats)
+            - self.royal_safety_for_with_limits(color.opposite(), weights, limits, stats)
     }
 
     pub(crate) fn royal_safety_for(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.royal_pieces(color)
+        let mut stats = EvaluationStats::default();
+        self.royal_safety_for_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn royal_safety_for_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        self.latest_royal_pieces(color)
             .into_iter()
-            .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
-            .map(|(position, _)| self.individual_royal_safety(position, color, weights))
+            .map(|(position, _)| {
+                self.individual_royal_safety_with_limits(position, color, weights, limits, stats)
+            })
             .sum()
     }
 

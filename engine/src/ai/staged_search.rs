@@ -101,8 +101,7 @@ impl Game {
         }
 
         let limit = self.staged_move_limit(context, root_level);
-        let mut moves =
-            self.prioritized_turn_moves(self.turn, &context.weights, context.deadline, limit);
+        let mut moves = self.prioritized_turn_moves(self.turn, context, limit);
         if root_level {
             if let Some((partition_index, partition_count)) = partition {
                 moves = moves
@@ -183,8 +182,7 @@ impl Game {
         }
 
         let limit = self.staged_move_limit(context, root_level);
-        let mut moves =
-            self.prioritized_turn_moves(self.turn, &context.weights, context.deadline, limit);
+        let mut moves = self.prioritized_turn_moves(self.turn, context, limit);
         if root_level {
             if let Some((partition_index, partition_count)) = partition {
                 moves = moves
@@ -398,8 +396,7 @@ impl Game {
         }
 
         let limit = self.staged_move_limit(context, false);
-        let mut moves =
-            self.prioritized_turn_moves(self.turn, &context.weights, context.deadline, limit);
+        let mut moves = self.prioritized_turn_moves(self.turn, context, limit);
         moves.truncate(context.max_nodes.saturating_sub(context.nodes));
         context.charge_move_generation(moves.len());
         let maximizing = self.turn == maximizing_color;

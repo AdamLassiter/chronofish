@@ -17,12 +17,14 @@ impl Game {
         self.royal_capture_setup_pressure_bounded(
             color,
             weights,
+            limits,
             limits.setup_results,
             limits.setup_probes,
             stats,
         ) - self.royal_capture_setup_pressure_bounded(
             color.opposite(),
             weights,
+            limits,
             limits.setup_results,
             limits.setup_probes,
             stats,
@@ -45,13 +47,21 @@ impl Game {
         limit: usize,
     ) -> i32 {
         let mut stats = EvaluationStats::default();
-        self.royal_capture_setup_pressure_bounded(color, weights, limit, usize::MAX, &mut stats)
+        self.royal_capture_setup_pressure_bounded(
+            color,
+            weights,
+            EvaluationLimits::FULL,
+            limit,
+            usize::MAX,
+            &mut stats,
+        )
     }
 
     pub(crate) fn royal_capture_setup_pressure_bounded(
         &self,
         color: Color,
         weights: &EvalWeights,
+        limits: EvaluationLimits,
         result_limit: usize,
         probe_limit: usize,
         stats: &mut EvaluationStats,
@@ -121,6 +131,8 @@ impl Game {
                         arrival,
                         &royal_targets,
                         weights,
+                        limits,
+                        stats,
                     );
                     if corridor_pressure <= 0 {
                         continue;

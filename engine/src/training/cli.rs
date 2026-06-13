@@ -62,6 +62,8 @@ impl TrainerConfig {
             max_pairs: 48,
             draw_window: 24,
             draw_rate_limit: 0.80,
+            max_match_plies: 40,
+            max_match_time_ms: 0,
             max_generations_without_candidate: 12,
             finalist_count: auto_finalists(),
             search_strategy: TrainingSearchStrategy::AlphaBeta,
@@ -180,6 +182,14 @@ impl TrainerConfig {
                     config.draw_rate_limit = parse_arg(value, config.draw_rate_limit);
                     index += 2;
                 }
+                "--max-match-plies" | "--match-plies" => {
+                    config.max_match_plies = parse_arg(value, config.max_match_plies);
+                    index += 2;
+                }
+                "--max-match-ms" | "--match-ms" => {
+                    config.max_match_time_ms = parse_arg(value, config.max_match_time_ms);
+                    index += 2;
+                }
                 "--max-generations-without-candidate" => {
                     config.max_generations_without_candidate =
                         parse_arg(value, config.max_generations_without_candidate);
@@ -198,6 +208,7 @@ impl TrainerConfig {
         config.max_pairs = config.max_pairs.max(config.min_pairs);
         config.draw_window = config.draw_window.max(1);
         config.draw_rate_limit = config.draw_rate_limit.clamp(0.0, 1.0);
+        config.max_match_plies = config.max_match_plies.max(1);
         config.max_generations_without_candidate = config.max_generations_without_candidate.max(1);
         config.finalist_count = config.finalist_count.clamp(2, config.population);
         if !compare_seeds_overridden {

@@ -1,11 +1,24 @@
 use super::*;
 
+#[allow(dead_code)]
 impl Game {
     pub(crate) fn strategic_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
+        let mut stats = EvaluationStats::default();
+        self.strategic_balance_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn strategic_balance_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
         let mut score = 0;
         for (position, piece) in self.latest_pieces() {
-            let attackers = self.attack_summary(position, piece.color.opposite());
-            let defenders = self.attack_summary(position, piece.color);
+            let attackers =
+                self.attack_summary_with_limits(position, piece.color.opposite(), limits, stats);
+            let defenders = self.attack_summary_with_limits(position, piece.color, limits, stats);
             let value = weights.piece_value(piece.piece_type);
             let mut piece_score = 0;
 

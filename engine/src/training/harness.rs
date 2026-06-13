@@ -63,7 +63,7 @@ pub(crate) fn run_training_cycle(config: &TrainerConfig) {
                     "comparison",
                     done,
                     total,
-                    format!("remaining={}s", remaining_seconds(deadline)),
+                    format!("remaining={}", remaining_seconds(deadline)),
                 );
                 (seed, report)
             })
@@ -188,6 +188,10 @@ pub(crate) fn train_weights_until(
                 if training_expired(deadline) {
                     return None;
                 }
+                transient(format!(
+                    "generation {generation} screening candidate {} start",
+                    index + 1
+                ));
                 let report = fitness_until_with_opponent_limit(
                     weights,
                     &format!("generation {generation} screening candidate {}", index + 1),
@@ -201,7 +205,7 @@ pub(crate) fn train_weights_until(
                     done,
                     population_len,
                     format!(
-                        "turn_ms={} nodes={} remaining={}s",
+                        "turn_ms={} nodes={} remaining={}",
                         screening_config.training_time_ms,
                         screening_config.nodes,
                         remaining_seconds(deadline)
@@ -229,6 +233,10 @@ pub(crate) fn train_weights_until(
                 if training_expired(deadline) {
                     return None;
                 }
+                transient(format!(
+                    "generation {generation} finalist {} start",
+                    index + 1
+                ));
                 let report = fitness_until_named(
                     weights,
                     &format!("generation {generation} finalist {}", index + 1),
@@ -241,7 +249,7 @@ pub(crate) fn train_weights_until(
                     done,
                     finalist_count,
                     format!(
-                        "turn_ms={} nodes={} remaining={}s",
+                        "turn_ms={} nodes={} remaining={}",
                         scoring_config.training_time_ms,
                         search_nodes,
                         remaining_seconds(deadline)
@@ -274,7 +282,7 @@ pub(crate) fn train_weights_until(
         previous_best = Some(best);
         let remaining = remaining_seconds(deadline);
         training_note(format!(
-            "generation {generation}: screen_turn_ms={} screen_nodes={} turn_ms={} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}s",
+            "generation {generation}: screen_turn_ms={} screen_nodes={} turn_ms={} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}",
             screening_config.training_time_ms,
             screening_config.nodes,
             scoring_config.training_time_ms,
@@ -427,19 +435,79 @@ pub(crate) fn play_match_until(
 ) -> MatchReport {
     // Full-match scoring keeps the objective aligned with real game outcomes
     // rather than stopping at a fixed ply horizon.
+    transient(format!(
+        "{match_label} match-start candidate_color={}",
+        color.as_str()
+    ));
     let mut game = start;
     let mut score = 0;
     let mut stable_advantage = 0;
     let mut plies_played = 0;
+    let match_started = SearchInstant::now();
+    let mut total_search_ms = 0u128;
+    let mut max_turn_ms = 0u128;
+    let mut max_turn_ply = 0;
+    let mut max_depth = 0;
+    let mut slow_turns = 0;
+    let mut fallback_turns = 0;
+    let mut capped_turns = 0;
+    let mut peak_obligations = 0;
+    let mut peak_playable_boards = 0;
+    let match_deadline =
+        Some(match_started + std::time::Duration::from_millis(max_match_time_ms(config).max(1)));
     loop {
-        if training_expired(deadline) {
+        let turn_deadline = earliest_deadline(deadline, match_deadline);
+        if training_expired(turn_deadline) {
             break;
         }
         let mover = game.turn;
         let side_weights = if mover == color { weights } else { opponent };
-        let Some(search) =
-            training_turn_search(&game, side_weights, config, deadline, plies_played as usize)
-        else {
+        transient(format!(
+            "{match_label} turn {} {} search-start elapsed={}ms cap={}ms",
+            plies_played + 1,
+            mover.as_str(),
+            SearchInstant::now()
+                .duration_since(match_started)
+                .as_millis(),
+            max_match_time_ms(config)
+        ));
+        let turn_started = SearchInstant::now();
+        let Some(search) = training_turn_search(
+            &game,
+            side_weights,
+            config,
+            turn_deadline,
+            plies_played as usize,
+        ) else {
+            let elapsed_ms = SearchInstant::now()
+                .duration_since(turn_started)
+                .as_millis();
+            log_training_match_summary(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms.max(elapsed_ms),
+                if elapsed_ms > max_turn_ms {
+                    plies_played + 1
+                } else {
+                    max_turn_ply
+                },
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                score,
+                if training_expired(match_deadline) {
+                    "match-time-cap"
+                } else {
+                    "turn-timeout"
+                },
+            );
             let result = if game.turn == color {
                 MatchResult::Loss
             } else {
@@ -456,7 +524,21 @@ pub(crate) fn play_match_until(
                 blunder: result == MatchResult::Loss,
             };
         };
+        let elapsed_ms = SearchInstant::now()
+            .duration_since(turn_started)
+            .as_millis();
+        if elapsed_ms >= slow_training_turn_threshold_ms(config) && elapsed_ms > search.elapsed_ms {
+            pretty_log::warn(format!(
+                "Slow training turn wall-time · {match_label} · turn {} {} elapsed={}ms search={}ms",
+                plies_played + 1,
+                mover.as_str(),
+                elapsed_ms,
+                search.elapsed_ms
+            ));
+        }
+        transient(format!("{match_label} turn {} notation", plies_played + 1));
         let notation = turn_plan_notation(&game, &search.plan);
+        transient(format!("{match_label} turn {} apply", plies_played + 1));
         let Some(next_game) = game.apply_turn_plan_for_search(&search.plan) else {
             transient(format!(
                 "{match_label} discarded inapplicable {} plan: {notation}",
@@ -467,6 +549,9 @@ pub(crate) fn play_match_until(
             } else {
                 MatchResult::Win
             };
+            transient(format!(
+                "{match_label} match-finish result=inapplicable-plan turns={plies_played} score={score}"
+            ));
             return MatchReport {
                 score: score
                     + if result == MatchResult::Win {
@@ -480,24 +565,23 @@ pub(crate) fn play_match_until(
         };
         game = next_game;
         plies_played += 1;
+        total_search_ms += search.elapsed_ms;
+        if search.elapsed_ms > max_turn_ms {
+            max_turn_ms = search.elapsed_ms;
+            max_turn_ply = plies_played;
+        }
+        max_depth = max_depth.max(search.depth);
+        peak_obligations = peak_obligations.max(search.obligations);
+        peak_playable_boards = peak_playable_boards.max(search.playable_boards);
+        if search.fallback_used {
+            fallback_turns += 1;
+        }
+        if search.capped {
+            capped_turns += 1;
+        }
         if search.elapsed_ms >= slow_training_turn_threshold_ms(config) {
-            training_note(format!(
-                "slow training turn: {match_label} turn {plies_played} {} elapsed={}ms depth={} nodes={} obligations={} playable={} root_limit={} child_limit={} generated_moves={} generated_plans={} eval_calls={} eval_cache_hits={} tt_hits={} cutoffs={}",
-                mover.as_str(),
-                search.elapsed_ms,
-                search.depth,
-                search.nodes,
-                search.obligations,
-                search.playable_boards,
-                search.root_plan_limit,
-                search.child_plan_limit,
-                search.stats.generated_moves,
-                search.stats.generated_plans,
-                search.stats.evaluation_calls,
-                search.stats.evaluation_cache_hits,
-                search.stats.tt_hits,
-                search.stats.beta_cutoffs,
-            ));
+            slow_turns += 1;
+            log_slow_training_turn(match_label, plies_played, mover, &search);
         }
         let mover_label = if mover == color {
             candidate_label
@@ -513,8 +597,27 @@ pub(crate) fn play_match_until(
             search.obligations,
             search.playable_boards
         ));
-        if let Some(terminal) = game.terminal_score(color) {
+        transient(format!("{match_label} turn {plies_played} terminal-check"));
+        if let Some(terminal) = game.terminal_score_until(color, turn_deadline) {
             if terminal == CHECKMATE_SCORE {
+                log_training_match_summary(
+                    match_label,
+                    plies_played,
+                    SearchInstant::now()
+                        .duration_since(match_started)
+                        .as_millis(),
+                    total_search_ms,
+                    max_turn_ms,
+                    max_turn_ply,
+                    max_depth,
+                    slow_turns,
+                    fallback_turns,
+                    capped_turns,
+                    peak_obligations,
+                    peak_playable_boards,
+                    score,
+                    "win",
+                );
                 return MatchReport {
                     score: score + CHECKMATE_SCORE / 10 - plies_played * 10,
                     result: MatchResult::Win,
@@ -522,26 +625,102 @@ pub(crate) fn play_match_until(
                 };
             }
             if terminal == -CHECKMATE_SCORE {
+                log_training_match_summary(
+                    match_label,
+                    plies_played,
+                    SearchInstant::now()
+                        .duration_since(match_started)
+                        .as_millis(),
+                    total_search_ms,
+                    max_turn_ms,
+                    max_turn_ply,
+                    max_depth,
+                    slow_turns,
+                    fallback_turns,
+                    capped_turns,
+                    peak_obligations,
+                    peak_playable_boards,
+                    score,
+                    "loss",
+                );
                 return MatchReport {
                     score: score - CHECKMATE_SCORE / 10 + plies_played * 10,
                     result: MatchResult::Loss,
                     blunder: true,
                 };
             }
+            log_training_match_summary(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms,
+                max_turn_ply,
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                score,
+                "draw",
+            );
             return MatchReport {
                 score,
                 result: MatchResult::Draw,
                 blunder: false,
             };
         }
-        let eval = game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, deadline);
+        transient(format!("{match_label} turn {plies_played} eval"));
+        let eval =
+            game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, turn_deadline);
         score += eval / 20;
+        if should_log_training_match_milestone(plies_played) {
+            log_training_match_milestone(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms,
+                max_turn_ply,
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                eval,
+                score,
+            );
+        }
         stable_advantage = if eval.abs() > 4_000 {
             stable_advantage + eval.signum()
         } else {
             0
         };
         if stable_advantage >= 2 {
+            log_training_match_summary(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms,
+                max_turn_ply,
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                score,
+                "stable-win",
+            );
             return MatchReport {
                 score: score + 10_000,
                 result: MatchResult::Win,
@@ -549,22 +728,91 @@ pub(crate) fn play_match_until(
             };
         }
         if stable_advantage <= -2 {
+            log_training_match_summary(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms,
+                max_turn_ply,
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                score,
+                "stable-loss",
+            );
             return MatchReport {
                 score: score - 10_000,
                 result: MatchResult::Loss,
                 blunder: true,
             };
         }
+        if plies_played >= config.max_match_plies {
+            let final_score = score + eval / 4;
+            let result = adjudicated_match_result(final_score);
+            log_training_match_summary(
+                match_label,
+                plies_played,
+                SearchInstant::now()
+                    .duration_since(match_started)
+                    .as_millis(),
+                total_search_ms,
+                max_turn_ms,
+                max_turn_ply,
+                max_depth,
+                slow_turns,
+                fallback_turns,
+                capped_turns,
+                peak_obligations,
+                peak_playable_boards,
+                final_score,
+                "ply-cap",
+            );
+            return MatchReport {
+                score: final_score,
+                result,
+                blunder: false,
+            };
+        }
     }
     let final_score = score
-        + game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, deadline) / 4;
-    let result = if final_score > 300 {
-        MatchResult::Win
-    } else if final_score < -300 {
-        MatchResult::Loss
-    } else {
-        MatchResult::Draw
-    };
+        + game.evaluate_heuristic_for_nodes_until(
+            color,
+            &weights,
+            config.nodes,
+            earliest_deadline(deadline, match_deadline),
+        ) / 4;
+    let result = adjudicated_match_result(final_score);
+    let exit_deadline = earliest_deadline(deadline, match_deadline);
+    log_training_match_summary(
+        match_label,
+        plies_played,
+        SearchInstant::now()
+            .duration_since(match_started)
+            .as_millis(),
+        total_search_ms,
+        max_turn_ms,
+        max_turn_ply,
+        max_depth,
+        slow_turns,
+        fallback_turns,
+        capped_turns,
+        peak_obligations,
+        peak_playable_boards,
+        final_score,
+        if training_expired(match_deadline) {
+            "match-time-cap"
+        } else if training_expired(exit_deadline) {
+            "deadline"
+        } else {
+            "adjudicated"
+        },
+    );
     MatchReport {
         score: final_score,
         result,
@@ -572,8 +820,182 @@ pub(crate) fn play_match_until(
     }
 }
 
+fn adjudicated_match_result(final_score: i32) -> MatchResult {
+    if final_score > 300 {
+        MatchResult::Win
+    } else if final_score < -300 {
+        MatchResult::Loss
+    } else {
+        MatchResult::Draw
+    }
+}
+
+fn earliest_deadline(
+    left: Option<SearchInstant>,
+    right: Option<SearchInstant>,
+) -> Option<SearchInstant> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    }
+}
+
 fn slow_training_turn_threshold_ms(config: &TrainerConfig) -> u128 {
     5_000.min((config.training_time_ms.max(1) as u128).max(1))
+}
+
+fn should_log_training_match_milestone(plies_played: i32) -> bool {
+    plies_played >= 20 && plies_played % 10 == 0
+}
+
+fn log_slow_training_turn(
+    match_label: &str,
+    plies_played: i32,
+    mover: Color,
+    search: &TrainingSearchOutcome,
+) {
+    pretty_log::warn(format!(
+        "Slow training turn · {match_label} · turn {plies_played} {}",
+        mover.as_str()
+    ));
+    pretty_log::label_value(
+        "search",
+        format!(
+            "{}ms · depth {} · {} nodes · root/child {}/{}",
+            search.elapsed_ms,
+            search.depth,
+            search.nodes,
+            search.root_plan_limit,
+            search.child_plan_limit
+        ),
+    );
+    pretty_log::label_value(
+        "position",
+        format!(
+            "{} present obligations · {} playable boards",
+            search.obligations, search.playable_boards
+        ),
+    );
+    pretty_log::label_value(
+        "limits",
+        format!(
+            "{}{}",
+            if search.capped { "capped" } else { "uncapped" },
+            if search.fallback_used {
+                " · legal-turn fallback"
+            } else {
+                ""
+            }
+        ),
+    );
+    pretty_log::label_value(
+        "generated",
+        format!(
+            "{} moves · {} full plans · {} candidates · {} legality checks",
+            search.stats.generated_moves,
+            search.stats.generated_plans,
+            search.stats.candidate_destinations,
+            search.stats.legal_move_attempts
+        ),
+    );
+    pretty_log::label_value(
+        "cache",
+        format!(
+            "eval {}/{} · eval attacks {}/{} caps {} · search attacks {}/{} · tt {} · cutoffs {}",
+            search.stats.evaluation_cache_hits,
+            search.stats.evaluation_calls,
+            search.stats.evaluation_attack_checks,
+            search.stats.evaluation_attack_checks + search.stats.evaluation_attack_caps,
+            search.stats.evaluation_attack_caps,
+            search.stats.attack_cache_hits,
+            search.stats.attack_queries,
+            search.stats.tt_hits,
+            search.stats.beta_cutoffs
+        ),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_training_match_milestone(
+    match_label: &str,
+    plies_played: i32,
+    elapsed_ms: u128,
+    total_search_ms: u128,
+    max_turn_ms: u128,
+    max_turn_ply: i32,
+    max_depth: i32,
+    slow_turns: i32,
+    fallback_turns: i32,
+    capped_turns: i32,
+    peak_obligations: usize,
+    peak_playable_boards: usize,
+    eval: i32,
+    score: i32,
+) {
+    training_note(format!(
+        "long match · {match_label} · turn {plies_played} · elapsed={}ms search={}ms max={}ms@{} depth={} slow={} fallback={} capped={} peak={}/{} eval={} score={}",
+        elapsed_ms,
+        total_search_ms,
+        max_turn_ms,
+        max_turn_ply,
+        max_depth,
+        slow_turns,
+        fallback_turns,
+        capped_turns,
+        peak_obligations,
+        peak_playable_boards,
+        eval,
+        score,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn log_training_match_summary(
+    match_label: &str,
+    plies_played: i32,
+    elapsed_ms: u128,
+    total_search_ms: u128,
+    max_turn_ms: u128,
+    max_turn_ply: i32,
+    max_depth: i32,
+    slow_turns: i32,
+    fallback_turns: i32,
+    capped_turns: i32,
+    peak_obligations: usize,
+    peak_playable_boards: usize,
+    score: i32,
+    reason: &str,
+) {
+    transient(format!(
+        "{match_label} match-finish result={reason} turns={plies_played} score={score}"
+    ));
+    if plies_played < 20
+        && slow_turns == 0
+        && fallback_turns == 0
+        && !matches!(reason, "match-time-cap" | "turn-timeout" | "deadline")
+    {
+        return;
+    }
+    pretty_log::section("Training Match Summary");
+    pretty_log::label_value("match", match_label);
+    pretty_log::label_value("result", reason);
+    pretty_log::label_value("turns", plies_played);
+    pretty_log::label_value("elapsed", format!("{elapsed_ms}ms"));
+    pretty_log::label_value("search", format!("{total_search_ms}ms total"));
+    pretty_log::label_value("slow turns", slow_turns);
+    pretty_log::label_value("fallback turns", fallback_turns);
+    pretty_log::label_value("capped turns", capped_turns);
+    pretty_log::label_value(
+        "max turn",
+        format!("{max_turn_ms}ms at turn {max_turn_ply}"),
+    );
+    pretty_log::label_value("max depth", max_depth);
+    pretty_log::label_value(
+        "peak pressure",
+        format!("{peak_obligations} obligations · {peak_playable_boards} playable boards"),
+    );
+    pretty_log::label_value("score", score);
 }
 
 pub(crate) fn turn_plan_notation(start: &Game, plan: &TurnPlan) -> String {
@@ -625,6 +1047,9 @@ pub(crate) fn paired_report(
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> PairReport {
+    transient(format!(
+        "{candidate_label} vs {opponent_label} seed={seed} pair-start"
+    ));
     let start = seeded_start_position(seed, config, deadline);
     let black_start = start.clone();
     let candidate_white_label =
@@ -667,6 +1092,9 @@ pub(crate) fn paired_report(
     report.candidate.add_match(candidate_black);
     report.baseline.add_match(baseline_white);
     report.baseline.add_match(baseline_black);
+    transient(format!(
+        "{candidate_label} vs {opponent_label} seed={seed} pair-finish"
+    ));
     report
 }
 
@@ -746,7 +1174,7 @@ pub(crate) fn select_league_winner(
                         "league",
                         done,
                         total_pairs,
-                        format!("remaining={}s", remaining_seconds(deadline)),
+                        format!("remaining={}", remaining_seconds(deadline)),
                     );
                     Some(report)
                 })
@@ -815,10 +1243,10 @@ pub(crate) fn remaining_seconds(deadline: Option<SearchInstant>) -> String {
     deadline.map_or_else(
         || "unbounded".to_string(),
         |deadline| {
-            deadline
+            let seconds = deadline
                 .saturating_duration_since(SearchInstant::now())
-                .as_secs()
-                .to_string()
+                .as_secs();
+            format!("{seconds}s")
         },
     )
 }

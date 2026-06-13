@@ -20,6 +20,8 @@ pub(crate) fn training_banner(config: &TrainerConfig) {
     pretty_log::label_value("search", config.search_strategy.as_str());
     pretty_log::label_value("min pairs", config.min_pairs);
     pretty_log::label_value("max pairs", config.max_pairs);
+    pretty_log::label_value("max match plies", config.max_match_plies);
+    pretty_log::label_value("max match ms", max_match_time_ms(config));
 }
 
 pub(crate) const MAX_TRAINING_SEARCH_DEPTH: i32 = 64;
@@ -69,9 +71,23 @@ pub(crate) struct TrainerConfig {
     pub(crate) max_pairs: usize,
     pub(crate) draw_window: usize,
     pub(crate) draw_rate_limit: f64,
+    pub(crate) max_match_plies: i32,
+    pub(crate) max_match_time_ms: u64,
     pub(crate) max_generations_without_candidate: usize,
     pub(crate) finalist_count: usize,
     pub(crate) search_strategy: TrainingSearchStrategy,
+}
+
+pub(crate) fn max_match_time_ms(config: &TrainerConfig) -> u64 {
+    if config.max_match_time_ms > 0 {
+        return config.max_match_time_ms;
+    }
+
+    config
+        .training_time_ms
+        .max(1)
+        .saturating_mul(config.max_match_plies.max(1) as u64)
+        .saturating_mul(60)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

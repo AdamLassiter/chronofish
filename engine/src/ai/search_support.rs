@@ -21,6 +21,7 @@ impl SearchContext {
             table: TranspositionTable::new(max_nodes),
             evaluation_cache: EvaluationCache::new(max_nodes),
             turn_plan_cache: std::collections::HashMap::new(),
+            attack_cache: std::collections::HashMap::new(),
             killers: vec![[None, None]; 16],
             history: std::collections::HashMap::new(),
             stats: SearchStats::default(),
@@ -112,9 +113,28 @@ impl SearchContext {
         self.stats.evaluation_calls += evaluation_stats.calls;
         self.stats.evaluated_turn_moves += evaluation_stats.turn_moves;
         self.stats.evaluation_setup_probes += evaluation_stats.setup_probes;
+        self.stats.evaluation_attack_checks += evaluation_stats.attack_checks;
+        self.stats.evaluation_attack_caps += evaluation_stats.attack_caps;
         self.stats.evaluation_clones += evaluation_stats.clones;
         self.evaluation_cache.insert(key, score);
         score
+    }
+
+    pub(crate) fn is_square_attacked_cached(
+        &mut self,
+        game: &Game,
+        target: Position,
+        by_color: Color,
+    ) -> bool {
+        self.stats.attack_queries += 1;
+        let key = attack_cache_key(target, by_color, game.position_hash);
+        if let Some(attacked) = self.attack_cache.get(&key) {
+            self.stats.attack_cache_hits += 1;
+            return *attacked;
+        }
+        let attacked = game.is_square_attacked(target, by_color);
+        self.attack_cache.insert(key, attacked);
+        attacked
     }
 
     pub(crate) fn record_cutoff(&mut self, depth: i32, movement: Option<MoveStep>) {
@@ -228,6 +248,10 @@ impl SearchPerfSample {
             + self.nodes as u128
             + self.stats.generated_moves as u128
             + self.stats.generated_plans as u128
+            + self.stats.candidate_destinations as u128
+            + self.stats.legal_move_attempts as u128
+            + self.stats.attack_queries as u128
+            + self.stats.attack_cache_hits as u128
             + self.stats.search_clones as u128
             + self.stats.turn_plan_cache_hits as u128
             + self.stats.tt_hits as u128
@@ -239,6 +263,8 @@ impl SearchPerfSample {
             + self.stats.evaluation_cache_hits as u128
             + self.stats.evaluated_turn_moves as u128
             + self.stats.evaluation_setup_probes as u128
+            + self.stats.evaluation_attack_checks as u128
+            + self.stats.evaluation_attack_caps as u128
             + self.stats.evaluation_clones as u128
             + self.label.len() as u128
     }
@@ -256,6 +282,12 @@ pub(crate) fn move_hash(movement: MoveStep) -> u64 {
     let mut hash = mix64(0x1234_5678_90ab_cdef);
     hash_position(&mut hash, movement.from);
     hash_position(&mut hash, movement.to);
+    hash
+}
+
+pub(crate) fn attack_cache_key(target: Position, by_color: Color, position_hash: u64) -> u64 {
+    let mut hash = position_hash ^ color_hash(by_color).rotate_left(17);
+    hash_position(&mut hash, target);
     hash
 }
 

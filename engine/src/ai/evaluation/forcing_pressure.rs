@@ -1,18 +1,46 @@
 use super::*;
 
+#[allow(dead_code)]
 impl Game {
     pub(crate) fn forcing_pressure_balance(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.forcing_pressure_for(color, weights)
-            - self.forcing_pressure_for(color.opposite(), weights)
+        let mut stats = EvaluationStats::default();
+        self.forcing_pressure_balance_with_limits(
+            color,
+            weights,
+            EvaluationLimits::FULL,
+            &mut stats,
+        )
+    }
+
+    pub(crate) fn forcing_pressure_balance_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        self.forcing_pressure_for_with_limits(color, weights, limits, stats)
+            - self.forcing_pressure_for_with_limits(color.opposite(), weights, limits, stats)
     }
 
     pub(crate) fn forcing_pressure_for(&self, color: Color, weights: &EvalWeights) -> i32 {
+        let mut stats = EvaluationStats::default();
+        self.forcing_pressure_for_with_limits(color, weights, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn forcing_pressure_for_with_limits(
+        &self,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
         let mut score = 0;
         for (position, piece) in self.latest_pieces() {
             if piece.color != color.opposite() {
                 continue;
             }
-            let attackers = self.attack_summary(position, color);
+            let attackers = self.attack_summary_with_limits(position, color, limits, stats);
             if attackers.count == 0 {
                 continue;
             }

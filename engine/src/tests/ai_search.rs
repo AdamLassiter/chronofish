@@ -822,6 +822,8 @@ fn training_mutation_is_seeded() {
         max_pairs: 3,
         draw_window: 3,
         draw_rate_limit: 0.8,
+        max_match_plies: 12,
+        max_match_time_ms: 0,
         max_generations_without_candidate: 1,
         finalist_count: 2,
         search_strategy: TrainingSearchStrategy::AlphaBeta,

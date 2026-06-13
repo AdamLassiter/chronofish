@@ -174,16 +174,23 @@ impl Game {
                     }
 
                     let piece = self.piece_at(from).expect("source piece was checked");
-                    for to in self.piece_candidate_destinations(from, piece) {
+                    self.for_each_piece_candidate_destination(from, piece, |to| {
                         if deadline_expired(deadline) {
                             return false;
                         }
                         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                            continue;
+                            return true;
                         };
                         if self.allows_search_move(from, to, piece, move_kind) {
-                            moves.push(MoveStep { from, to });
+                            let movement = MoveStep { from, to };
+                            if !moves.contains(&movement) {
+                                moves.push(movement);
+                            }
                         }
+                        true
+                    });
+                    if deadline_expired(deadline) {
+                        return false;
                     }
                 }
             }
@@ -208,11 +215,38 @@ impl Game {
     }
 
     pub(crate) fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
-        self.royal_pieces(color)
+        self.latest_royal_pieces(color)
             .into_iter()
-            .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
             .map(|(position, _)| position)
             .collect()
+    }
+
+    pub(crate) fn latest_royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
+        let mut positions = Vec::new();
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    if piece.color == color && Self::is_royal_piece(piece.piece_type) {
+                        positions.push((
+                            Position {
+                                timeline_id: timeline.id,
+                                time: board.time,
+                                x: x as i32,
+                                y: y as i32,
+                            },
+                            piece,
+                        ));
+                    }
+                }
+            }
+        }
+        positions
     }
 
     pub(crate) fn royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
@@ -245,25 +279,25 @@ impl Game {
 
     pub(crate) fn is_square_attacked(&self, target: Position, by_color: Color) -> bool {
         self.timelines.iter().any(|timeline| {
-            timeline.boards.iter().any(|board| {
-                self.is_latest_board(timeline.id, board.time)
-                    && board.board.iter().enumerate().any(|(y, rank)| {
-                        rank.iter().enumerate().any(|(x, piece)| {
-                            let Some(piece) = piece else {
-                                return false;
-                            };
-                            if piece.color != by_color {
-                                return false;
-                            }
-                            let from = Position {
-                                timeline_id: timeline.id,
-                                time: board.time,
-                                x: x as i32,
-                                y: y as i32,
-                            };
-                            self.attacks_square(*piece, from, target)
-                        })
-                    })
+            let Some(board) = timeline.boards.last() else {
+                return false;
+            };
+            board.board.iter().enumerate().any(|(y, rank)| {
+                rank.iter().enumerate().any(|(x, piece)| {
+                    let Some(piece) = piece else {
+                        return false;
+                    };
+                    if piece.color != by_color {
+                        return false;
+                    }
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    self.attacks_square(*piece, from, target)
+                })
             })
         })
     }

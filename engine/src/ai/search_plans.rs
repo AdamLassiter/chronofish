@@ -108,16 +108,22 @@ impl Game {
                     else {
                         continue;
                     };
-                    for to in self.piece_candidate_destinations(from, piece) {
+                    let mut found = None;
+                    self.for_each_piece_candidate_destination(from, piece, |to| {
                         if deadline_expired(deadline) {
-                            return None;
+                            return false;
                         }
                         let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                            continue;
+                            return true;
                         };
                         if self.allows_search_move(from, to, piece, move_kind) {
-                            return Some(MoveStep { from, to });
+                            found = Some(MoveStep { from, to });
+                            return false;
                         }
+                        true
+                    });
+                    if found.is_some() || deadline_expired(deadline) {
+                        return found;
                     }
                 }
             }
@@ -288,17 +294,17 @@ impl Game {
             return;
         }
 
-        let mut moves =
-            self.prioritized_turn_moves(color, &context.weights, context.deadline, move_limit);
+        let mut moves = self.prioritized_turn_moves(color, context, move_limit);
         moves.truncate(context.max_nodes.saturating_sub(context.nodes));
         context.charge_move_generation(moves.len());
+        let weights = context.weights;
         for movement in moves {
             if context.exhausted() {
                 break;
             }
             if context.options.capture_sanity
                 && move_limit == MAX_MOVES_PER_NODE
-                && self.is_likely_bad_capture(movement, &context.weights)
+                && self.is_likely_bad_capture_with_context(movement, &weights, context)
             {
                 continue;
             }
@@ -323,6 +329,44 @@ impl Game {
     }
 
     pub(crate) fn prioritized_turn_moves(
+        &self,
+        color: Color,
+        context: &mut SearchContext,
+        soft_limit: usize,
+    ) -> Vec<MoveStep> {
+        let Some((timeline_id, time)) = self.next_pending_board_key(color) else {
+            return Vec::new();
+        };
+        let moves = self.legal_single_moves_for_board_limited_until(
+            timeline_id,
+            time,
+            context,
+            soft_limit.max(1),
+        );
+        if self.is_in_check(color) {
+            return self.legal_single_moves_for_board_until(
+                timeline_id,
+                time,
+                &context.weights,
+                context.deadline,
+            );
+        }
+        if moves.is_empty() {
+            return self
+                .legal_single_moves_for_board_until(
+                    timeline_id,
+                    time,
+                    &context.weights,
+                    context.deadline,
+                )
+                .into_iter()
+                .take(soft_limit)
+                .collect();
+        }
+        moves
+    }
+
+    pub(crate) fn prioritized_turn_moves_for_evaluation(
         &self,
         color: Color,
         weights: &EvalWeights,
@@ -393,7 +437,12 @@ impl Game {
         bonus
     }
 
-    pub(crate) fn is_likely_bad_capture(&self, movement: MoveStep, weights: &EvalWeights) -> bool {
+    pub(crate) fn is_likely_bad_capture_with_context(
+        &self,
+        movement: MoveStep,
+        weights: &EvalWeights,
+        context: &mut SearchContext,
+    ) -> bool {
         let Some(attacker) = self.piece_at(movement.from) else {
             return false;
         };
@@ -404,7 +453,7 @@ impl Game {
             return false;
         }
         weights.piece_value(attacker.piece_type) > weights.piece_value(victim.piece_type) * 2
-            && self.is_square_attacked(movement.to, attacker.color.opposite())
+            && context.is_square_attacked_cached(self, movement.to, attacker.color.opposite())
     }
 
     pub(crate) fn playable_board_keys(&self, color: Color) -> Vec<(i32, i32)> {

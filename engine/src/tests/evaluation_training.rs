@@ -25,10 +25,57 @@ fn trainer_test_config() -> TrainerConfig {
         max_pairs: 8,
         draw_window: 4,
         draw_rate_limit: 0.75,
+        max_match_plies: 10,
+        max_match_time_ms: 0,
         max_generations_without_candidate: 1,
         finalist_count: 2,
         search_strategy: TrainingSearchStrategy::AlphaBeta,
     }
+}
+
+#[test]
+fn full_match_scoring_stops_at_match_ply_cap() {
+    let mut config = trainer_test_config();
+    config.max_match_plies = 1;
+    config.nodes = 50;
+    config.training_time_ms = 20;
+    let weights = EvalWeights::default_tuned();
+    let report = play_match_until(
+        Game::new(),
+        weights,
+        weights,
+        Color::White,
+        "candidate",
+        "baseline",
+        "ply cap smoke",
+        &config,
+        None,
+    );
+
+    assert!(!report.blunder);
+}
+
+#[test]
+fn full_match_scoring_stops_at_match_time_cap() {
+    let mut config = trainer_test_config();
+    config.max_match_plies = 80;
+    config.max_match_time_ms = 1;
+    config.nodes = 200;
+    config.training_time_ms = 20;
+    let weights = EvalWeights::default_tuned();
+    let report = play_match_until(
+        Game::new(),
+        weights,
+        weights,
+        Color::White,
+        "candidate",
+        "baseline",
+        "time cap smoke",
+        &config,
+        None,
+    );
+
+    assert!(!report.blunder);
 }
 
 #[test]
@@ -58,6 +105,23 @@ fn time_bounded_training_search_returns_only_applicable_turns() {
             });
         }
     }
+}
+
+#[test]
+fn bounded_evaluation_honors_attack_budget() {
+    let game = multi_present_training_game(3);
+    let weights = EvalWeights::default_tuned();
+    let mut limits = EvaluationLimits::training_fast_late_game(10);
+    limits.attack_checks = 1;
+    let mut stats = EvaluationStats::default();
+
+    let _ = game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut stats);
+
+    assert!(stats.attack_checks <= 1);
+    assert!(
+        stats.attack_caps > 0,
+        "tiny attack budget should cap at least one evaluation attack probe"
+    );
 }
 
 fn multi_present_training_game(count: i32) -> Game {
@@ -517,6 +581,45 @@ fn detects_classic_stalemate_on_present_board() {
     assert!(game.is_classic_stalemate(Color::Black));
     assert_eq!(game.terminal_score(Color::White), Some(0));
     assert_eq!(game.terminal_score(Color::Black), Some(0));
+}
+
+#[test]
+fn check_detection_uses_latest_board_fronts_only() {
+    let mut board = empty_board_with_kings();
+    board[7][4] = None;
+    board[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    let mut checked_board = board;
+    checked_board[7][4] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Rook,
+    });
+    let mut safe_board = board;
+    safe_board[7][0] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::Rook,
+    });
+
+    let mut game = Game::new();
+    game.timelines = vec![Timeline {
+        id: 0,
+        row: 0,
+        label: "Sacred T0".to_string(),
+        owner: TimelineOwner::Neutral,
+        boards: (0..40)
+            .map(|time| {
+                if time < 39 {
+                    snapshot(time, Color::White, checked_board)
+                } else {
+                    snapshot(time, Color::White, safe_board)
+                }
+            })
+            .collect(),
+    }];
+
+    assert!(!game.is_in_check(Color::White));
 }
 
 #[test]

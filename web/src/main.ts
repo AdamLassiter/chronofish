@@ -1580,7 +1580,7 @@ async function loadServerStatus(): Promise<void> {
 
     elements.serverStatus.textContent = `🖥 v${payload.version}`;
     elements.serverStatus.dataset.state = "ready";
-    await training.loadStatus();
+    void training.loadStatus();
   } catch (error) {
     console.error(error);
     elements.serverStatus.textContent = "🖥 offline";

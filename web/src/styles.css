@@ -101,6 +101,17 @@ button {
   white-space: nowrap;
 }
 
+.bottom-github-link {
+  color: #9fb6ff;
+  text-decoration: none;
+}
+
+.bottom-github-link:hover,
+.bottom-github-link:focus-visible {
+  color: #cbd6ff;
+  text-decoration: underline;
+}
+
 #toggle-hud,
 #open-training {
   min-height: 32px;

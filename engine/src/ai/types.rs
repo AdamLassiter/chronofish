@@ -272,6 +272,22 @@ pub(crate) struct AttackSummary {
     pub(crate) time_count: i32,
 }
 
+pub(crate) struct LatestPositionView {
+    pub(crate) pieces: Vec<(Position, Piece)>,
+    pub(crate) board_positions: Vec<Position>,
+    pub(crate) white_royals: Vec<(Position, Piece)>,
+    pub(crate) black_royals: Vec<(Position, Piece)>,
+}
+
+impl LatestPositionView {
+    pub(crate) fn royals(&self, color: Color) -> &[(Position, Piece)] {
+        match color {
+            Color::White => &self.white_royals,
+            Color::Black => &self.black_royals,
+        }
+    }
+}
+
 pub(crate) struct SearchContext {
     // The node budget is shared across iterative-deepening branches.
     pub(crate) weights: EvalWeights,
@@ -287,6 +303,7 @@ pub(crate) struct SearchContext {
     pub(crate) table: TranspositionTable,
     pub(crate) evaluation_cache: EvaluationCache,
     pub(crate) turn_plan_cache: std::collections::HashMap<u64, Vec<TurnPlan>>,
+    pub(crate) attack_cache: std::collections::HashMap<u64, bool>,
     pub(crate) killers: Vec<[Option<MoveStep>; 2]>,
     pub(crate) history: std::collections::HashMap<u64, i32>,
     pub(crate) stats: SearchStats,
@@ -299,6 +316,7 @@ pub(crate) struct EvaluationLimits {
     pub(crate) zugzwang_moves_per_board: usize,
     pub(crate) setup_results: usize,
     pub(crate) setup_probes: usize,
+    pub(crate) attack_checks: usize,
     pub(crate) deadline: Option<SearchInstant>,
 }
 
@@ -309,6 +327,7 @@ impl EvaluationLimits {
         zugzwang_moves_per_board: usize::MAX,
         setup_results: 48,
         setup_probes: usize::MAX,
+        attack_checks: usize::MAX,
         deadline: None,
     };
 
@@ -320,6 +339,7 @@ impl EvaluationLimits {
                 zugzwang_moves_per_board: 4,
                 setup_results: 4,
                 setup_probes: 96,
+                attack_checks: 4_096,
                 deadline: None,
             }
         } else {
@@ -329,6 +349,7 @@ impl EvaluationLimits {
                 zugzwang_moves_per_board: 8,
                 setup_results: 8,
                 setup_probes: 256,
+                attack_checks: 16_384,
                 deadline: None,
             }
         }
@@ -341,6 +362,18 @@ impl EvaluationLimits {
         limits.zugzwang_moves_per_board = limits.zugzwang_moves_per_board.min(4);
         limits.setup_results = limits.setup_results.min(4);
         limits.setup_probes = limits.setup_probes.min(96);
+        limits.attack_checks = limits.attack_checks.min(4_096);
+        limits
+    }
+
+    pub(crate) fn training_fast_late_game(max_nodes: usize) -> Self {
+        let mut limits = Self::training_late_game(max_nodes);
+        limits.turn_moves = limits.turn_moves.min(4);
+        limits.completion_results = limits.completion_results.min(1);
+        limits.zugzwang_moves_per_board = limits.zugzwang_moves_per_board.min(2);
+        limits.setup_results = limits.setup_results.min(2);
+        limits.setup_probes = limits.setup_probes.min(32);
+        limits.attack_checks = limits.attack_checks.min(1_024);
         limits
     }
 
@@ -355,6 +388,8 @@ pub(crate) struct EvaluationStats {
     pub(crate) calls: usize,
     pub(crate) turn_moves: usize,
     pub(crate) setup_probes: usize,
+    pub(crate) attack_checks: usize,
+    pub(crate) attack_caps: usize,
     pub(crate) clones: usize,
 }
 
@@ -411,6 +446,10 @@ pub(crate) struct SearchOptions {
 pub(crate) struct SearchStats {
     pub(crate) generated_moves: usize,
     pub(crate) generated_plans: usize,
+    pub(crate) candidate_destinations: usize,
+    pub(crate) legal_move_attempts: usize,
+    pub(crate) attack_queries: usize,
+    pub(crate) attack_cache_hits: usize,
     pub(crate) search_clones: usize,
     pub(crate) expensive_order_probes: usize,
     pub(crate) turn_plan_cache_hits: usize,
@@ -422,6 +461,8 @@ pub(crate) struct SearchStats {
     pub(crate) evaluation_cache_hits: usize,
     pub(crate) evaluated_turn_moves: usize,
     pub(crate) evaluation_setup_probes: usize,
+    pub(crate) evaluation_attack_checks: usize,
+    pub(crate) evaluation_attack_caps: usize,
     pub(crate) evaluation_clones: usize,
 }
 

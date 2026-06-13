@@ -1,11 +1,70 @@
 use super::*;
 
+impl EvaluationStats {
+    pub(crate) fn allow_attack_check(&mut self, limits: EvaluationLimits) -> bool {
+        if deadline_expired(limits.deadline) || self.attack_checks >= limits.attack_checks {
+            self.attack_caps += 1;
+            return false;
+        }
+        self.attack_checks += 1;
+        true
+    }
+}
+
+#[allow(dead_code)]
 impl Game {
+    pub(crate) fn latest_position_view(&self) -> LatestPositionView {
+        let mut view = LatestPositionView {
+            pieces: Vec::new(),
+            board_positions: Vec::new(),
+            white_royals: Vec::new(),
+            black_royals: Vec::new(),
+        };
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let position = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x,
+                        y,
+                    };
+                    view.board_positions.push(position);
+                    let Some(piece) = board.board[y as usize][x as usize] else {
+                        continue;
+                    };
+                    view.pieces.push((position, piece));
+                    if Self::is_royal_piece(piece.piece_type) {
+                        match piece.color {
+                            Color::White => view.white_royals.push((position, piece)),
+                            Color::Black => view.black_royals.push((position, piece)),
+                        }
+                    }
+                }
+            }
+        }
+        view
+    }
+
     pub(crate) fn individual_royal_safety_scores(&self, color: Color) -> Vec<i32> {
-        self.royal_pieces(color)
+        let mut stats = EvaluationStats::default();
+        self.individual_royal_safety_scores_with_limits(color, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn individual_royal_safety_scores_with_limits(
+        &self,
+        color: Color,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> Vec<i32> {
+        self.latest_royal_pieces(color)
             .into_iter()
-            .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
-            .map(|(position, _)| self.raw_royal_safety_score(position, color))
+            .map(|(position, _)| {
+                self.raw_royal_safety_score_with_limits(position, color, limits, stats)
+            })
             .collect()
     }
 
@@ -15,8 +74,26 @@ impl Game {
         color: Color,
         weights: &EvalWeights,
     ) -> i32 {
-        let attackers = self.attack_summary(position, color.opposite());
-        let defenders = self.attack_summary(position, color);
+        let mut stats = EvaluationStats::default();
+        self.individual_royal_safety_with_limits(
+            position,
+            color,
+            weights,
+            EvaluationLimits::FULL,
+            &mut stats,
+        )
+    }
+
+    pub(crate) fn individual_royal_safety_with_limits(
+        &self,
+        position: Position,
+        color: Color,
+        weights: &EvalWeights,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        let attackers = self.attack_summary_with_limits(position, color.opposite(), limits, stats);
+        let defenders = self.attack_summary_with_limits(position, color, limits, stats);
         let escapes = self.royal_escape_count(position, color);
         let mut score = 0;
         score -= attackers.count * weights.own_royal_exposure;
@@ -30,8 +107,19 @@ impl Game {
     }
 
     pub(crate) fn raw_royal_safety_score(&self, position: Position, color: Color) -> i32 {
-        let attackers = self.attack_summary(position, color.opposite());
-        let defenders = self.attack_summary(position, color);
+        let mut stats = EvaluationStats::default();
+        self.raw_royal_safety_score_with_limits(position, color, EvaluationLimits::FULL, &mut stats)
+    }
+
+    pub(crate) fn raw_royal_safety_score_with_limits(
+        &self,
+        position: Position,
+        color: Color,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        let attackers = self.attack_summary_with_limits(position, color.opposite(), limits, stats);
+        let defenders = self.attack_summary_with_limits(position, color, limits, stats);
         let escapes = self.royal_escape_count(position, color);
         let shield = self.royal_shield_count(position, color);
         let mut score = defenders.count + shield * 2 + escapes * 3;
@@ -120,46 +208,49 @@ impl Game {
         pieces
     }
 
-    pub(crate) fn latest_board_positions(&self) -> Vec<Position> {
-        let mut positions = Vec::new();
-        for timeline in &self.timelines {
-            let Some(board) = timeline.boards.last() else {
-                continue;
-            };
-            for y in 0..8 {
-                for x in 0..8 {
-                    positions.push(Position {
-                        timeline_id: timeline.id,
-                        time: board.time,
-                        x,
-                        y,
-                    });
-                }
-            }
-        }
-        positions
+    pub(crate) fn near_enemy_royal_in_view(
+        &self,
+        target: Position,
+        color: Color,
+        view: &LatestPositionView,
+    ) -> bool {
+        view.royals(color.opposite()).iter().any(|(position, _)| {
+            let delta = self.movement_delta(target, *position);
+            delta
+                .x
+                .abs()
+                .max(delta.y.abs())
+                .max(delta.t.abs())
+                .max(delta.l.abs())
+                <= 2
+        })
     }
 
-    pub(crate) fn near_enemy_royal(&self, target: Position, color: Color) -> bool {
-        self.royal_pieces(color.opposite())
-            .into_iter()
-            .filter(|(position, _)| self.is_latest_board(position.timeline_id, position.time))
-            .any(|(position, _)| {
-                let delta = self.movement_delta(target, position);
-                delta
-                    .x
-                    .abs()
-                    .max(delta.y.abs())
-                    .max(delta.t.abs())
-                    .max(delta.l.abs())
-                    <= 2
+    pub(crate) fn pseudo_attack_count_in_view(
+        &self,
+        position: Position,
+        piece: Piece,
+        view: &LatestPositionView,
+    ) -> i32 {
+        view.board_positions
+            .iter()
+            .filter(|target| self.attacks_square(piece, position, **target))
+            .count() as i32
+    }
+
+    pub(crate) fn pseudo_attack_count_in_view_with_limits(
+        &self,
+        position: Position,
+        piece: Piece,
+        view: &LatestPositionView,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        view.board_positions
+            .iter()
+            .filter(|target| {
+                self.attacks_square_with_limits(piece, position, **target, limits, stats)
             })
-    }
-
-    pub(crate) fn pseudo_attack_count(&self, position: Position, piece: Piece) -> i32 {
-        self.latest_board_positions()
-            .into_iter()
-            .filter(|target| self.attacks_square(piece, position, *target))
             .count() as i32
     }
 
@@ -185,6 +276,40 @@ impl Game {
                     .is_some_and(|target| {
                         self.piece_at(target).is_none()
                             && self.attacks_square(piece, position, target)
+                    })
+            })
+            .count() as i32
+    }
+
+    pub(crate) fn open_line_count_with_limits(
+        &self,
+        position: Position,
+        piece: Piece,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> i32 {
+        let directions: &[(i32, i32, i32, i32)] = &[
+            (1, 0, 0, 0),
+            (-1, 0, 0, 0),
+            (0, 1, 0, 0),
+            (0, -1, 0, 0),
+            (1, 1, 0, 0),
+            (1, -1, 0, 0),
+            (-1, 1, 0, 0),
+            (-1, -1, 0, 0),
+            (0, 0, 2, 0),
+            (0, 0, -2, 0),
+            (0, 0, 0, 1),
+            (0, 0, 0, -1),
+        ];
+        directions
+            .iter()
+            .filter(|(dx, dy, dt, dl)| {
+                self.first_step_on_line(position, *dx, *dy, *dt, *dl)
+                    .is_some_and(|target| {
+                        self.piece_at(target).is_none()
+                            && self
+                                .attacks_square_with_limits(piece, position, target, limits, stats)
                     })
             })
             .count() as i32
@@ -301,6 +426,56 @@ impl Game {
                     && from.x == target.x
                     && from.y == target.y
                 || !self.attacks_square(piece, from, target)
+            {
+                continue;
+            }
+
+            summary.count += 1;
+            if from.timeline_id != target.timeline_id || from.time != target.time {
+                summary.temporal_count += 1;
+            }
+            if !timelines.contains(&from.timeline_id) {
+                timelines.push(from.timeline_id);
+            }
+            if !times.contains(&from.time) {
+                times.push(from.time);
+            }
+        }
+
+        summary.timeline_count = timelines.len() as i32;
+        summary.time_count = times.len() as i32;
+        summary
+    }
+
+    pub(crate) fn attacks_square_with_limits(
+        &self,
+        piece: Piece,
+        from: Position,
+        target: Position,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> bool {
+        stats.allow_attack_check(limits) && self.attacks_square(piece, from, target)
+    }
+
+    pub(crate) fn attack_summary_with_limits(
+        &self,
+        target: Position,
+        by_color: Color,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+    ) -> AttackSummary {
+        let mut summary = AttackSummary::default();
+        let mut timelines = Vec::new();
+        let mut times = Vec::new();
+
+        for (from, piece) in self.latest_pieces() {
+            if piece.color != by_color
+                || from.timeline_id == target.timeline_id
+                    && from.time == target.time
+                    && from.x == target.x
+                    && from.y == target.y
+                || !self.attacks_square_with_limits(piece, from, target, limits, stats)
             {
                 continue;
             }
