@@ -22,7 +22,7 @@ pub(crate) fn run_training_cycle(config: &TrainerConfig) {
     );
 
     let deadline = training_deadline(config);
-    let hall_of_fame = load_hall_of_fame(&config.hall_of_fame);
+    let hall_of_fame = load_hall_of_fame(&config.hall_of_fame, config.hall_of_fame_entries);
     pretty_log::section("Evolution");
     let candidate = train_weights_until(config, deadline);
     if candidate == EvalWeights::default_tuned() {
@@ -158,7 +158,7 @@ pub(crate) fn train_weights_until(
     let mut best_seen = EvalWeights::default_tuned();
     let mut best_seen_score = i32::MIN;
     let mut mutation_scale = 1.0_f32;
-    let hall_of_fame = load_hall_of_fame(&config.hall_of_fame);
+    let hall_of_fame = load_hall_of_fame(&config.hall_of_fame, config.hall_of_fame_entries);
     let mut generations_without_candidate = 0;
     for generation in 0..config.generations {
         if training_expired(deadline) {
@@ -197,7 +197,7 @@ pub(crate) fn train_weights_until(
                     &format!("generation {generation} screening candidate {}", index + 1),
                     &screening_config,
                     deadline,
-                    2,
+                    screening_config.screening_opponent_variants,
                 );
                 let done = finished_candidates.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
@@ -362,7 +362,13 @@ pub(crate) fn fitness_until_named(
     config: &TrainerConfig,
     deadline: Option<SearchInstant>,
 ) -> FitnessReport {
-    fitness_until_with_opponent_limit(weights, candidate_label, config, deadline, 4)
+    fitness_until_with_opponent_limit(
+        weights,
+        candidate_label,
+        config,
+        deadline,
+        config.opponent_variants,
+    )
 }
 
 pub(crate) fn fitness_until_with_opponent_limit(
@@ -378,23 +384,42 @@ pub(crate) fn fitness_until_with_opponent_limit(
     let mut rng = Lcg::new(config.seed);
     let mut report = FitnessReport::default();
     let default = EvalWeights::default_tuned();
-    let mut opponents = vec![default];
-    opponents.extend(load_hall_of_fame(&config.hall_of_fame));
+    let mut opponents = vec![(default, "committed baseline".to_string())];
+    opponents.extend(
+        load_hall_of_fame(&config.hall_of_fame, config.hall_of_fame_entries)
+            .into_iter()
+            .filter(|weights| *weights != default)
+            .enumerate()
+            .map(|(index, weights)| (weights, format!("hall-of-fame {}", index + 1))),
+    );
 
-    while opponents.len() < 4 {
-        opponents.push(default.mutate(&mut rng));
+    while opponents.len() < opponent_limit.max(1) {
+        let mutation_index = opponents
+            .iter()
+            .filter(|(_, label)| label.starts_with("mutated opponent"))
+            .count()
+            + 1;
+        opponents.push((
+            default.mutate(&mut rng),
+            format!("mutated opponent {mutation_index}"),
+        ));
     }
 
     let work: Vec<(EvalWeights, u64, String)> = opponents
         .into_iter()
         .take(opponent_limit.max(1))
         .enumerate()
-        .map(|(index, opponent)| {
-            (
-                opponent,
-                rng.next_u64() ^ ((index as u64) << 32),
-                opponent_label(index),
-            )
+        .flat_map(|(index, (opponent, label))| {
+            (0..config.rounds_per_variant).map(move |round| {
+                (
+                    opponent,
+                    config.seed
+                        ^ ((index as u64) << 32)
+                        ^ ((round as u64) << 48)
+                        ^ 0x7f4a_7c15_9e37_79b9,
+                    format!("{label} round {}", round + 1),
+                )
+            })
         })
         .collect();
     let pairs: Vec<PairReport> = work
@@ -842,7 +867,7 @@ fn earliest_deadline(
 }
 
 fn slow_training_turn_threshold_ms(config: &TrainerConfig) -> u128 {
-    5_000.min((config.training_time_ms.max(1) as u128).max(1))
+    10_000.min((config.training_time_ms.max(1) as u128).max(1))
 }
 
 fn should_log_training_match_milestone(plies_played: i32) -> bool {
@@ -1098,15 +1123,6 @@ pub(crate) fn paired_report(
     report
 }
 
-pub(crate) fn opponent_label(index: usize) -> String {
-    match index {
-        0 => "committed baseline".to_string(),
-        1 => "hall-of-fame 1".to_string(),
-        2 => "hall-of-fame 2".to_string(),
-        value => format!("mutated opponent {}", value.saturating_sub(2)),
-    }
-}
-
 pub(crate) fn invert_report(report: MatchReport) -> MatchReport {
     let result = match report.result {
         MatchResult::Win => MatchResult::Loss,
@@ -1130,14 +1146,21 @@ pub(crate) fn select_league_winner(
     let contenders: Vec<EvalWeights> = scored
         .iter()
         .filter(|entry| entry.1 != committed)
-        .take(3)
+        .take(config.league_contenders)
         .map(|entry| entry.1)
         .collect();
     if contenders.is_empty() {
         return None;
     }
-    let mut opponents = vec![EvalWeights::default_tuned()];
-    opponents.extend(hall_of_fame.iter().copied().take(2));
+    let default = EvalWeights::default_tuned();
+    let mut opponents = vec![default];
+    opponents.extend(
+        hall_of_fame
+            .iter()
+            .copied()
+            .filter(|weights| *weights != default)
+            .take(config.league_hall_of_fame_entries),
+    );
     opponents.extend(contenders.iter().copied());
     let total_pairs = contenders.len().saturating_mul(opponents.len()).max(1);
     let league_progress = AtomicUsize::new(0);

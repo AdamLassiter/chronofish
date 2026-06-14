@@ -5,4 +5,4 @@ export CARGO_PROFILE_RELEASE_DEBUG=true
 
 echo "Profiling local CPU heuristic training."
 echo "Flamegraph output defaults to flamegraph.svg."
-exec cargo flamegraph --release --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@" --effort fast
+exec cargo flamegraph --release --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@"

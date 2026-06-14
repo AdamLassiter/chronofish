@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     ai::effort::ai_effort_config,
-    training::{train_weights, TrainerConfig, TrainingSearchStrategy},
+    training::{default_hall_of_fame_path, train_weights, TrainerConfig, TrainingSearchStrategy},
 };
 
 #[test]
@@ -933,7 +933,6 @@ fn evaluation_rewards_royal_shelter() {
 #[test]
 fn training_mutation_is_seeded() {
     let config = TrainerConfig {
-        effort: "expert".to_string(),
         generations: 1,
         population: 4,
         training_time_ms: 10,
@@ -949,7 +948,13 @@ fn training_mutation_is_seeded() {
         min_total_delta: 1,
         verify: "cargo test -q".to_string(),
         ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
-        hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
+        hall_of_fame: default_hall_of_fame_path(),
+        opponent_variants: 4,
+        screening_opponent_variants: 2,
+        rounds_per_variant: 1,
+        hall_of_fame_entries: 4,
+        league_contenders: 3,
+        league_hall_of_fame_entries: 2,
         min_pairs: 3,
         pair_batch: 1,
         max_pairs: 3,

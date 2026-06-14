@@ -38,3 +38,21 @@ include!("logging.rs");
 include!("routes.rs");
 include!("static_files.rs");
 include!("bootstrap.rs");
+
+#[cfg(test)]
+mod static_file_tests {
+    use super::*;
+
+    #[test]
+    fn favicon_is_compiled_into_the_server() {
+        let asset = embedded_static_asset("/favicon.svg").expect("favicon should be embedded");
+        assert_eq!(asset.content_type, "image/svg+xml");
+        assert!(asset.bytes.starts_with(b"<svg") || asset.bytes.starts_with(b"<?xml"));
+        assert!(asset.bytes.len() > 100);
+    }
+
+    #[test]
+    fn unknown_assets_are_not_treated_as_embedded() {
+        assert!(embedded_static_asset("/styles.css").is_none());
+    }
+}

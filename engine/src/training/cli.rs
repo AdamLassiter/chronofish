@@ -1,5 +1,4 @@
 use super::*;
-use crate::ai::effort::{ai_effort_config, default_ai_effort};
 
 pub fn run_training_cli() {
     let config = TrainerConfig::from_env(std::env::args().skip(1).collect());
@@ -38,13 +37,12 @@ impl TrainerConfig {
         // The script-facing CLI is intentionally small, so hand parsing keeps the
         // training harness dependency-free.
         let seed = random_seed();
-        let effort = default_ai_effort();
+        let training = load_training_parameters();
         let mut config = Self {
-            effort: "expert".to_string(),
             generations: usize::MAX,
-            population: auto_population(),
-            training_time_ms: effort.training_time_ms,
-            nodes: effort.training_nodes.max(auto_nodes()),
+            population: training.candidates.unwrap_or_else(auto_population),
+            training_time_ms: training.time_ms,
+            nodes: training.nodes,
             seed,
             max_seconds: None,
             out: None,
@@ -56,16 +54,24 @@ impl TrainerConfig {
             min_total_delta: 0,
             verify: "cargo test -q".to_string(),
             ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
-            hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
-            min_pairs: 12,
-            pair_batch: host_parallelism().max(1),
-            max_pairs: 48,
-            draw_window: 24,
-            draw_rate_limit: 0.80,
-            max_match_plies: 40,
-            max_match_time_ms: 0,
-            max_generations_without_candidate: 12,
-            finalist_count: auto_finalists(),
+            hall_of_fame: default_hall_of_fame_path(),
+            opponent_variants: training.opponent_variants,
+            screening_opponent_variants: training.screening_opponent_variants,
+            rounds_per_variant: training.rounds_per_variant,
+            hall_of_fame_entries: training.hall_of_fame_entries,
+            league_contenders: training.league_contenders,
+            league_hall_of_fame_entries: training.league_hall_of_fame_entries,
+            min_pairs: training.min_pairs,
+            pair_batch: training
+                .pair_batch
+                .unwrap_or_else(|| host_parallelism().max(1)),
+            max_pairs: training.max_pairs,
+            draw_window: training.draw_window,
+            draw_rate_limit: training.draw_rate_limit,
+            max_match_plies: training.max_match_plies,
+            max_match_time_ms: training.max_match_time_ms,
+            max_generations_without_candidate: training.max_generations_without_candidate,
+            finalist_count: training.finalists.unwrap_or_else(auto_finalists),
             search_strategy: TrainingSearchStrategy::AlphaBeta,
         };
         let mut index = 0;
@@ -86,9 +92,8 @@ impl TrainerConfig {
                     index += 2;
                 }
                 "--config" | "--effort" => {
-                    if let Some(name) = value {
-                        config.apply_effort(&name);
-                    }
+                    // Training parameters are global. Consume the legacy effort
+                    // selector without changing the loaded training config.
                     index += 2;
                 }
                 "--depth" => {
@@ -162,6 +167,32 @@ impl TrainerConfig {
                     config.hall_of_fame = value.unwrap_or(config.hall_of_fame);
                     index += 2;
                 }
+                "--opponent-variants" => {
+                    config.opponent_variants = parse_arg(value, config.opponent_variants);
+                    index += 2;
+                }
+                "--screening-opponent-variants" => {
+                    config.screening_opponent_variants =
+                        parse_arg(value, config.screening_opponent_variants);
+                    index += 2;
+                }
+                "--rounds-per-variant" => {
+                    config.rounds_per_variant = parse_arg(value, config.rounds_per_variant);
+                    index += 2;
+                }
+                "--hall-of-fame-entries" => {
+                    config.hall_of_fame_entries = parse_arg(value, config.hall_of_fame_entries);
+                    index += 2;
+                }
+                "--league-contenders" => {
+                    config.league_contenders = parse_arg(value, config.league_contenders);
+                    index += 2;
+                }
+                "--league-hall-of-fame-entries" => {
+                    config.league_hall_of_fame_entries =
+                        parse_arg(value, config.league_hall_of_fame_entries);
+                    index += 2;
+                }
                 "--min-pairs" => {
                     config.min_pairs = parse_arg(value, config.min_pairs);
                     index += 2;
@@ -203,7 +234,17 @@ impl TrainerConfig {
             }
         }
         config.population = config.population.max(4);
+        config.training_time_ms = config.training_time_ms.max(1);
+        config.nodes = config.nodes.max(1);
         config.pair_batch = config.pair_batch.max(1);
+        config.opponent_variants = config.opponent_variants.max(1);
+        config.screening_opponent_variants = config
+            .screening_opponent_variants
+            .clamp(1, config.opponent_variants);
+        config.rounds_per_variant = config.rounds_per_variant.max(1);
+        config.hall_of_fame_entries = config.hall_of_fame_entries.max(1);
+        config.league_contenders = config.league_contenders.max(1);
+        config.league_hall_of_fame_entries = config.league_hall_of_fame_entries.max(1);
         config.min_pairs = config.min_pairs.max(1);
         config.max_pairs = config.max_pairs.max(config.min_pairs);
         config.draw_window = config.draw_window.max(1);
@@ -237,13 +278,5 @@ impl TrainerConfig {
             .max(1)
             .min(self.training_time_ms);
         config
-    }
-
-    pub(crate) fn apply_effort(&mut self, name: &str) {
-        if let Some(effort) = ai_effort_config(name) {
-            self.effort = name.to_string();
-            self.training_time_ms = effort.training_time_ms;
-            self.nodes = effort.training_nodes;
-        }
     }
 }

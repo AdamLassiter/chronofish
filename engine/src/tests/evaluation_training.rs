@@ -3,7 +3,6 @@ use crate::{gpu_snapshot::*, training::*};
 
 fn trainer_test_config() -> TrainerConfig {
     TrainerConfig {
-        effort: "expert".to_string(),
         generations: 1,
         population: 4,
         training_time_ms: 10,
@@ -19,7 +18,13 @@ fn trainer_test_config() -> TrainerConfig {
         min_total_delta: 1,
         verify: "cargo test -q".to_string(),
         ai_src: "engine/models/cpu-v1/parameters.json".to_string(),
-        hall_of_fame: "engine/src/ai/hall_of_fame.jsonl".to_string(),
+        hall_of_fame: default_hall_of_fame_path(),
+        opponent_variants: 4,
+        screening_opponent_variants: 2,
+        rounds_per_variant: 1,
+        hall_of_fame_entries: 4,
+        league_contenders: 3,
+        league_hall_of_fame_entries: 2,
         min_pairs: 3,
         pair_batch: 1,
         max_pairs: 8,
@@ -31,6 +36,74 @@ fn trainer_test_config() -> TrainerConfig {
         finalist_count: 2,
         search_strategy: TrainingSearchStrategy::AlphaBeta,
     }
+}
+
+#[test]
+fn trainer_loads_global_parameters_and_allows_cli_overrides() {
+    let config = TrainerConfig::from_env(vec![
+        "--effort".to_string(),
+        "expert".to_string(),
+        "--rounds-per-variant".to_string(),
+        "3".to_string(),
+        "--opponent-variants".to_string(),
+        "5".to_string(),
+    ]);
+
+    assert_eq!(config.training_time_ms, 10_000);
+    assert_eq!(config.nodes, 20_000);
+    assert_eq!(config.population, auto_population());
+    assert_eq!(config.min_pairs, 6);
+    assert_eq!(config.max_pairs, 24);
+    assert_eq!(config.draw_window, 12);
+    assert_eq!(config.max_generations_without_candidate, 2);
+    assert_eq!(config.rounds_per_variant, 3);
+    assert_eq!(config.opponent_variants, 5);
+    assert_eq!(config.screening_opponent_variants, 2);
+    assert!(config
+        .hall_of_fame
+        .ends_with("models/cpu-v1/hall_of_fame.jsonl"));
+}
+
+#[test]
+fn promotion_writes_weight_parameters_only() {
+    let path = std::env::temp_dir().join(format!(
+        "chronofish-parameters-{}-{}.json",
+        std::process::id(),
+        random_seed()
+    ));
+    std::fs::write(&path, r#"{"king":1}"#).expect("test parameters should be written");
+
+    promote_weights(
+        EvalWeights::default_tuned(),
+        path.to_str().expect("UTF-8 path"),
+    );
+
+    let value: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&path).expect("promoted parameters should be readable"),
+    )
+    .expect("promoted parameters should be JSON");
+    assert!(value.get("training").is_none());
+    assert_eq!(value["king"], EvalWeights::default_tuned().king);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn training_json_contains_the_global_training_config() {
+    let training = load_training_parameters();
+    assert_eq!(training.time_ms, 10_000);
+    assert_eq!(training.nodes, 20_000);
+    assert_eq!(training.candidates, None);
+    assert_eq!(training.opponent_variants, 4);
+    assert_eq!(training.rounds_per_variant, 1);
+    assert_eq!(training.min_pairs, 6);
+    assert_eq!(training.max_pairs, 24);
+}
+
+#[test]
+fn initialized_hall_of_fame_contains_valid_weights() {
+    let entries = load_hall_of_fame(&default_hall_of_fame_path(), 4);
+    assert!(!entries.is_empty());
+    assert!(entries[0] == EvalWeights::default_tuned());
 }
 
 #[test]
@@ -222,17 +295,13 @@ fn fast_training_search_reaches_turn_fifteen() {
     }
 }
 
-#[cfg(not(feature = "training-beam-search"))]
-#[test]
-fn beam_training_strategy_requires_feature() {
-    assert!(TrainingSearchStrategy::parse("beam")
-        .expect_err("beam should require its Cargo feature")
-        .contains("training-beam-search"));
-}
-
-#[cfg(feature = "training-beam-search")]
 #[test]
 fn beam_training_strategy_returns_submit_valid_turn() {
+    assert_eq!(
+        TrainingSearchStrategy::parse("beam"),
+        Ok(TrainingSearchStrategy::Beam)
+    );
+
     let game = Game::new();
     let mut config = trainer_test_config();
     config.nodes = 200;

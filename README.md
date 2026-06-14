@@ -25,7 +25,7 @@ chronofish/
     src/ai/                AI search, evaluation, weights, and parameters
     src/notation/          Notation formatting, parsing, and replay
     src/training/          Native genetic training harness
-    models/cpu-v1/         CPU effort presets and heuristic weights
+    models/cpu-v1/         CPU effort, evaluation, training, and hall-of-fame data
     models/gpu-v1/         Compact browser value model and backups
   pretty-log/              Terminal output helper used by native training
   server/                  Rust static file and multiplayer room server
@@ -216,28 +216,28 @@ forever; override this with `--max-match-plies N` or `--max-match-ms N` when
 needed. Set `--max-seconds N` for an optional wall-clock safety limit. If a
 candidate is promoted, the trainer rewrites
 `engine/models/cpu-v1/parameters.json`, appends the candidate to the hall of
-fame, runs verification, and commits the updated data. Training-mode servers also
+fame at `engine/models/cpu-v1/hall_of_fame.jsonl`, runs verification, and commits
+the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
-Training uses the shared AI effort presets from `engine/models/cpu-v1/effort.json`.
-`./train-cpu` selects `fast` after all forwarded arguments so its search budget
-is intentionally fixed to that preset. Run the trainer binary directly with
-`--config fast|balanced|expert` or `--effort fast|balanced|expert` when another
-preset is required.
+Native training uses `engine/models/cpu-v1/training.json`. Its defaults match
+the former `fast` effort training values and do not change with the runtime bot effort. The
+legacy `--config` and `--effort` arguments are accepted but no longer alter
+training parameters.
 
 For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --config fast --generations 1 --population 4 --training-time-ms 100 --nodes 20 \
+  --generations 1 --population 4 --training-time-ms 100 --nodes 20 \
   --min-pairs 4 --max-pairs 8 --max-seconds 20
 ```
 
-Alpha-beta is the default training search. An experimental beam strategy is
-available only when its Cargo feature is enabled:
+Alpha-beta is the default training search. Select the alternative beam strategy
+through the trainer CLI:
 
 ```sh
-cargo run -q --manifest-path engine/Cargo.toml --features training-beam-search \
+cargo run -q --manifest-path engine/Cargo.toml \
   --bin train -- --search-strategy beam --max-seconds 20
 ```
 
@@ -252,14 +252,24 @@ The default output is `flamegraph.svg`.
 
 ## AI Effort Presets
 
-`engine/models/cpu-v1/effort.json` is shared by the Rust engine/trainer and the
-frontend via `/ai/effort.json`.
+`engine/models/cpu-v1/effort.json` contains runtime bot presets shared by the
+Rust engine and frontend via `/ai/effort.json`.
 
-| Preset | Runtime purpose | Training purpose |
-| --- | --- | --- |
-| `fast` | Low latency bot turns for quick local play. | Small search budget for smoke checks. |
-| `balanced` | Default interactive strength/speed tradeoff. | Moderate self-play search. |
-| `expert` | Highest included browser bot effort. | Default trainer configuration. |
+| Preset | Runtime purpose |
+| --- | --- |
+| `fast` | Low latency bot turns for quick local play. |
+| `balanced` | Default interactive strength/speed tradeoff. |
+| `expert` | Highest included browser bot effort. |
+
+`engine/models/cpu-v1/training.json` owns search time/nodes, candidate
+population and finalists, parallel pair batch, opponent variant counts, rounds
+per variant, hall-of-fame depth, league composition, promotion pair limits,
+draw threshold, match bounds, and candidate-stagnation limit. The `candidates`
+field controls the population scored each generation. A `null` candidate count,
+finalist count, or pair batch selects the host-derived automatic value. CLI
+flags remain available as later overrides; for example,
+`--rounds-per-variant 3` plays three paired rounds against every selected
+baseline, hall-of-fame, or mutated opponent variant.
 
 ## AI Parameters
 

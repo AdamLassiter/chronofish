@@ -64,6 +64,23 @@ interface NormalizedTrainingConfig extends GpuTrainingConfig {
   lossLogReplay: number;
   cpuDepth: number;
   cpuNodes: number;
+  cpuTrainingTimeMs: number;
+  cpuCandidates: number;
+  cpuFinalists: number;
+  cpuPairBatch: number;
+  cpuOpponentVariants: number;
+  cpuScreeningOpponentVariants: number;
+  cpuRoundsPerVariant: number;
+  cpuHallOfFameEntries: number;
+  cpuLeagueContenders: number;
+  cpuLeagueHallOfFameEntries: number;
+  cpuMinPairs: number;
+  cpuMaxPairs: number;
+  cpuDrawWindow: number;
+  cpuDrawRateLimit: number;
+  cpuMaxMatchPlies: number;
+  cpuMaxMatchTimeMs: number;
+  cpuMaxGenerationsWithoutCandidate: number;
   cpuWorkers: number;
   cpuTrainSeconds: number;
   labelWorkers?: number;
@@ -286,6 +303,23 @@ function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {})
     lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4),
     cpuDepth: clampInteger(config.cpuDepth, 1, 16, 4),
     cpuNodes: clampInteger(config.cpuNodes, 1, 131072, 8192),
+    cpuTrainingTimeMs: clampInteger(config.cpuTrainingTimeMs, 1, 600000, 10000),
+    cpuCandidates: clampInteger(config.cpuCandidates, 1, 256, 8),
+    cpuFinalists: clampInteger(config.cpuFinalists, 1, 64, 1),
+    cpuPairBatch: clampInteger(config.cpuPairBatch, 1, 64, 4),
+    cpuOpponentVariants: clampInteger(config.cpuOpponentVariants, 1, 128, 8),
+    cpuScreeningOpponentVariants: clampInteger(config.cpuScreeningOpponentVariants, 1, 128, 2),
+    cpuRoundsPerVariant: clampInteger(config.cpuRoundsPerVariant, 1, 64, 1),
+    cpuHallOfFameEntries: clampInteger(config.cpuHallOfFameEntries, 0, 64, 1),
+    cpuLeagueContenders: clampInteger(config.cpuLeagueContenders, 1, 64, 2),
+    cpuLeagueHallOfFameEntries: clampInteger(config.cpuLeagueHallOfFameEntries, 0, 64, 2),
+    cpuMinPairs: clampInteger(config.cpuMinPairs, 1, 256, 2),
+    cpuMaxPairs: clampInteger(config.cpuMaxPairs, 1, 512, 8),
+    cpuDrawWindow: clampInteger(config.cpuDrawWindow, 1, 128, 4),
+    cpuDrawRateLimit: clampNumber(config.cpuDrawRateLimit, 0, 1, 0.8),
+    cpuMaxMatchPlies: clampInteger(config.cpuMaxMatchPlies, 1, 512, 40),
+    cpuMaxMatchTimeMs: clampInteger(config.cpuMaxMatchTimeMs, 0, 3600000, 0),
+    cpuMaxGenerationsWithoutCandidate: clampInteger(config.cpuMaxGenerationsWithoutCandidate, 1, 256, 2),
     cpuWorkers: clampInteger(config.cpuWorkers, 1, 32, 16),
     cpuTrainSeconds: clampInteger(config.cpuTrainSeconds, 1, 86400, 3600)
   };
@@ -414,24 +448,32 @@ async function trainCpuParameters(
     throw new Error("CPU training requires a game snapshot.");
   }
   const baseline = await fetchCpuParameters();
-  const target = mixedLabelTarget(config, 16);
+  const target = cpuTrainingPositionTarget(config);
   const positions = await collectGpuPositions(game, config, target, progress, "cpu");
   const sampleGames = positions.map((position) => position.game);
   if (!sampleGames.length) {
     throw new Error("CPU training could not sample positions.");
   }
-  const candidateCount = Math.max(4, Math.min(64, config.cpuWorkers * 4));
+  const candidateCount = Math.max(1, Math.min(256, config.cpuCandidates + Math.max(0, config.cpuMaxGenerationsWithoutCandidate - 1)));
   const candidates = [baseline];
   for (let index = 1; index < candidateCount; index += 1) {
     candidates.push(mutateCpuParameters(baseline, config.runSeed ^ index));
   }
-  const workerCount = Math.min(candidates.length, Math.max(1, config.cpuWorkers));
+  const workerCount = Math.min(candidates.length, Math.max(1, config.cpuWorkers), Math.max(1, config.cpuPairBatch));
   let nextCandidate = 0;
   let collected = 0;
   let bestParameters = baseline;
   let bestScore = Number.NEGATIVE_INFINITY;
+  const finalists: Array<{ parameters: CpuParameters; score: number }> = [];
+  const deadlineAt = cpuTrainingDeadlineAt(config);
   progress({ sampleCount: candidates.length, labelWorkers: workerCount, labelKind: "cpu-train" });
   await Promise.all(Array.from({ length: workerCount }, () => runCandidateWorker()));
+  finalists.sort((left, right) => right.score - left.score);
+  const winner = finalists.slice(0, config.cpuFinalists).sort((left, right) => right.score - left.score)[0];
+  if (winner) {
+    bestParameters = winner.parameters;
+    bestScore = winner.score;
+  }
   return {
     parametersJson: JSON.stringify(bestParameters, null, 2),
     score: bestScore
@@ -443,13 +485,19 @@ async function trainCpuParameters(
     const gpuWorker = new Worker("./ai-worker.js", { type: "module" });
     try {
       while (nextCandidate < candidates.length) {
+        if (performance.now() >= deadlineAt) {
+          break;
+        }
         const index = nextCandidate;
         nextCandidate += 1;
         const candidate = candidates[index];
         if (!candidate) {
           continue;
         }
-        const score = await scoreCpuCandidate(candidate, baseline, sampleGames, config, candidateWorker, baselineWorker, gpuWorker);
+        const score = await scoreCpuCandidate(candidate, baseline, sampleGames, config, candidateWorker, baselineWorker, gpuWorker, deadlineAt);
+        finalists.push({ parameters: candidate, score });
+        finalists.sort((left, right) => right.score - left.score);
+        finalists.length = Math.min(finalists.length, config.cpuFinalists);
         if (score > bestScore) {
           bestScore = score;
           bestParameters = candidate;
@@ -472,12 +520,18 @@ async function scoreCpuCandidate(
   config: NormalizedTrainingConfig,
   candidateWorker: Worker,
   baselineWorker: Worker,
-  gpuWorker: Worker
+  gpuWorker: Worker,
+  deadlineAt: number
 ): Promise<number> {
   let score = 0;
+  let compared = 0;
+  let nearDraws = 0;
   const candidateJson = JSON.stringify(candidate);
   const baselineJson = JSON.stringify(baseline);
   for (let index = 0; index < games.length; index += 1) {
+    if (performance.now() >= deadlineAt || compared >= config.cpuMaxMatchPlies) {
+      break;
+    }
     const game = games[index];
     if (!game) {
       continue;
@@ -487,9 +541,9 @@ async function scoreCpuCandidate(
       game,
       depth: config.cpuDepth,
       nodes: config.cpuNodes,
-      timeMs: workerSearchTimeMs({ nodes: config.cpuNodes }),
+      timeMs: config.cpuTrainingTimeMs,
       parametersJson: candidateJson
-    }, workerRequestTimeout({ nodes: config.cpuNodes }));
+    }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
     const candidateScore = candidateResult.result?.score ?? 0;
     if (config.cpuTrainingTarget === "vsCpu" || config.cpuTrainingTarget === "vsBoth") {
       const baselineResult = await requestWorker(baselineWorker, {
@@ -497,10 +551,15 @@ async function scoreCpuCandidate(
         game,
         depth: config.cpuDepth,
         nodes: config.cpuNodes,
-        timeMs: workerSearchTimeMs({ nodes: config.cpuNodes }),
+        timeMs: config.cpuTrainingTimeMs,
         parametersJson: baselineJson
-      }, workerRequestTimeout({ nodes: config.cpuNodes }));
-      score += candidateScore - (baselineResult.result?.score ?? 0);
+      }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
+      const baselineScore = baselineResult.result?.score ?? 0;
+      const delta = candidateScore - baselineScore;
+      score += delta;
+      if (Math.abs(delta) <= config.cpuDrawWindow) {
+        nearDraws += 1;
+      }
       score += moveAgreementBonus(candidateResult.result?.moves, baselineResult.result?.moves);
     }
     if (config.cpuTrainingTarget === "vsGpu" || config.cpuTrainingTarget === "vsBoth") {
@@ -515,8 +574,29 @@ async function scoreCpuCandidate(
       score += candidateScore - (gpuResult.result?.score ?? 0);
       score += moveAgreementBonus(candidateResult.result?.moves, gpuResult.result?.moves);
     }
+    compared += 1;
   }
-  return score / Math.max(1, games.length);
+  const average = score / Math.max(1, compared);
+  const nearDrawRate = nearDraws / Math.max(1, compared);
+  return nearDrawRate > config.cpuDrawRateLimit ? average * 0.5 : average;
+}
+
+function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
+  const variantPairs = (config.cpuOpponentVariants + config.cpuScreeningOpponentVariants) * config.cpuRoundsPerVariant;
+  const leaguePairs = config.cpuLeagueContenders * Math.max(1, config.cpuLeagueHallOfFameEntries);
+  const hallPairs = Math.max(0, config.cpuHallOfFameEntries);
+  const requested = Math.max(config.cpuMinPairs, variantPairs + leaguePairs + hallPairs);
+  const cappedPairs = Math.min(Math.max(config.cpuMinPairs, config.cpuMaxPairs), requested, config.cpuMaxMatchPlies);
+  return mixedLabelTarget(config, Math.max(1, cappedPairs));
+}
+
+function cpuTrainingDeadlineAt(config: NormalizedTrainingConfig): number {
+  const fallbackMs = Math.min(
+    config.cpuTrainSeconds * 1000,
+    config.cpuTrainingTimeMs * Math.max(1, config.cpuMaxMatchPlies) * 60
+  );
+  const budgetMs = config.cpuMaxMatchTimeMs > 0 ? Math.min(config.cpuMaxMatchTimeMs, fallbackMs) : fallbackMs;
+  return performance.now() + Math.max(1000, budgetMs);
 }
 
 function moveAgreementBonus(left: Move[] | undefined, right: Move[] | undefined): number {
@@ -1299,18 +1379,20 @@ function randomRunSeed(): number {
   return values[0]! >>> 0;
 }
 
-function workerRequestTimeout(payload: Pick<NormalizedTrainingConfig, "nodes"> | WorkerRequestPayload | { nodes?: number }): number {
+function workerRequestTimeout(payload: { nodes?: unknown; timeMs?: unknown }): number {
   const nodes = Math.max(1, Number(payload.nodes) || 1);
+  const timeMs = Math.max(0, Number(payload.timeMs) || 0);
   return Math.min(
-    LABEL_REQUEST_MAX_TIMEOUT_MS,
+    Math.max(LABEL_REQUEST_MAX_TIMEOUT_MS, timeMs + 5000),
     Math.max(
       LABEL_REQUEST_MIN_TIMEOUT_MS,
+      timeMs + 1000,
       nodes * LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS
     )
   );
 }
 
-function workerSearchTimeMs(payload: Pick<NormalizedTrainingConfig, "nodes"> | WorkerRequestPayload | { nodes?: number }): number {
+function workerSearchTimeMs(payload: { nodes?: unknown; timeMs?: unknown }): number {
   const timeout = workerRequestTimeout(payload);
   return Math.max(1000, timeout - 1000);
 }

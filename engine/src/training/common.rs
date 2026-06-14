@@ -4,7 +4,7 @@
 pub(crate) fn training_banner(config: &TrainerConfig) {
     pretty_log::banner(
         "CPU Training",
-        format!("effort={} seed={}", config.effort, config.seed),
+        format!("parameters=cpu-v1 seed={}", config.seed),
     );
     pretty_log::label_value(
         "max seconds",
@@ -18,6 +18,9 @@ pub(crate) fn training_banner(config: &TrainerConfig) {
     pretty_log::label_value("turn time ms", config.training_time_ms);
     pretty_log::label_value("nodes", config.nodes);
     pretty_log::label_value("search", config.search_strategy.as_str());
+    pretty_log::label_value("opponent variants", config.opponent_variants);
+    pretty_log::label_value("rounds per variant", config.rounds_per_variant);
+    pretty_log::label_value("hall of fame entries", config.hall_of_fame_entries);
     pretty_log::label_value("min pairs", config.min_pairs);
     pretty_log::label_value("max pairs", config.max_pairs);
     pretty_log::label_value("max match plies", config.max_match_plies);
@@ -25,6 +28,29 @@ pub(crate) fn training_banner(config: &TrainerConfig) {
 }
 
 pub(crate) const MAX_TRAINING_SEARCH_DEPTH: i32 = 64;
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TrainingParameters {
+    pub(crate) time_ms: u64,
+    pub(crate) nodes: usize,
+    pub(crate) candidates: Option<usize>,
+    pub(crate) finalists: Option<usize>,
+    pub(crate) pair_batch: Option<usize>,
+    pub(crate) opponent_variants: usize,
+    pub(crate) screening_opponent_variants: usize,
+    pub(crate) rounds_per_variant: usize,
+    pub(crate) hall_of_fame_entries: usize,
+    pub(crate) league_contenders: usize,
+    pub(crate) league_hall_of_fame_entries: usize,
+    pub(crate) min_pairs: usize,
+    pub(crate) max_pairs: usize,
+    pub(crate) draw_window: usize,
+    pub(crate) draw_rate_limit: f64,
+    pub(crate) max_match_plies: i32,
+    pub(crate) max_match_time_ms: u64,
+    pub(crate) max_generations_without_candidate: usize,
+}
 
 pub(crate) fn training_progress(
     stage: &str,
@@ -49,7 +75,6 @@ pub(crate) fn training_note(msg: impl AsRef<str>) {
 
 #[derive(Clone)]
 pub(crate) struct TrainerConfig {
-    pub(crate) effort: String,
     pub(crate) generations: usize,
     pub(crate) population: usize,
     pub(crate) training_time_ms: u64,
@@ -66,6 +91,12 @@ pub(crate) struct TrainerConfig {
     pub(crate) verify: String,
     pub(crate) ai_src: String,
     pub(crate) hall_of_fame: String,
+    pub(crate) opponent_variants: usize,
+    pub(crate) screening_opponent_variants: usize,
+    pub(crate) rounds_per_variant: usize,
+    pub(crate) hall_of_fame_entries: usize,
+    pub(crate) league_contenders: usize,
+    pub(crate) league_hall_of_fame_entries: usize,
     pub(crate) min_pairs: usize,
     pub(crate) pair_batch: usize,
     pub(crate) max_pairs: usize,
@@ -93,7 +124,6 @@ pub(crate) fn max_match_time_ms(config: &TrainerConfig) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrainingSearchStrategy {
     AlphaBeta,
-    #[cfg(feature = "training-beam-search")]
     Beam,
 }
 
@@ -101,7 +131,6 @@ impl TrainingSearchStrategy {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::AlphaBeta => "alpha-beta",
-            #[cfg(feature = "training-beam-search")]
             Self::Beam => "beam",
         }
     }
@@ -109,12 +138,7 @@ impl TrainingSearchStrategy {
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "alpha-beta" | "alphabeta" | "alpha" => Ok(Self::AlphaBeta),
-            #[cfg(feature = "training-beam-search")]
             "beam" => Ok(Self::Beam),
-            #[cfg(not(feature = "training-beam-search"))]
-            "beam" => {
-                Err("beam training requires the `training-beam-search` Cargo feature".to_string())
-            }
             other => Err(format!("unknown training search strategy `{other}`")),
         }
     }

@@ -19,6 +19,7 @@ WORKDIR /app
 RUN rustup target add wasm32-unknown-unknown
 
 COPY Cargo.toml Cargo.lock ./
+COPY logo.svg logo.svg
 COPY engine/Cargo.toml engine/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
 COPY pretty-log/Cargo.toml pretty-log/Cargo.toml

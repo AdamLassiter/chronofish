@@ -116,6 +116,9 @@ async fn training_status(State(state): State<AppState>) -> impl IntoResponse {
     let cpu_path = active_cpu_parameters_path(&state);
     let cpu_existing = std::fs::read(&cpu_path).ok();
     let cpu_metadata = std::fs::metadata(&cpu_path).ok();
+    let cpu_training_path = active_cpu_training_path(&state);
+    let cpu_training_existing = std::fs::read(&cpu_training_path).ok();
+    let cpu_training_metadata = std::fs::metadata(&cpu_training_path).ok();
     Json(json!({
         "enabled": true,
         "modelPath": "engine/models/gpu-v1/value-model.cfnn",
@@ -128,6 +131,11 @@ async fn training_status(State(state): State<AppState>) -> impl IntoResponse {
         "cpuParametersPresent": cpu_metadata.is_some(),
         "cpuParametersBytes": cpu_metadata.as_ref().map(|metadata| metadata.len()),
         "cpuParametersHash": cpu_existing.as_deref().map(training_model_hash),
+        "cpuTrainingPath": "engine/models/cpu-v1/training.json",
+        "resolvedCpuTrainingPath": cpu_training_path.display().to_string(),
+        "cpuTrainingPresent": cpu_training_metadata.is_some(),
+        "cpuTrainingBytes": cpu_training_metadata.as_ref().map(|metadata| metadata.len()),
+        "cpuTrainingHash": cpu_training_existing.as_deref().map(training_model_hash),
         "updatedAt": metadata
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
@@ -267,6 +275,27 @@ async fn get_training_cpu_parameters(State(state): State<AppState>) -> Response 
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorBody {
                 error: format!("Failed to read CPU parameters: {error}"),
+                room: None,
+            }),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(feature = "frontend-training")]
+async fn get_training_cpu_training(State(state): State<AppState>) -> Response {
+    let path = active_cpu_training_path(&state);
+    match std::fs::read(&path) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json; charset=utf-8")],
+            bytes,
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody {
+                error: format!("Failed to read CPU training parameters: {error}"),
                 room: None,
             }),
         )
@@ -510,6 +539,11 @@ fn active_cpu_parameters_path(state: &AppState) -> PathBuf {
 }
 
 #[cfg(feature = "frontend-training")]
+fn active_cpu_training_path(state: &AppState) -> PathBuf {
+    state.root.join("engine/models/cpu-v1/training.json")
+}
+
+#[cfg(feature = "frontend-training")]
 fn training_loss_log_dir(state: &AppState) -> PathBuf {
     state.root.join("logs/training-losses")
 }
@@ -544,8 +578,8 @@ fn validate_cpu_parameters(parameters: &[u8]) -> Result<(), String> {
         "queen",
         "pawn",
         "mobility",
-        "royal_capture_threat",
-        "royal_capture_setup",
+        "royalCaptureThreat",
+        "royalCaptureSetup",
     ] {
         if !object.get(required).is_some_and(Value::is_number) {
             return Err(format!("CPU parameters missing numeric field `{required}`."));

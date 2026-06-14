@@ -22,3 +22,14 @@ test("full GPU mode falls back when parallel timelines need multiple replies", a
   assert.match(caller, /falling back to hybrid GPU search/);
   assert.match(caller, /pendingPresentBoardsForSnapshot\(current,\s*rootTurn\)/);
 });
+
+test("GPU search returns complete turn plans for post-match review", async () => {
+  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+
+  assert.match(worker, /const principalVariation = \[moves\]/);
+  assert.match(worker, /completedGpuReplyTurn\(device, current/);
+  assert.match(worker, /principalVariation\.push\(reply\)/);
+  assert.match(worker, /depth:\s*1,[\s\S]*gpuSearch:\s*"projected-reply"/);
+  assert.match(worker, /principalVariation:\s*Move\[\]\[\]/);
+  assert.match(worker, /let best = -2147483647/);
+});

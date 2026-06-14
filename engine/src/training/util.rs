@@ -27,13 +27,6 @@ pub(crate) fn auto_finalists() -> usize {
     host_parallelism().max(2)
 }
 
-pub(crate) fn auto_nodes() -> usize {
-    host_parallelism()
-        .checked_mul(20)
-        .unwrap_or(160)
-        .clamp(80, 240)
-}
-
 pub(crate) fn random_seed() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -46,9 +39,23 @@ pub(crate) fn default_compare_seeds(seed: u64) -> Vec<u64> {
     (0..9).map(|_| rng.next_u64()).collect()
 }
 
+pub(crate) fn default_hall_of_fame_path() -> String {
+    crate::ai::cpu_model_dir()
+        .join("hall_of_fame.jsonl")
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub(crate) fn load_training_parameters() -> TrainingParameters {
+    let path = crate::ai::cpu_model_dir().join("training.json");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    serde_json::from_str(&raw).unwrap_or_else(|error| {
+        panic!("invalid training parameters in {}: {error}", path.display())
+    })
+}
+
 pub(crate) fn promote_weights(weights: EvalWeights, ai_src: &str) {
-    // Runtime weights live in a small JSON include file. Overwriting the whole
-    // file is less clever than field patching and avoids ever touching types.
     let json = serde_json::to_string_pretty(&weights).expect("EvalWeights should serialize");
     if let Some(parent) = std::path::Path::new(ai_src).parent() {
         std::fs::create_dir_all(parent).expect("failed to create AI parameters directory");
@@ -56,14 +63,14 @@ pub(crate) fn promote_weights(weights: EvalWeights, ai_src: &str) {
     std::fs::write(ai_src, format!("{json}\n")).expect("failed to write AI parameters");
 }
 
-pub(crate) fn load_hall_of_fame(path: &str) -> Vec<EvalWeights> {
+pub(crate) fn load_hall_of_fame(path: &str, limit: usize) -> Vec<EvalWeights> {
     let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
     raw.lines()
         .rev()
         .filter_map(|line| EvalWeights::from_json(line).ok())
-        .take(4)
+        .take(limit)
         .collect()
 }
 

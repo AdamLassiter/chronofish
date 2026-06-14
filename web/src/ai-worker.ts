@@ -241,7 +241,11 @@ async function completeGpuResultTurn(
   device: GPUDevice,
   snapshot: GpuSnapshot,
   result: SearchResult | null,
-  { nodes, temperature = 0, randomSeed = 0 }: { nodes?: number; temperature?: number; randomSeed?: number } = {}
+  { nodes, temperature = 0, randomSeed = 0 }: {
+    nodes?: number | undefined;
+    temperature?: number | undefined;
+    randomSeed?: number | undefined;
+  } = {}
 ): Promise<SearchResult | null> {
   if (!result?.moves?.length || result.gpuTerminal) {
     return result?.moves?.length ? withCompletedTurnChoice(result, result.moves, result.gpuSearch) : result;
@@ -331,13 +335,58 @@ async function completeGpuResultTurn(
     };
   }
 
+  const principalVariation = [moves];
+  if ((result.depth ?? 1) > 1) {
+    const reply = await completedGpuReplyTurn(device, current, {
+      nodes,
+      temperature,
+      randomSeed: randomSeed + moves.length
+    });
+    if (reply.length > 0) {
+      principalVariation.push(reply);
+    }
+  }
+
   return withCompletedTurnChoice({
     ...result,
     nodes: (result.nodes ?? 0) + extraNodes
-  }, moves, moves.length > result.moves.length ? `${result.gpuSearch ?? "gpu"}-turn-complete` : result.gpuSearch);
+  }, moves, moves.length > result.moves.length ? `${result.gpuSearch ?? "gpu"}-turn-complete` : result.gpuSearch, principalVariation);
 }
 
-function withCompletedTurnChoice(result: SearchResult, moves: Move[], gpuSearch = result.gpuSearch): SearchResult {
+async function completedGpuReplyTurn(
+  device: GPUDevice,
+  snapshot: GpuSnapshot,
+  { nodes, temperature = 0, randomSeed = 0 }: {
+    nodes?: number | undefined;
+    temperature?: number | undefined;
+    randomSeed?: number | undefined;
+  }
+): Promise<Move[]> {
+  if (snapshot.royalCaptureBy || Date.now() >= gpuDeadlineAt) {
+    return [];
+  }
+  const reply = await bestReplyOnGpu(device, snapshot, nodes ?? 64);
+  if (!reply.move) {
+    return [];
+  }
+  const completed = await completeGpuResultTurn(device, snapshot, {
+    status: "ok",
+    moves: [reply.move],
+    score: reply.score,
+    depth: 1,
+    gpu: true,
+    gpuSnapshot: snapshot.format,
+    gpuSearch: "projected-reply"
+  }, { nodes, temperature, randomSeed });
+  return completed?.status === "ok" ? completed.moves : [];
+}
+
+function withCompletedTurnChoice(
+  result: SearchResult,
+  moves: Move[],
+  gpuSearch = result.gpuSearch,
+  principalVariation: Move[][] = [moves, ...(result.principalVariation ?? []).slice(1)]
+): SearchResult {
   const completedChoice = {
     rank: 1,
     score: result.score,
@@ -351,10 +400,7 @@ function withCompletedTurnChoice(result: SearchResult, moves: Move[], gpuSearch 
     ...result,
     moves,
     gpuSearch,
-    principalVariation: [
-      moves,
-      ...(result.principalVariation ?? []).slice(1)
-    ],
+    principalVariation,
     choices: [
       completedChoice,
       ...existingChoices
@@ -703,7 +749,7 @@ async function bestReplyOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: n
     return { score: 0 };
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
-  let best = 0;
+  let best = -2147483647;
   let bestMove: Move | undefined;
   for (let index = 0; index < scored.scores.length; index += 1) {
     const score = scored.scores[index] ?? -2147483647;

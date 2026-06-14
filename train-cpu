@@ -3,4 +3,4 @@ set -eu
 
 echo "Training local CPU heuristic parameters."
 echo "Output defaults to engine/models/cpu-v1/parameters.json."
-exec cargo run --release --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@" --effort fast
+exec cargo run --release --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@"

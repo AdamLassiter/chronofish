@@ -73,6 +73,7 @@ fn training_routes(router: Router<AppState>) -> Router<AppState> {
             "/api/training/cpu-parameters",
             get(get_training_cpu_parameters).put(put_training_cpu_parameters),
         )
+        .route("/api/training/cpu-training", get(get_training_cpu_training))
         .route("/api/training/loss-logs", get(list_training_loss_logs))
         .route("/api/training/loss-logs/{room_id}", post(post_training_loss_log))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))

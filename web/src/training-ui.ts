@@ -69,8 +69,46 @@ interface TrainingConfig {
   labelWorkers: number;
   cpuDepth: number;
   cpuNodes: number;
+  cpuTrainingTimeMs: number;
+  cpuCandidates: number;
+  cpuFinalists: number;
+  cpuPairBatch: number;
+  cpuOpponentVariants: number;
+  cpuScreeningOpponentVariants: number;
+  cpuRoundsPerVariant: number;
+  cpuHallOfFameEntries: number;
+  cpuLeagueContenders: number;
+  cpuLeagueHallOfFameEntries: number;
+  cpuMinPairs: number;
+  cpuMaxPairs: number;
+  cpuDrawWindow: number;
+  cpuDrawRateLimit: number;
+  cpuMaxMatchPlies: number;
+  cpuMaxMatchTimeMs: number;
+  cpuMaxGenerationsWithoutCandidate: number;
   cpuWorkers: number;
   cpuTrainSeconds: number;
+}
+
+interface CpuTrainingParameters {
+  timeMs?: number;
+  nodes?: number;
+  candidates?: number | null;
+  finalists?: number | null;
+  pairBatch?: number | null;
+  opponentVariants?: number;
+  screeningOpponentVariants?: number;
+  roundsPerVariant?: number;
+  hallOfFameEntries?: number;
+  leagueContenders?: number;
+  leagueHallOfFameEntries?: number;
+  minPairs?: number;
+  maxPairs?: number;
+  drawWindow?: number;
+  drawRateLimit?: number;
+  maxMatchPlies?: number;
+  maxMatchTimeMs?: number;
+  maxGenerationsWithoutCandidate?: number;
 }
 
 interface TrainingMetric {
@@ -108,6 +146,9 @@ interface TrainingStatusPayload {
   modelBytes?: number;
   modelHash?: string;
   resolvedModelPath?: string;
+  cpuTrainingPresent?: boolean;
+  cpuTrainingHash?: string;
+  resolvedCpuTrainingPath?: string;
 }
 
 const TRAINING_STATUS_TIMEOUT_MS = 1500;
@@ -204,6 +245,23 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const cpuTargetSelect = requireElement(elements.trainingCpuTargetSelect, "training-cpu-target");
   const cpuDepthInput = requireElement(elements.trainingCpuDepthInput, "training-cpu-depth");
   const cpuNodesInput = requireElement(elements.trainingCpuNodesInput, "training-cpu-nodes");
+  const cpuTimeMsInput = requireElement(elements.trainingCpuTimeMsInput, "training-cpu-time-ms");
+  const cpuCandidatesInput = requireElement(elements.trainingCpuCandidatesInput, "training-cpu-candidates");
+  const cpuFinalistsInput = requireElement(elements.trainingCpuFinalistsInput, "training-cpu-finalists");
+  const cpuPairBatchInput = requireElement(elements.trainingCpuPairBatchInput, "training-cpu-pair-batch");
+  const cpuOpponentVariantsInput = requireElement(elements.trainingCpuOpponentVariantsInput, "training-cpu-opponent-variants");
+  const cpuScreeningOpponentVariantsInput = requireElement(elements.trainingCpuScreeningOpponentVariantsInput, "training-cpu-screening-opponent-variants");
+  const cpuRoundsPerVariantInput = requireElement(elements.trainingCpuRoundsPerVariantInput, "training-cpu-rounds-per-variant");
+  const cpuHallOfFameEntriesInput = requireElement(elements.trainingCpuHallOfFameEntriesInput, "training-cpu-hall-of-fame-entries");
+  const cpuLeagueContendersInput = requireElement(elements.trainingCpuLeagueContendersInput, "training-cpu-league-contenders");
+  const cpuLeagueHallOfFameEntriesInput = requireElement(elements.trainingCpuLeagueHallOfFameEntriesInput, "training-cpu-league-hall-of-fame-entries");
+  const cpuMinPairsInput = requireElement(elements.trainingCpuMinPairsInput, "training-cpu-min-pairs");
+  const cpuMaxPairsInput = requireElement(elements.trainingCpuMaxPairsInput, "training-cpu-max-pairs");
+  const cpuDrawWindowInput = requireElement(elements.trainingCpuDrawWindowInput, "training-cpu-draw-window");
+  const cpuDrawRateLimitInput = requireElement(elements.trainingCpuDrawRateLimitInput, "training-cpu-draw-rate-limit");
+  const cpuMaxMatchPliesInput = requireElement(elements.trainingCpuMaxMatchPliesInput, "training-cpu-max-match-plies");
+  const cpuMaxMatchTimeMsInput = requireElement(elements.trainingCpuMaxMatchTimeMsInput, "training-cpu-max-match-time-ms");
+  const cpuMaxGenerationsWithoutCandidateInput = requireElement(elements.trainingCpuMaxGenerationsWithoutCandidateInput, "training-cpu-max-generations-without-candidate");
   const cpuWorkersInput = requireElement(elements.trainingCpuWorkersInput, "training-cpu-workers");
   const cpuSecondsInput = requireElement(elements.trainingCpuSecondsInput, "training-cpu-seconds");
 
@@ -214,6 +272,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   let trainingCycle = 0;
   let trainingGpuProfile: TrainingGpuProfile | null = null;
   let trainingGpuProfileApplied = false;
+  let cpuTrainingParametersApplied = false;
   let selectedTrainingTab = "gpu";
   const trainingProgressState = new Map<LabelKind, TrainingProgressEntry>();
 
@@ -245,6 +304,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       openTrainingButton.hidden = false;
       trainingPanel.hidden = false;
       await applyTrainingGpuProfile();
+      await applyCpuTrainingParameters();
       setTrainingStatus({
         title: payload.modelPresent ? "Model Ready" : "No Model",
         tone: payload.modelPresent ? "ready" : "warn",
@@ -252,6 +312,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
           trainingMetric("Bytes", payload.modelPresent ? payload.modelBytes ?? 0 : null),
           trainingMetric("Hash", compactHash(payload.modelHash), payload.modelHash),
           trainingMetric("GPU", trainingGpuProfile?.name),
+          trainingMetric("CPU Training", compactHash(payload.cpuTrainingHash), payload.resolvedCpuTrainingPath),
           trainingMetric("Path", compactPath(payload.resolvedModelPath), payload.resolvedModelPath)
         ])
       });
@@ -293,6 +354,23 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       labelWorkers: autoTrainingWorkers(),
       cpuDepth: clampNumber(cpuDepthInput.value, 1, 16, 4),
       cpuNodes: clampNumber(cpuNodesInput.value, 1, 131072, 16384),
+      cpuTrainingTimeMs: clampNumber(cpuTimeMsInput.value, 1, 600000, 10000),
+      cpuCandidates: clampNumber(cpuCandidatesInput.value, 1, 256, 8),
+      cpuFinalists: clampNumber(cpuFinalistsInput.value, 1, 64, 1),
+      cpuPairBatch: clampNumber(cpuPairBatchInput.value, 1, 64, 4),
+      cpuOpponentVariants: clampNumber(cpuOpponentVariantsInput.value, 1, 128, 8),
+      cpuScreeningOpponentVariants: clampNumber(cpuScreeningOpponentVariantsInput.value, 1, 128, 2),
+      cpuRoundsPerVariant: clampNumber(cpuRoundsPerVariantInput.value, 1, 64, 1),
+      cpuHallOfFameEntries: clampNumber(cpuHallOfFameEntriesInput.value, 0, 64, 1),
+      cpuLeagueContenders: clampNumber(cpuLeagueContendersInput.value, 1, 64, 2),
+      cpuLeagueHallOfFameEntries: clampNumber(cpuLeagueHallOfFameEntriesInput.value, 0, 64, 2),
+      cpuMinPairs: clampNumber(cpuMinPairsInput.value, 1, 256, 2),
+      cpuMaxPairs: clampNumber(cpuMaxPairsInput.value, 1, 512, 8),
+      cpuDrawWindow: clampNumber(cpuDrawWindowInput.value, 1, 128, 4),
+      cpuDrawRateLimit: clampNumber(cpuDrawRateLimitInput.value, 0, 1, 0.8),
+      cpuMaxMatchPlies: clampNumber(cpuMaxMatchPliesInput.value, 1, 512, 40),
+      cpuMaxMatchTimeMs: clampNumber(cpuMaxMatchTimeMsInput.value, 0, 3600000, 0),
+      cpuMaxGenerationsWithoutCandidate: clampNumber(cpuMaxGenerationsWithoutCandidateInput.value, 1, 256, 2),
       cpuWorkers: clampNumber(cpuWorkersInput.value, 1, cpuWorkerMax, Math.min(cpuWorkerMax, 16)),
       cpuTrainSeconds: clampNumber(cpuSecondsInput.value, 1, 86400, 3600)
     };
@@ -386,6 +464,53 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   function applyTrainingInputProfile(input: HTMLInputElement, value: number, max: number): void {
     input.max = String(max);
     input.value = String(value);
+  }
+
+  async function applyCpuTrainingParameters(): Promise<void> {
+    if (cpuTrainingParametersApplied) {
+      return;
+    }
+    cpuTrainingParametersApplied = true;
+    const parameters = await fetchCpuTrainingParameters();
+    if (!parameters) {
+      return;
+    }
+    applyCpuTrainingInput(cpuTimeMsInput, parameters.timeMs, 1, 600000, 10000);
+    applyCpuTrainingInput(cpuNodesInput, parameters.nodes, 1, 131072, 8192);
+    applyCpuTrainingInput(cpuCandidatesInput, parameters.candidates, 1, 256, 8);
+    applyCpuTrainingInput(cpuFinalistsInput, parameters.finalists, 1, 64, 1);
+    applyCpuTrainingInput(cpuPairBatchInput, parameters.pairBatch, 1, 64, 4);
+    applyCpuTrainingInput(cpuOpponentVariantsInput, parameters.opponentVariants, 1, 128, 8);
+    applyCpuTrainingInput(cpuScreeningOpponentVariantsInput, parameters.screeningOpponentVariants, 1, 128, 2);
+    applyCpuTrainingInput(cpuRoundsPerVariantInput, parameters.roundsPerVariant, 1, 64, 1);
+    applyCpuTrainingInput(cpuHallOfFameEntriesInput, parameters.hallOfFameEntries, 0, 64, 1);
+    applyCpuTrainingInput(cpuLeagueContendersInput, parameters.leagueContenders, 1, 64, 2);
+    applyCpuTrainingInput(cpuLeagueHallOfFameEntriesInput, parameters.leagueHallOfFameEntries, 0, 64, 2);
+    applyCpuTrainingInput(cpuMinPairsInput, parameters.minPairs, 1, 256, 2);
+    applyCpuTrainingInput(cpuMaxPairsInput, parameters.maxPairs, 1, 512, 8);
+    applyCpuTrainingInput(cpuDrawWindowInput, parameters.drawWindow, 1, 128, 4);
+    applyCpuTrainingInput(cpuDrawRateLimitInput, parameters.drawRateLimit, 0, 1, 0.8);
+    applyCpuTrainingInput(cpuMaxMatchPliesInput, parameters.maxMatchPlies, 1, 512, 40);
+    applyCpuTrainingInput(cpuMaxMatchTimeMsInput, parameters.maxMatchTimeMs, 0, 3600000, 0);
+    applyCpuTrainingInput(cpuMaxGenerationsWithoutCandidateInput, parameters.maxGenerationsWithoutCandidate, 1, 256, 2);
+  }
+
+  async function fetchCpuTrainingParameters(): Promise<CpuTrainingParameters | null> {
+    for (const path of ["/api/training/cpu-training", "/ai/training.json"]) {
+      try {
+        const response = await fetch(path, { cache: "no-store" });
+        if (response.ok) {
+          return await response.json() as CpuTrainingParameters;
+        }
+      } catch {
+        // Try the next source.
+      }
+    }
+    return null;
+  }
+
+  function applyCpuTrainingInput(input: HTMLInputElement, value: number | null | undefined, min: number, max: number, fallback: number): void {
+    input.value = String(clampNumber(String(value ?? fallback), min, max, fallback));
   }
 
   function clampPowerOfTwo(value: number, min: number, max: number): number {

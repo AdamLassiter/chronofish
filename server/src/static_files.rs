@@ -19,34 +19,62 @@ async fn static_file(
         return response;
     }
 
+    if let Some(asset) = embedded_static_asset(uri.path()) {
+        return static_bytes_response(method, &headers, asset.bytes, asset.content_type);
+    }
+
     match resolve_request_path(&state.root, uri.path()) {
         Some(path) => match tokio::fs::read(&path).await {
-            Ok(bytes) => {
-                let etag = asset_etag(&bytes);
-                let mut response = if etag_matches(headers.get(header::IF_NONE_MATCH), &etag) {
-                    StatusCode::NOT_MODIFIED.into_response()
-                } else if method == Method::HEAD {
-                    ().into_response()
-                } else {
-                    bytes.into_response()
-                };
-                apply_static_headers(&mut response, &path, &etag);
-                response
-            }
+            Ok(bytes) => static_bytes_response(method, &headers, &bytes, content_type(&path)),
             Err(_) => static_no_store_error(StatusCode::NOT_FOUND, "Not found"),
         },
         None => static_no_store_error(StatusCode::NOT_FOUND, "Not found"),
     }
 }
 
+struct EmbeddedStaticAsset {
+    bytes: &'static [u8],
+    content_type: &'static str,
+}
+
+const FAVICON_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../logo.svg"));
+
+fn embedded_static_asset(request_path: &str) -> Option<EmbeddedStaticAsset> {
+    match request_path {
+        "/favicon.svg" => Some(EmbeddedStaticAsset {
+            bytes: FAVICON_SVG,
+            content_type: "image/svg+xml",
+        }),
+        _ => None,
+    }
+}
+
+fn static_bytes_response(
+    method: Method,
+    headers: &HeaderMap,
+    bytes: &[u8],
+    content_type: &'static str,
+) -> Response {
+    let etag = asset_etag(bytes);
+    let mut response = if etag_matches(headers.get(header::IF_NONE_MATCH), &etag) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else if method == Method::HEAD {
+        ().into_response()
+    } else {
+        bytes.to_vec().into_response()
+    };
+    apply_static_headers(&mut response, content_type, &etag);
+    response
+}
+
 const STATIC_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'";
 const STATIC_CACHE_CONTROL: &str = "no-cache, max-age=0, must-revalidate";
 
-fn apply_static_headers(response: &mut Response, path: &Path, etag: &str) {
+fn apply_static_headers(response: &mut Response, content_type: &'static str, etag: &str) {
     let headers = response.headers_mut();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type(path)),
+        HeaderValue::from_static(content_type),
     );
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
@@ -120,6 +148,11 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
 
     if requested == Path::new("ai/effort.json") {
         let path = root.join("engine/models/cpu-v1/effort.json");
+        return path.is_file().then_some(path);
+    }
+
+    if requested == Path::new("ai/training.json") {
+        let path = root.join("engine/models/cpu-v1/training.json");
         return path.is_file().then_some(path);
     }
 

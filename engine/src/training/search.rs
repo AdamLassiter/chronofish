@@ -35,7 +35,6 @@ pub(crate) fn training_turn_search(
         TrainingSearchStrategy::AlphaBeta => {
             alpha_beta_training_turn_search(game, weights, config, deadline, plies_played)
         }
-        #[cfg(feature = "training-beam-search")]
         TrainingSearchStrategy::Beam => {
             beam_training_turn_search(game, weights, config, deadline, plies_played)
         }
@@ -190,7 +189,6 @@ pub(crate) fn apply_training_search_profile(
     }
 }
 
-#[cfg(feature = "training-beam-search")]
 fn beam_training_turn_search(
     game: &Game,
     weights: EvalWeights,

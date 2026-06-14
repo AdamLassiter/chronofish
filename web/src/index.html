@@ -5,6 +5,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Chronofish</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css">
 </head>
 
@@ -298,6 +299,108 @@
             <input id="training-cpu-nodes" type="number" min="1" max="131072" step="256" value="8192"
               title="Node budget for the restored CPU heuristic bot when browser training asks it for move labels.">
             <span class="field-help">CPU heuristic node budget per label.</span>
+          </label>
+          <label>
+            Turn Time Ms
+            <input id="training-cpu-time-ms" type="number" min="1" max="600000" step="100" value="10000"
+              title="training.json timeMs. CPU heuristic search time budget used for mutation scoring searches.">
+            <span class="field-help">CPU search time budget per scored turn.</span>
+          </label>
+          <label>
+            Candidates
+            <input id="training-cpu-candidates" type="number" min="1" max="256" step="1" value="8"
+              title="training.json candidates. Number of CPU parameter mutations scored per browser training cycle.">
+            <span class="field-help">Parameter mutations per cycle.</span>
+          </label>
+          <label>
+            Finalists
+            <input id="training-cpu-finalists" type="number" min="1" max="64" step="1" value="1"
+              title="training.json finalists. Number of top candidates retained while choosing the browser winner.">
+            <span class="field-help">Top scored candidates retained before selecting the winner.</span>
+          </label>
+          <label>
+            Pair Batch
+            <input id="training-cpu-pair-batch" type="number" min="1" max="64" step="1" value="4"
+              title="training.json pairBatch. Browser CPU training uses this as the maximum parallel candidate scoring batch.">
+            <span class="field-help">Parallel scoring batch cap.</span>
+          </label>
+          <label>
+            Opponent Variants
+            <input id="training-cpu-opponent-variants" type="number" min="1" max="128" step="1" value="8"
+              title="training.json opponentVariants. Contributes to browser CPU training position coverage.">
+            <span class="field-help">Main opponent variant coverage.</span>
+          </label>
+          <label>
+            Screening Variants
+            <input id="training-cpu-screening-opponent-variants" type="number" min="1" max="128" step="1" value="2"
+              title="training.json screeningOpponentVariants. Contributes to browser CPU training position coverage.">
+            <span class="field-help">Screening opponent variant coverage.</span>
+          </label>
+          <label>
+            Rounds/Variant
+            <input id="training-cpu-rounds-per-variant" type="number" min="1" max="64" step="1" value="1"
+              title="training.json roundsPerVariant. Multiplies opponent variants when sizing browser CPU scoring positions.">
+            <span class="field-help">Rounds sampled per variant.</span>
+          </label>
+          <label>
+            Hall Of Fame
+            <input id="training-cpu-hall-of-fame-entries" type="number" min="0" max="64" step="1" value="1"
+              title="training.json hallOfFameEntries. Adds historical-opponent coverage to browser CPU scoring positions.">
+            <span class="field-help">Historical opponent coverage.</span>
+          </label>
+          <label>
+            League Contenders
+            <input id="training-cpu-league-contenders" type="number" min="1" max="64" step="1" value="2"
+              title="training.json leagueContenders. Contributes to browser CPU scoring coverage.">
+            <span class="field-help">League contender coverage.</span>
+          </label>
+          <label>
+            League Hall Of Fame
+            <input id="training-cpu-league-hall-of-fame-entries" type="number" min="0" max="64" step="1" value="2"
+              title="training.json leagueHallOfFameEntries. Contributes to browser CPU scoring coverage.">
+            <span class="field-help">League historical coverage.</span>
+          </label>
+          <label>
+            Min Pairs
+            <input id="training-cpu-min-pairs" type="number" min="1" max="256" step="1" value="2"
+              title="training.json minPairs. Minimum browser CPU scoring position pairs per candidate.">
+            <span class="field-help">Minimum scoring pairs.</span>
+          </label>
+          <label>
+            Max Pairs
+            <input id="training-cpu-max-pairs" type="number" min="1" max="512" step="1" value="8"
+              title="training.json maxPairs. Maximum browser CPU scoring position pairs per candidate.">
+            <span class="field-help">Maximum scoring pairs.</span>
+          </label>
+          <label>
+            Draw Window
+            <input id="training-cpu-draw-window" type="number" min="1" max="128" step="1" value="4"
+              title="training.json drawWindow. Used as a browser scoring damping window for near-draw candidate scores.">
+            <span class="field-help">Near-draw damping window.</span>
+          </label>
+          <label>
+            Draw Rate Limit
+            <input id="training-cpu-draw-rate-limit" type="number" min="0" max="1" step="0.01" value="0.8"
+              title="training.json drawRateLimit. Browser CPU training damps scores when candidate and baseline are too draw-like.">
+            <span class="field-help">Draw damping threshold.</span>
+          </label>
+          <label>
+            Max Match Plies
+            <input id="training-cpu-max-match-plies" type="number" min="1" max="512" step="1" value="40"
+              title="training.json maxMatchPlies. Caps browser CPU scoring position coverage.">
+            <span class="field-help">Maximum scoring coverage cap.</span>
+          </label>
+          <label>
+            Max Match Time Ms
+            <input id="training-cpu-max-match-time-ms" type="number" min="0" max="3600000" step="1000" value="0"
+              title="training.json maxMatchTimeMs. Caps browser CPU candidate scoring time; 0 derives a cap from turn time and max plies.">
+            <span class="field-help">Candidate scoring time cap.</span>
+          </label>
+          <label>
+            Max Stale Generations
+            <input id="training-cpu-max-generations-without-candidate" type="number" min="1" max="256" step="1" value="2"
+              title="training.json maxGenerationsWithoutCandidate. Browser training uses this to widen mutation coverage after stale cycles.">
+            <span class="field-help">Mutation coverage after stale cycles.</span>
           </label>
           <label>
             CPU Workers
