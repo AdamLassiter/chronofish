@@ -1,0 +1,38 @@
+{
+  "fast": {
+    "label": "GPU Bot: Fast",
+    "displayNames": [
+      "Stockfish & Chips",
+      "Crafty Castler",
+      "Fritz Blitz"
+    ],
+    "depth": 4,
+    "minDepth": 2,
+    "nodes": 20000,
+    "timeMs": 20000
+  },
+  "balanced": {
+    "label": "GPU Bot: Balanced",
+    "displayNames": [
+      "Deep Blue Shift",
+      "Leela Timeline Zero",
+      "Komodo Chrono"
+    ],
+    "depth": 6,
+    "minDepth": 4,
+    "nodes": 80000,
+    "timeMs": 100000
+  },
+  "expert": {
+    "label": "GPU Bot: Expert",
+    "displayNames": [
+      "AlphaZero Hour",
+      "Rybka in Time",
+      "Houdini's Horizon"
+    ],
+    "depth": 8,
+    "minDepth": 6,
+    "nodes": 200000,
+    "timeMs": 500000
+  }
+}

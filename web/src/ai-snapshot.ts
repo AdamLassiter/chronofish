@@ -292,6 +292,7 @@ export function buildGpuCandidateInputs(game: GpuSnapshot | GameSnapshot, color:
         time: board.time,
         sideToMove: board.sideToMove,
         castling: board.castling ?? 0,
+        enPassant: board.enPassant ?? null,
         squares
       });
       pushGpuMutationBoardRecord(mutationBoards, timeline, {
@@ -364,13 +365,17 @@ export function squareCodesForBoard(board: GpuBoardSnapshot | BoardSnapshot): Ar
   return (board.board ?? []).flat().map((piece) => piece ? pieceTypeCode(piece.type) | (colorCode(piece.color) << 8) : 0);
 }
 
-export function pushGpuBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: Pick<GpuBoardSnapshot, "time" | "sideToMove" | "castling" | "squares">): void {
+export function pushGpuBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: Pick<GpuBoardSnapshot, "time" | "sideToMove" | "castling" | "enPassant" | "squares">): void {
   out.push(
     timeline.id,
     timeline.row,
     board.time,
     colorCode(board.sideToMove),
-    board.castling ?? 0
+    board.castling ?? 0,
+    board.enPassant?.x ?? -1,
+    board.enPassant?.y ?? -1,
+    board.enPassant?.capturedX ?? -1,
+    board.enPassant?.capturedY ?? -1
   );
   for (let index = 0; index < 64; index += 1) {
     out.push(board.squares?.[index] ?? 0);

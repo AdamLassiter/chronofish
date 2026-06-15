@@ -55,4 +55,20 @@ mod static_file_tests {
     fn unknown_assets_are_not_treated_as_embedded() {
         assert!(embedded_static_asset("/styles.css").is_none());
     }
+
+    #[test]
+    fn gpu_effort_is_served_from_the_gpu_model_directory() {
+        let root = workspace_root();
+        let path = resolve_request_path(&root, "/ai/gpu-effort.json")
+            .expect("GPU effort configuration should exist");
+        assert!(path.ends_with("engine/models/gpu-v1/effort.json"));
+    }
+
+    #[test]
+    fn gpu_value_model_is_served_from_the_gpu_model_directory() {
+        let root = workspace_root();
+        let path = resolve_request_path(&root, "/ai/value-model.cfnn")
+            .expect("GPU value model should exist");
+        assert!(path.ends_with("engine/models/gpu-v1/value-model.cfnn"));
+    }
 }

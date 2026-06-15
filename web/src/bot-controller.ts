@@ -40,6 +40,7 @@ interface AiSearchResult {
   choices?: AiChoice[];
   principalVariation?: PrincipalVariation;
   gpuSearch?: string | null;
+  gpuDiagnostics?: Record<string, number | string | null | undefined> | null;
   cpuSearch?: string | null;
   trainingDecision?: BotDecisionRecord | null;
 }
@@ -247,12 +248,10 @@ export function createBotController({
     bot.pendingSearch = null;
   }
 
-  function botSearchWorkerCount(effortName: string, backend: BotBackend): number {
-    if (backend === "cpu" || effortName !== "expert") {
-      return 1;
-    }
-    const hardwareThreads = Math.max(1, navigator.hardwareConcurrency ?? 2);
-    return Math.max(1, Math.min(2, hardwareThreads - 1));
+  function botSearchWorkerCount(_effortName: string, _backend: BotBackend): number {
+    // WebGPU work is intentionally serialized through one worker/device queue.
+    // Parallel workers create duplicate adapters and compete for the same GPU.
+    return 1;
   }
 
   function clearBotTimeout(): void {
@@ -369,7 +368,7 @@ export function createBotController({
     pending.depthExpected = 0;
     pending.depthReceived = 0;
     pending.depthResults = [];
-    const remainingMs = pending.currentDepth < pending.minDepth
+    const remainingMs = pending.currentDepth <= pending.minDepth
       ? pending.timeMs
       : Math.max(1, pending.deadlineAt - Date.now());
     const workerTimeMs = botWorkerSearchTimeMs(remainingMs);
@@ -427,7 +426,14 @@ export function createBotController({
 
     const pending = bot.pendingSearch;
     if (pending) {
-      finishBotSearch(pending, "timeout");
+      bot.timeoutId = null;
+      const bestResult = selectDeepestStoredResult(pending)
+        ?? selectBestAiResult(pending.results.map((entry) => entry.result));
+      if (bestResult && (bestResult.depth ?? 0) >= pending.minDepth) {
+        finishBotSearch(pending, "timeout");
+        return;
+      }
+      message.textContent = `${botDisplayName(botColor)} reached ${formatBotTimeLimit(timeMs)} and is completing depth ${Math.max(1, pending.currentDepth)} before moving.`;
     } else {
       aiRequestId += 1;
       bot.thinking = false;
@@ -469,10 +475,12 @@ export function createBotController({
       pending.bestByDepth.set(pending.currentDepth, depthBest);
     }
 
-    if (
-      pending.currentDepth >= pending.targetDepth
-      || (Date.now() >= pending.deadlineAt && pending.currentDepth >= pending.minDepth)
-    ) {
+    const bestResult = selectDeepestStoredResult(pending)
+      ?? selectBestAiResult(pending.results.map((entry) => entry.result));
+    const reachedTarget = pending.currentDepth >= pending.targetDepth;
+    const reachedTimedMinimum = Date.now() >= pending.deadlineAt
+      && (bestResult?.depth ?? 0) >= pending.minDepth;
+    if (reachedTarget || reachedTimedMinimum) {
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
       return;
     }
@@ -549,7 +557,7 @@ export function createBotController({
       return;
     }
     console.groupCollapsed(`${botName} search ${reason}: ${choices.length} move choice${choices.length === 1 ? "" : "s"}`);
-    console.table(choices.map((choice, index) => ({
+      console.table(choices.map((choice, index) => ({
       rank: index + 1,
       selected: choice.selected ? "yes" : "",
       eval: formatBotEvaluation(choice.score),
@@ -559,6 +567,9 @@ export function createBotController({
       worker: choice.partitionIndex ?? "",
       search: choice.cpuSearch ?? choice.gpuSearch ?? ""
     })));
+    if (selectedResult?.gpuDiagnostics) {
+      console.info("Selected GPU frontier diagnostics", selectedResult.gpuDiagnostics);
+    }
     if (pending.errors.length) {
       console.info("Bot search worker errors", pending.errors);
     }

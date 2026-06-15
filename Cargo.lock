@@ -764,6 +764,7 @@ name = "chronofish-engine"
 version = "0.4.3"
 dependencies = [
  "burn",
+ "naga",
  "pretty-log",
  "rayon",
  "serde",

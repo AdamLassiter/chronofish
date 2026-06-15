@@ -6,7 +6,7 @@
       "Speedrun Steinitz",
       "Blitz Botvinnik"
     ],
-    "depth": 3,
+    "depth": 4,
     "minDepth": 2,
     "nodes": 20000,
     "timeMs": 10000
@@ -18,7 +18,7 @@
       "Timeline Tal",
       "Causality Capablanca"
     ],
-    "depth": 5,
+    "depth": 6,
     "minDepth": 4,
     "nodes": 80000,
     "timeMs": 50000
@@ -30,7 +30,7 @@
       "Premovaru Checkamura",
       "Anandromeda"
     ],
-    "depth": 7,
+    "depth": 8,
     "minDepth": 6,
     "nodes": 200000,
     "timeMs": 250000

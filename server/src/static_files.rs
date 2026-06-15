@@ -151,6 +151,16 @@ fn resolve_request_path(root: &Path, request_path: &str) -> Option<PathBuf> {
         return path.is_file().then_some(path);
     }
 
+    if requested == Path::new("ai/gpu-effort.json") {
+        let path = root.join("engine/models/gpu-v1/effort.json");
+        return path.is_file().then_some(path);
+    }
+
+    if requested == Path::new("ai/value-model.cfnn") {
+        let path = root.join("engine/models/gpu-v1/value-model.cfnn");
+        return path.is_file().then_some(path);
+    }
+
     if requested == Path::new("ai/training.json") {
         let path = root.join("engine/models/cpu-v1/training.json");
         return path.is_file().then_some(path);

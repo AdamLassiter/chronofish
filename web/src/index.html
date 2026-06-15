@@ -39,6 +39,7 @@
               <option value="bot-gpu-fast">GPU Bot: Fast</option>
               <option value="bot-gpu-balanced">GPU Bot: Balanced</option>
               <option value="bot-gpu-expert">GPU Bot: Expert</option>
+              <option value="bot-gpu-custom">GPU Bot: Custom</option>
               <option value="bot-cpu-fast">CPU Bot: Fast</option>
               <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
               <option value="bot-cpu-expert">CPU Bot: Expert</option>
@@ -54,6 +55,7 @@
               <option value="bot-gpu-fast">GPU Bot: Fast</option>
               <option value="bot-gpu-balanced">GPU Bot: Balanced</option>
               <option value="bot-gpu-expert">GPU Bot: Expert</option>
+              <option value="bot-gpu-custom">GPU Bot: Custom</option>
               <option value="bot-cpu-fast">CPU Bot: Fast</option>
               <option value="bot-cpu-balanced">CPU Bot: Balanced</option>
               <option value="bot-cpu-expert">CPU Bot: Expert</option>
@@ -128,6 +130,47 @@
         <div class="custom-cpu-actions">
           <button class="custom-cpu-button custom-cpu-button-primary" id="save-custom-cpu" type="button">Save settings</button>
           <button class="custom-cpu-button custom-cpu-button-secondary" id="reset-custom-cpu" type="button">Reset defaults</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-overlay" id="custom-gpu-modal" hidden>
+      <section class="custom-cpu custom-cpu-modal-panel" id="custom-gpu-panel" aria-label="Custom GPU bot difficulty">
+        <header class="training-modal-header">
+          <div>
+            <p class="eyebrow">Custom GPU Bot</p>
+            <h2>GPU search settings</h2>
+          </div>
+          <button class="custom-cpu-close" id="close-custom-gpu" type="button" aria-label="Close custom GPU settings" title="Close">&times;</button>
+        </header>
+        <p class="field-help field-help-wide">Tune the WebGPU search budget. Minimum depth is completed even after the nominal time budget expires.</p>
+        <label>
+          Depth
+          <input id="custom-gpu-depth" type="number" min="1" max="16" step="1" value="4"
+            aria-describedby="custom-gpu-depth-help">
+          <span id="custom-gpu-depth-help" class="field-help">Maximum iterative search depth.</span>
+        </label>
+        <label>
+          Minimum depth
+          <input id="custom-gpu-min-depth" type="number" min="1" max="16" step="1" value="2"
+            aria-describedby="custom-gpu-min-depth-help">
+          <span id="custom-gpu-min-depth-help" class="field-help">Depth completed before the time limit may stop the search.</span>
+        </label>
+        <label>
+          Nodes
+          <input id="custom-gpu-nodes" type="number" min="1" max="1000000" step="1000" value="80000"
+            aria-describedby="custom-gpu-nodes-help">
+          <span id="custom-gpu-nodes-help" class="field-help">Candidate work budget used by each GPU search depth.</span>
+        </label>
+        <label>
+          Time ms
+          <input id="custom-gpu-time-ms" type="number" min="1" max="600000" step="1000" value="50000"
+            aria-describedby="custom-gpu-time-help">
+          <span id="custom-gpu-time-help" class="field-help">Nominal wall-clock budget per turn. A completed legal plan is retained when time expires.</span>
+        </label>
+        <div class="custom-cpu-actions">
+          <button class="custom-cpu-button custom-cpu-button-primary" id="save-custom-gpu" type="button">Save settings</button>
+          <button class="custom-cpu-button custom-cpu-button-secondary" id="reset-custom-gpu" type="button">Reset defaults</button>
         </div>
       </section>
     </div>

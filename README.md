@@ -117,6 +117,23 @@ npm --prefix web test
 npm --prefix web run build
 ```
 
+GPU frontier validation needs a real WebGPU browser in addition to the static
+shader and TypeScript checks. With the app already served, run:
+
+```sh
+CHRONOFISH_BROWSER=/path/to/chrome npm --prefix web run gpu:smoke -- --url http://localhost:5173
+```
+
+The smoke harness runs one-, three-, and five-board full GPU searches through
+`ai-worker.js` and requires the returned turns to pass the worker's WASM replay
+validation with one frontier readback. It also runs tactical branch, capture,
+castling, en-passant, promotion, terminal-pressure, stale-generation,
+device-loss/rebuild, and median latency gates by default: full resident frontier
+search must be no more than 10% slower on the one-board fixture and at least 2x
+faster on the three- and five-board fixtures than the legacy hybrid GPU path.
+Use `--skip-performance-gates` for a legality-only browser smoke run while
+debugging.
+
 ## Playing
 
 The frontend starts in a lobby. A game can be configured as:
@@ -155,8 +172,10 @@ stays limited to the WASM C ABI and native training entrypoint:
   strategic features;
 - `engine/models/cpu-v1/parameters.json` contains the active CPU heuristic
   evaluation weights, and `/ai/parameters.json` serves that same file;
-- `engine/models/cpu-v1/effort.json` contains the shared CPU/GPU bot effort
-  presets, and `/ai/effort.json` serves them to the frontend;
+- `engine/models/cpu-v1/effort.json` contains CPU bot effort presets and is
+  served at `/ai/effort.json`;
+- `engine/models/gpu-v1/effort.json` contains GPU bot effort presets and is
+  served at `/ai/gpu-effort.json`;
 - `wasm_api.rs` exposes the C ABI consumed by the frontend.
 
 The default setup still uses orthodox pieces, but the engine models the variant
@@ -252,8 +271,10 @@ The default output is `flamegraph.svg`.
 
 ## AI Effort Presets
 
-`engine/models/cpu-v1/effort.json` contains runtime bot presets shared by the
-Rust engine and frontend via `/ai/effort.json`.
+`engine/models/cpu-v1/effort.json` contains CPU runtime bot presets shared by
+the Rust engine and frontend via `/ai/effort.json`.
+`engine/models/gpu-v1/effort.json` contains the corresponding GPU presets,
+including minimum depth, and is served via `/ai/gpu-effort.json`.
 
 | Preset | Runtime purpose |
 | --- | --- |

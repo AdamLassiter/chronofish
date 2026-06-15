@@ -51,10 +51,10 @@ fn trainer_loads_global_parameters_and_allows_cli_overrides() {
 
     assert_eq!(config.training_time_ms, 10_000);
     assert_eq!(config.nodes, 20_000);
-    assert_eq!(config.population, auto_population());
-    assert_eq!(config.min_pairs, 6);
-    assert_eq!(config.max_pairs, 24);
-    assert_eq!(config.draw_window, 12);
+    assert_eq!(config.population, 8);
+    assert_eq!(config.min_pairs, 2);
+    assert_eq!(config.max_pairs, 8);
+    assert_eq!(config.draw_window, 4);
     assert_eq!(config.max_generations_without_candidate, 2);
     assert_eq!(config.rounds_per_variant, 3);
     assert_eq!(config.opponent_variants, 5);
@@ -92,11 +92,11 @@ fn training_json_contains_the_global_training_config() {
     let training = load_training_parameters();
     assert_eq!(training.time_ms, 10_000);
     assert_eq!(training.nodes, 20_000);
-    assert_eq!(training.candidates, None);
-    assert_eq!(training.opponent_variants, 4);
+    assert_eq!(training.candidates, Some(8));
+    assert_eq!(training.opponent_variants, 8);
     assert_eq!(training.rounds_per_variant, 1);
-    assert_eq!(training.min_pairs, 6);
-    assert_eq!(training.max_pairs, 24);
+    assert_eq!(training.min_pairs, 2);
+    assert_eq!(training.max_pairs, 8);
 }
 
 #[test]

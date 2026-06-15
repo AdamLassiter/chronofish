@@ -333,8 +333,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     const cpuWorkerMax = Math.max(1, Math.min(navigator.hardwareConcurrency ?? 4, 32));
     return {
       trainingSubject: selectedTrainingTab === "cpu" ? "cpu" : "gpu",
+      // GPU
       trainingTarget: trainingTargetSelect.value,
-      cpuTrainingTarget: cpuTargetSelect.value,
       labelMode: labelModeSelect.value,
       samples: clampNumber(samplesInput.value, 1, caps?.maxSamples ?? 512, caps?.samples ?? 64),
       selfPlayWorkers: clampNumber(selfPlayWorkersInput.value, 1, caps?.maxSelfPlayWorkers ?? 8, caps?.selfPlayWorkers ?? 2),
@@ -352,6 +352,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       patience: clampNumber(patienceInput.value, 1, 64, 12),
       weightDecay: clampNumber(decayInput.value, 0, 0.01, 0.00001),
       labelWorkers: autoTrainingWorkers(),
+      // CPU
+      cpuTrainingTarget: cpuTargetSelect.value,
       cpuDepth: clampNumber(cpuDepthInput.value, 1, 16, 4),
       cpuNodes: clampNumber(cpuNodesInput.value, 1, 131072, 16384),
       cpuTrainingTimeMs: clampNumber(cpuTimeMsInput.value, 1, 600000, 10000),
@@ -425,28 +427,28 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       const maxStorageBinding = limits.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
       const maxBufferSize = limits.maxBufferSize ?? maxStorageBinding;
       const hardwareThreads = navigator.hardwareConcurrency ?? 4;
-      const maxProjectedReplay = clampPowerOfTwo(Math.floor(maxStorageBinding / (2048 * Float32Array.BYTES_PER_ELEMENT)), 512, 65536);
-      const maxBatchByActivation = clampPowerOfTwo(Math.floor(maxStorageBinding / (1024 * Float32Array.BYTES_PER_ELEMENT)), 512, 65536);
+      const maxProjectedReplay = clampPowerOfTwo(Math.floor(maxStorageBinding / (2048 * Float32Array.BYTES_PER_ELEMENT)), 512, 16384);
+      const maxBatchByActivation = clampPowerOfTwo(Math.floor(maxStorageBinding / (1024 * Float32Array.BYTES_PER_ELEMENT)), 512, 16384);
       const highMemory = maxStorageBinding >= 512 * 1024 * 1024 || maxBufferSize >= 1024 * 1024 * 1024;
       const mediumMemory = maxStorageBinding >= 256 * 1024 * 1024 || maxBufferSize >= 512 * 1024 * 1024;
-      const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 64 : 16, hardwareThreads - 1));
+      const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 32 : 8, hardwareThreads - 1));
       const config: TrainingGpuProfileConfig = {
-        maxSamples: highMemory ? 65536 : 16384,
-        samples: highMemory ? 16384 : mediumMemory ? 4096 : 1024,
+        maxSamples: highMemory ? 16384 : 8192,
+        samples: highMemory ? 8192 : mediumMemory ? 4096 : 1024,
         maxSelfPlayWorkers: maxWorkerBudget,
-        selfPlayWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 32 : mediumMemory ? 16 : 8)),
+        selfPlayWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 16 : mediumMemory ? 8 : 4)),
         maxSearchWorkers: maxWorkerBudget,
-        searchWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 32 : mediumMemory ? 16 : 8)),
-        maxNodes: highMemory ? 65536 : 16384,
-        nodes: highMemory ? 16384 : mediumMemory ? 4096 : 1024,
-        maxEpochs: 65536,
-        epochs: highMemory ? 16384 : 4096,
-        maxBuffer: Math.min(maxProjectedReplay, highMemory ? 65536 : 16384),
-        buffer: Math.min(maxProjectedReplay, highMemory ? 16384 : mediumMemory ? 4096 : 1024),
-        maxBatch: Math.min(maxBatchByActivation, highMemory ? 65536 : 16384),
-        batch: Math.min(maxBatchByActivation, highMemory ? 16384 : mediumMemory ? 4096 : 1024),
-        maxValidationInterval: 65536,
-        validationInterval: highMemory ? 16384 : mediumMemory ? 4096 : 1024
+        searchWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 16 : mediumMemory ? 8 : 4)),
+        maxNodes: highMemory ? 16384 : 8192,
+        nodes: highMemory ? 8192 : mediumMemory ? 4096 : 1024,
+        maxEpochs: 16384,
+        epochs: highMemory ? 8192 : 4096,
+        maxBuffer: Math.min(maxProjectedReplay, highMemory ? 16384 : 8192),
+        buffer: Math.min(maxProjectedReplay, highMemory ? 8192 : mediumMemory ? 4096 : 1024),
+        maxBatch: Math.min(maxBatchByActivation, highMemory ? 16384 : 8192),
+        batch: Math.min(maxBatchByActivation, highMemory ? 8192 : mediumMemory ? 4096 : 1024),
+        maxValidationInterval: 16384,
+        validationInterval: highMemory ? 8192 : mediumMemory ? 4096 : 1024
       };
       const info = gpuAdapterName(adapter);
       console.info(`Detected training GPU profile: ${info}`, { limits, config });

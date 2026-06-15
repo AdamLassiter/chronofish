@@ -41,8 +41,10 @@ ENV CHRONOFISH_CPU_MODEL_DIR=/app/engine/models/cpu-v1
 COPY --from=builder /app/target/release/chronofish-server /usr/local/bin/chronofish-server
 COPY --from=builder /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm
 COPY --from=web-builder /app/web/dist /app/web/dist
-
 RUN mkdir -p /app/engine/models/gpu-v1 /app/engine/models/cpu-v1
+COPY engine/models/gpu-v1/effort.json /app/engine/models/gpu-v1/effort.json
+COPY engine/models/gpu-v1/value-model.cfnn /app/engine/models/gpu-v1/value-model.cfnn
+
 VOLUME ["/app/engine/models/gpu-v1", "/app/engine/models/cpu-v1"]
 
 EXPOSE 5173

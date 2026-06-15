@@ -37,6 +37,10 @@ interface MainEventOptions {
   closeCustomCpuModal(): void;
   applyCustomCpuModal(): void;
   resetCustomCpuModal(): void;
+  openCustomGpuModal(): void;
+  closeCustomGpuModal(): void;
+  applyCustomGpuModal(): void;
+  resetCustomGpuModal(): void;
   writeAssignments(assignments: unknown): void;
   readAssignments(): unknown;
   syncLobby(): void;
@@ -69,6 +73,10 @@ export function wireMainEvents({
   closeCustomCpuModal,
   applyCustomCpuModal,
   resetCustomCpuModal,
+  openCustomGpuModal,
+  closeCustomGpuModal,
+  applyCustomGpuModal,
+  resetCustomGpuModal,
   writeAssignments,
   readAssignments,
   syncLobby
@@ -96,6 +104,10 @@ export function wireMainEvents({
   const closeCustomCpuButton = requireElement(elements.closeCustomCpuButton, "close-custom-cpu");
   const saveCustomCpuButton = requireElement(elements.saveCustomCpuButton, "save-custom-cpu");
   const resetCustomCpuButton = requireElement(elements.resetCustomCpuButton, "reset-custom-cpu");
+  const customGpuModal = requireElement(elements.customGpuModal, "custom-gpu-modal");
+  const closeCustomGpuButton = requireElement(elements.closeCustomGpuButton, "close-custom-gpu");
+  const saveCustomGpuButton = requireElement(elements.saveCustomGpuButton, "save-custom-gpu");
+  const resetCustomGpuButton = requireElement(elements.resetCustomGpuButton, "reset-custom-gpu");
 
   resetButton.addEventListener("click", () => {
     if (!getEngine()) {
@@ -204,8 +216,17 @@ export function wireMainEvents({
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !trainingModal.hidden) {
+    if (event.key !== "Escape") {
+      return;
+    }
+    if (!trainingModal.hidden) {
       training.closeModal();
+    }
+    if (!customCpuModal.hidden) {
+      closeCustomCpuModal();
+    }
+    if (!customGpuModal.hidden) {
+      closeCustomGpuModal();
     }
   });
 
@@ -259,6 +280,24 @@ export function wireMainEvents({
     }
   });
 
+  closeCustomGpuButton.addEventListener("click", () => {
+    closeCustomGpuModal();
+  });
+
+  saveCustomGpuButton.addEventListener("click", () => {
+    applyCustomGpuModal();
+  });
+
+  resetCustomGpuButton.addEventListener("click", () => {
+    resetCustomGpuModal();
+  });
+
+  customGpuModal.addEventListener("click", (event) => {
+    if (event.target === customGpuModal) {
+      closeCustomGpuModal();
+    }
+  });
+
   for (const select of [whitePlayerSelect, blackPlayerSelect]) {
     select.addEventListener("change", () => {
       writeAssignments(readAssignments());
@@ -266,6 +305,9 @@ export function wireMainEvents({
       syncLobby();
       if (select.value === "bot-cpu-custom") {
         openCustomCpuModal();
+      }
+      if (select.value === "bot-gpu-custom") {
+        openCustomGpuModal();
       }
     });
   }

@@ -1,7 +1,12 @@
-import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_OK, GPU_MUTATION_STATUS_ROYAL_CAPTURE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE, GPU_TURN_STATUS_RECORD_STRIDE } from "./ai-layout.js";
+import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_OK, GPU_MUTATION_STATUS_ROYAL_CAPTURE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET, GPU_FRONTIER_HEADER_DEPTH, GPU_FRONTIER_HEADER_PLAN_LENGTH, GPU_FRONTIER_HEADER_SCORE, GPU_FRONTIER_MAX_PLAN_MOVES, GPU_FRONTIER_MOVE_STRIDE, GPU_FRONTIER_PLAN_OFFSET } from "./ai-layout.js";
 import { readGpuSnapshot, buildGpuCandidateInputsFromSnapshot, snapshotWithGpuChildBoards, originForGpuChild, gpuMutationBoardRecordToSnapshot, gpuSnapshotToGame, gpuBoardToGameBoard, squaresToGameBoard, pieceFromCode, buildGpuCandidateInputs, squareCodesForBoard, pushGpuBoardRecord, pushGpuMutationBoardRecord, colorFromCode, ownerCode, moveFromCandidateRecord, oppositeColor, sortedTimelines, latestBoard, presentTimeForSnapshot, capitalize, pieceTypeCode, pieceTypeFromCode, colorCode } from "./ai-snapshot.js";
 import { GPU_TURN_STATUS_SHADER, GPU_MOVEGEN_SHADER, GPU_REPLY_SHADER, GPU_MUTATE_SHADER } from "./ai-shaders.js";
-import type { Color, GameSnapshot, Move, Piece, Position, Timeline } from "./types.js";
+import { autotuneFrontier, encodeFrontierRoot, frontierStateBytes, frontierStateStride, FrontierGpuPipeline } from "./ai-frontier.js";
+import type { FrontierBufferSet, FrontierTuning } from "./ai-frontier.js";
+import { FrontierNeuralEvaluator } from "./ai-frontier-neural.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
+import { readWasmString, writeWasmString } from "./engine-io.js";
+import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, Position, Timeline } from "./types.js";
 import type { GpuCandidateInputs, GpuSnapshot, GpuTimeline } from "./ai-snapshot.js";
 
 interface GpuBufferUsageConstants {
@@ -88,8 +93,27 @@ interface SearchResult {
   gpuTerminal?: boolean | undefined;
   gpuSnapshot?: string | undefined;
   gpuSearch?: string | undefined;
+  gpuDiagnostics?: GpuSearchDiagnostics | undefined;
+  authoritativeReplay?: boolean | undefined;
   incompleteMoves?: Move[] | undefined;
   pendingPresentBoardCount?: number | undefined;
+}
+
+interface GpuSearchDiagnostics {
+  frontierWidth?: number;
+  candidateCapacity?: number;
+  maxBoards?: number;
+  dispatchCandidateLimit?: number;
+  cycles?: number;
+  completedDepth?: number;
+  readbacks?: number;
+  candidateOverflow?: number;
+  model?: "neural" | "heuristic";
+  latencyMs?: number;
+  nodesPerSecond?: number;
+  candidateWorkgroupSize?: number;
+  mutationTileSize?: number;
+  neuralBatchSize?: number;
 }
 
 interface ReplySearchResult {
@@ -104,7 +128,7 @@ interface LegalTargetSelection {
 
 interface WorkerRequest {
   id: number | string;
-  type?: "search" | "legalTargets" | "applyMove" | "submitTurn";
+  type?: "search" | "legalTargets" | "applyMove" | "submitTurn" | "debugLoseDevice";
   game?: GameSnapshot;
   position?: Position;
   move?: Move;
@@ -124,6 +148,9 @@ interface WorkerRequest {
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
 const pipelineCache = new Map<string, GPUComputePipeline>();
+let frontierRuntime: { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } | null = null;
+let validationEnginePromise: Promise<ChronofishEngine> | null = null;
+let activeSearchGeneration = 0;
 
 async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshotOverride = null, temperature = 0, randomSeed = 0 }: GpuSearchOptions): Promise<SearchResult | null> {
   if (!navigator.gpu) {
@@ -134,23 +161,28 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
   if (!snapshot) {
     return null;
   }
-  const candidates = buildGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
-  if (candidates.sourceCount === 0 || candidates.targetCount === 0) {
-    return null;
-  }
 
   const device = await getGpuDevice();
   if (!device) {
     return null;
   }
   const turnStatus = await turnStatusOnGpu(device, snapshot);
-  if (gpuMode === "full" && turnStatus.pendingPresentBoardCount === 1) {
+  const pendingBoards = pendingPresentBoardsForSnapshot(snapshot, snapshot.turn);
+  if (gpuMode === "full") {
     try {
-      const result = await tryFullGpuSearch(device, snapshot, candidates, { requestedDepth, nodes: nodes ?? 64, turnStatus, temperature, randomSeed });
-      return completeGpuResultTurn(device, snapshot, result, { nodes: nodes ?? 64, temperature, randomSeed });
+      return await tryGpuResidentFrontierSearch(device, snapshot, {
+        requestedDepth,
+        nodes: nodes ?? 64,
+        temperature,
+        randomSeed
+      });
     } catch (error) {
       console.warn("Full GPU search failed; falling back to hybrid GPU search.", error);
     }
+  }
+  const candidates = buildGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
+  if (candidates.sourceCount === 0 || candidates.targetCount === 0) {
+    return null;
   }
   const scored = await scoreCandidatesOnGpu(device, candidates, snapshot.turn);
   let ranked = Array.from(scored.scores, (score, index) => ({
@@ -158,7 +190,7 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
     index,
     score: score ?? -2147483647
   }))
-    .filter((entry) => entry.score > -2147480000)
+    .filter((entry) => entry.score > -2147480000 && moveStartsOnPendingBoard(entry.move, pendingBoards))
     .sort((left, right) => right.score - left.score)
     .slice(0, Math.min(128, Math.max(16, nodes ?? 64)));
 
@@ -200,6 +232,269 @@ async function tryGpuSearch({ depth, nodes, timeMs, gpuMode = "hybrid", snapshot
   return null;
 }
 
+async function tryGpuResidentFrontierSearch(
+  device: GPUDevice,
+  snapshot: GpuSnapshot,
+  { requestedDepth, nodes, temperature, randomSeed }: { requestedDepth: number; nodes: number; temperature: number; randomSeed: number }
+): Promise<SearchResult> {
+  const boardCount = snapshot.timelines.reduce((sum, timeline) => sum + timeline.boards.length, 0);
+  const adapter = cachedGpuAdapter;
+  if (!adapter) {
+    throw new Error("GPU frontier search has no adapter for tuning.");
+  }
+  const tuning = await autotuneFrontier(adapter, device, nodes, boardCount, "gpu-v1-cfnn-v1");
+  const runtime = frontierRuntimeFor(device, tuning);
+  const buffers = runtime.pipeline.pool.createSearchBuffers();
+  const root = encodeFrontierRoot(snapshot, tuning.maxBoards);
+  const startedAt = performance.now();
+  const initialize = device.createCommandEncoder();
+  initialize.clearBuffer(buffers.states);
+  initialize.clearBuffer(buffers.nextStates);
+  initialize.clearBuffer(buffers.counters);
+  device.queue.submit([initialize.finish()]);
+  runtime.pipeline.uploadRoot(buffers, root);
+
+  const rootColor = colorCode(snapshot.turn);
+  const maxCycles = Math.min(GPU_FRONTIER_MAX_PLAN_MOVES, Math.max(requestedDepth * Math.max(2, snapshot.timelines.length + 2), requestedDepth + 1));
+  let modelUsed = false;
+  let cyclesCompleted = 0;
+  try {
+    for (let cycle = 0; cycle < maxCycles; cycle += 1) {
+      if (cycle > 0 && Date.now() >= gpuDeadlineAt) {
+        break;
+      }
+      const encoder = device.createCommandEncoder();
+      await runtime.pipeline.encodeExpansionCycle(encoder, buffers, {
+        rootColor,
+        targetDepth: requestedDepth,
+        cycleIndex: cycle,
+        perParentLimit: Math.max(2, Math.min(16, Math.ceil(tuning.frontierWidth / 8)))
+      });
+      modelUsed = await runtime.neural.encode(
+        encoder,
+        buffers.nextStates,
+        buffers.summaries,
+        tuning.frontierWidth,
+        frontierStateStride(tuning.maxBoards),
+        GPU_FRONTIER_BOARD_OFFSET,
+        tuning.maxBoards,
+        rootColor,
+        tuning.neuralBatchSize
+      );
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      runtime.pipeline.releaseCycleTemporaries();
+      runtime.neural.releaseTemporaries();
+      runtime.pipeline.swapFrontiers(buffers);
+      cyclesCompleted += 1;
+    }
+
+    const reduction = device.createCommandEncoder();
+    await runtime.pipeline.encodeMinimax(reduction, buffers, requestedDepth);
+    device.queue.submit([reduction.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    runtime.pipeline.releaseCycleTemporaries();
+
+    const readback = await readFrontierOnce(device, buffers, tuning);
+    if (readback.candidateOverflow) {
+      throw new Error("GPU frontier candidate capacity overflowed before completing search.");
+    }
+    const gpuSearch = modelUsed ? "neural-frontier" : "heuristic-frontier";
+    const choices = await validatedFrontierChoices(snapshot, readback.states, tuning, requestedDepth, gpuSearch);
+    const selected = selectSearchCandidate(choices, temperature, randomSeed);
+    if (!selected) {
+      throw new Error("GPU frontier produced no authoritative legal turn.");
+    }
+    const latencyMs = Math.max(0, performance.now() - startedAt);
+    return {
+      ...selected,
+      status: "ok",
+      gpu: true,
+      gpuMode: "full",
+      gpuSnapshot: snapshot.format,
+      gpuSearch,
+      nodes: readback.nodes,
+      gpuDiagnostics: {
+        frontierWidth: tuning.frontierWidth,
+        candidateCapacity: tuning.candidateCapacity,
+        maxBoards: tuning.maxBoards,
+        dispatchCandidateLimit: tuning.dispatchCandidateLimit,
+        cycles: cyclesCompleted,
+        completedDepth: selected.depth ?? 0,
+        readbacks: 1,
+        candidateOverflow: readback.candidateOverflow ? 1 : 0,
+        model: modelUsed ? "neural" : "heuristic",
+        latencyMs: Math.round(latencyMs),
+        nodesPerSecond: latencyMs > 0 ? Math.round((readback.nodes * 1000) / latencyMs) : readback.nodes,
+        candidateWorkgroupSize: tuning.candidateWorkgroupSize,
+        mutationTileSize: tuning.mutationTileSize,
+        neuralBatchSize: tuning.neuralBatchSize
+      },
+      choices: selected.choices
+    };
+  } finally {
+    runtime.pipeline.pool.releaseSearchBuffers(buffers);
+    runtime.pipeline.releaseCycleTemporaries();
+    runtime.neural.releaseTemporaries();
+  }
+}
+
+function frontierRuntimeFor(device: GPUDevice, tuning: FrontierTuning): { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } {
+  if (frontierRuntime?.device === device
+    && frontierRuntime.pipeline.tuning.maxBoards === tuning.maxBoards
+    && frontierRuntime.pipeline.tuning.frontierWidth === tuning.frontierWidth
+    && frontierRuntime.pipeline.tuning.candidateCapacity === tuning.candidateCapacity) {
+    return frontierRuntime;
+  }
+  frontierRuntime?.pipeline.destroy();
+  frontierRuntime?.neural.destroy();
+  frontierRuntime = {
+    device,
+    pipeline: new FrontierGpuPipeline(device, tuning),
+    neural: new FrontierNeuralEvaluator(device)
+  };
+  return frontierRuntime;
+}
+
+async function readFrontierOnce(
+  device: GPUDevice,
+  buffers: FrontierBufferSet,
+  tuning: FrontierTuning
+): Promise<{ states: Int32Array; nodes: number; candidateOverflow: boolean }> {
+  const stateByteLength = frontierStateBytes(tuning.maxBoards) * tuning.frontierWidth;
+  const counterByteLength = 16;
+  const staging = device.createBuffer({
+    size: align4(stateByteLength + counterByteLength),
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffers.states, 0, staging, 0, stateByteLength);
+  encoder.copyBufferToBuffer(buffers.counters, 0, staging, stateByteLength, counterByteLength);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const bytes = staging.getMappedRange();
+  const states = new Int32Array(bytes.slice(0, stateByteLength));
+  const counters = new Uint32Array(bytes.slice(stateByteLength, stateByteLength + counterByteLength));
+  staging.unmap();
+  staging.destroy();
+  return { states, nodes: counters[3] ?? 0, candidateOverflow: (counters[2] ?? 0) !== 0 };
+}
+
+async function validatedFrontierChoices(
+  snapshot: GpuSnapshot,
+  states: Int32Array,
+  tuning: FrontierTuning,
+  requestedDepth: number,
+  gpuSearch: string
+): Promise<SearchResult[]> {
+  const stride = frontierStateStride(tuning.maxBoards);
+  const ranked = Array.from({ length: tuning.frontierWidth }, (_, index) => {
+    const base = index * stride;
+    return {
+      index,
+      depth: states[base + GPU_FRONTIER_HEADER_DEPTH] ?? 0,
+      score: states[base + GPU_FRONTIER_HEADER_SCORE] ?? -2147483647,
+      planLength: Math.min(GPU_FRONTIER_MAX_PLAN_MOVES, Math.max(0, states[base + GPU_FRONTIER_HEADER_PLAN_LENGTH] ?? 0))
+    };
+  })
+    .filter((entry) => entry.planLength > 0 && entry.depth > 0)
+    .sort((left, right) => right.depth - left.depth || right.score - left.score || left.index - right.index);
+
+  const choices: SearchResult[] = [];
+  const seen = new Set<string>();
+  for (const entry of ranked) {
+    const base = entry.index * stride + GPU_FRONTIER_PLAN_OFFSET;
+    const plan: Move[] = [];
+    for (let moveIndex = 0; moveIndex < entry.planLength; moveIndex += 1) {
+      const offset = base + moveIndex * GPU_FRONTIER_MOVE_STRIDE;
+      plan.push(moveFromFrontierWords(states, offset));
+    }
+    const moves = await validateFirstFrontierTurn(snapshot, plan);
+    const key = turnPlanKey(moves);
+    if (!moves.length || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    choices.push({
+      status: "ok",
+      moves,
+      score: entry.score,
+      depth: Math.min(requestedDepth, entry.depth),
+      principalVariation: [moves],
+      gpu: true,
+      gpuMode: "full",
+      gpuSearch
+    });
+    if (choices.length >= 12) {
+      break;
+    }
+  }
+  return choices;
+}
+
+function moveFromFrontierWords(words: Int32Array, offset: number): Move {
+  return {
+    from: { timelineId: words[offset] ?? 0, time: words[offset + 1] ?? 0, x: words[offset + 2] ?? 0, y: words[offset + 3] ?? 0 },
+    to: { timelineId: words[offset + 4] ?? 0, time: words[offset + 5] ?? 0, x: words[offset + 6] ?? 0, y: words[offset + 7] ?? 0 }
+  };
+}
+
+async function validateFirstFrontierTurn(snapshot: GpuSnapshot, plan: Move[]): Promise<Move[]> {
+  const engine = await validationEngine();
+  loadValidationSnapshot(engine, gpuSnapshotToGame(snapshot));
+  const moves: Move[] = [];
+  for (const move of plan) {
+    if (!engine.chronofish_apply_move(
+      move.from.timelineId, move.from.time, move.from.x, move.from.y,
+      move.to.timelineId, move.to.time, move.to.x, move.to.y
+    )) {
+      return [];
+    }
+    moves.push(move);
+    if (engine.chronofish_submit_turn()) {
+      return moves;
+    }
+  }
+  return [];
+}
+
+async function validateSearchResultBeforePost(snapshot: GpuSnapshot, result: SearchResult): Promise<SearchResult | null> {
+  const engine = await validationEngine();
+  loadValidationSnapshot(engine, gpuSnapshotToGame(snapshot));
+  for (let index = 0; index < result.moves.length; index += 1) {
+    const move = result.moves[index]!;
+    if (!engine.chronofish_apply_move(
+      move.from.timelineId, move.from.time, move.from.x, move.from.y,
+      move.to.timelineId, move.to.time, move.to.x, move.to.y
+    )) {
+      return null;
+    }
+    if (engine.chronofish_submit_turn()) {
+      return index === result.moves.length - 1
+        ? { ...result, authoritativeReplay: true }
+        : null;
+    }
+  }
+  return null;
+}
+
+async function validationEngine(): Promise<ChronofishEngine> {
+  validationEnginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
+    .then((instance) => instance.exports as unknown as ChronofishEngine);
+  return validationEnginePromise;
+}
+
+function loadValidationSnapshot(engine: ChronofishEngine, game: GameSnapshot): void {
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(game));
+  try {
+    if (!engine.chronofish_load_snapshot_json(ptr, len)) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
 async function searchSingleMoveRepliesOnGpu(
   device: GPUDevice,
   snapshot: GpuSnapshot,
@@ -216,8 +511,8 @@ async function searchSingleMoveRepliesOnGpu(
     if (entry.mutationStatus !== GPU_MUTATION_STATUS_ROYAL_CAPTURE && entry.mutationStatus !== GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE) {
       const childSnapshot = snapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
       const reply = await bestReplyOnGpu(device, childSnapshot, nodes);
-      score -= reply.score;
       if (reply.move) {
+        score -= reply.score;
         principalVariation = [[entry.move], [reply.move]];
       }
     }
@@ -283,7 +578,7 @@ async function completeGpuResultTurn(
       index,
       score: score ?? -2147483647
     }))
-      .filter((entry) => entry.score > -2147480000)
+      .filter((entry) => entry.score > -2147480000 && moveStartsOnPendingBoard(entry.move, pendingBoards))
       .sort((left, right) => right.score - left.score)
       .slice(0, Math.min(128, Math.max(16, nodes ?? 64)));
     if (ranked.length === 0) {
@@ -316,6 +611,13 @@ async function completeGpuResultTurn(
   const finalStatus = await turnStatusOnGpu(device, { ...current, turn: rootTurn });
   const finalPendingBoards = pendingPresentBoardsForSnapshot(current, rootTurn);
   if (finalPendingBoards.length > 0 || (!finalStatus.complete && finalStatus.pendingPresentBoardCount > 0)) {
+    const fallback = await findCompleteGpuTurn(device, snapshot, rootTurn, nodes ?? 64);
+    if (fallback) {
+      return withCompletedTurnChoice({
+        ...result,
+        nodes: (result.nodes ?? 0) + extraNodes + fallback.nodes
+      }, fallback.moves, `${result.gpuSearch ?? "gpu"}-turn-fallback`);
+    }
     return {
       status: "incompleteTurn",
       moves: [],
@@ -327,11 +629,7 @@ async function completeGpuResultTurn(
       gpuSearch: `${result.gpuSearch ?? "gpu"}-turn-incomplete`,
       incompleteMoves: moves,
       pendingPresentBoardCount: Math.max(finalStatus.pendingPresentBoardCount ?? 0, finalPendingBoards.length),
-      choices: summarizeSearchChoices([{
-        ...result,
-        moves,
-        gpuSearch: `${result.gpuSearch ?? "gpu"}-turn-incomplete`
-      }])
+      choices: []
     };
   }
 
@@ -426,6 +724,86 @@ function pendingPresentBoardsForSnapshot(snapshot: GpuSnapshot, color: Color): A
     }
   }
   return pending;
+}
+
+function moveStartsOnPendingBoard(
+  move: Move,
+  pendingBoards: Array<{ timeline: GpuTimeline | Timeline; board: { time: number } }>
+): boolean {
+  return pendingBoards.some(({ timeline, board }) =>
+    timeline.id === move.from.timelineId && board.time === move.from.time
+  );
+}
+
+async function findCompleteGpuTurn(
+  device: GPUDevice,
+  snapshot: GpuSnapshot,
+  rootTurn: Color,
+  nodes: number,
+  moves: Move[] = [],
+  visited = new Set<string>()
+): Promise<{ moves: Move[]; nodes: number } | null> {
+  if (snapshot.royalCaptureBy) {
+    return { moves, nodes: 0 };
+  }
+  const pendingBoards = pendingPresentBoardsForSnapshot(snapshot, rootTurn);
+  const status = await turnStatusOnGpu(device, { ...snapshot, turn: rootTurn });
+  if (pendingBoards.length === 0 && (status.complete || status.pendingPresentBoardCount === 0)) {
+    return { moves, nodes: 0 };
+  }
+  const maxMoves = Math.max(1, snapshot.timelines.length + 4);
+  if (moves.length >= maxMoves) {
+    return null;
+  }
+
+  const stateKey = gpuTurnCompletionKey(snapshot, rootTurn);
+  if (visited.has(stateKey)) {
+    return null;
+  }
+  const nextVisited = new Set(visited);
+  nextVisited.add(stateKey);
+
+  const stepSnapshot = { ...snapshot, turn: rootTurn };
+  const inputs = buildGpuCandidateInputsFromSnapshot(stepSnapshot, rootTurn);
+  if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
+    return null;
+  }
+  const scored = await scoreCandidatesOnGpu(device, inputs, rootTurn);
+  const ranked = Array.from(scored.scores, (score, index) => ({
+    move: moveFromCandidateRecord(scored.records, index),
+    index,
+    score: score ?? -2147483647
+  }))
+    .filter((entry) => entry.score > -2147480000 && moveStartsOnPendingBoard(entry.move, pendingBoards))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, Math.min(12, Math.max(4, nodes)));
+  const mutated = await mutateRankedCandidatesOnGpu(device, inputs, scored.records, ranked, { readChildren: true });
+  const supported = mutated.filter(hasSupportedChildBoards);
+  for (const candidate of supported) {
+    const child = snapshotWithGpuChildBoards(stepSnapshot, candidate.childBoards, candidate.mutationStatus, {
+      move: candidate.move,
+      advanceTurn: true
+    });
+    const completed = await findCompleteGpuTurn(
+      device,
+      child,
+      rootTurn,
+      nodes,
+      [...moves, candidate.move],
+      nextVisited
+    );
+    if (completed) {
+      return { moves: completed.moves, nodes: supported.length + completed.nodes };
+    }
+  }
+  return null;
+}
+
+function gpuTurnCompletionKey(snapshot: GpuSnapshot, rootTurn: Color): string {
+  return pendingPresentBoardsForSnapshot(snapshot, rootTurn)
+    .map(({ timeline, board }) => `${timeline.id}:${board.time}`)
+    .sort()
+    .join("|");
 }
 
 function activePresentTimeForSnapshot(snapshot: GpuSnapshot): number | null {
@@ -749,16 +1127,18 @@ async function bestReplyOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: n
     return { score: 0 };
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
+  const pendingBoards = pendingPresentBoardsForSnapshot(snapshot, snapshot.turn);
   let best = -2147483647;
   let bestMove: Move | undefined;
   for (let index = 0; index < scored.scores.length; index += 1) {
     const score = scored.scores[index] ?? -2147483647;
-    if (score > best) {
+    const move = moveFromCandidateRecord(scored.records, index);
+    if (score > -2147480000 && score > best && moveStartsOnPendingBoard(move, pendingBoards)) {
       best = score;
-      bestMove = moveFromCandidateRecord(scored.records, index);
+      bestMove = move;
     }
   }
-  return { score: best, move: bestMove };
+  return bestMove ? { score: best, move: bestMove } : { score: 0 };
 }
 
 function selectSearchCandidate<T extends SearchChoice>(candidates: T[], temperature = 0, randomSeed = 0): (T & { choices: SearchChoice[] }) | null {
@@ -1072,25 +1452,52 @@ async function getGpuDevice(): Promise<GPUDevice | null> {
   }
   cachedGpuDevice = await requestHighLimitDevice(cachedGpuAdapter);
   cachedGpuDevice.lost?.then(() => {
+    frontierRuntime?.pipeline.destroy();
+    frontierRuntime?.neural.destroy();
+    frontierRuntime = null;
     cachedGpuDevice = null;
     pipelineCache.clear();
   });
   return cachedGpuDevice;
 }
 
+async function destroyCachedGpuDeviceForSmoke(): Promise<boolean> {
+  const device = cachedGpuDevice;
+  if (!device) {
+    return false;
+  }
+  device.destroy();
+  try {
+    await device.lost;
+  } catch {
+    // Browser implementations should resolve GPUDevice.lost, but the smoke
+    // path still needs to force the same cleanup if an implementation differs.
+  }
+  frontierRuntime?.pipeline.destroy();
+  frontierRuntime?.neural.destroy();
+  frontierRuntime = null;
+  cachedGpuDevice = null;
+  pipelineCache.clear();
+  return true;
+}
+
 async function requestHighLimitDevice(adapter: GPUAdapter): Promise<GPUDevice> {
   const requiredLimits: Record<string, number> = {};
+  const requiredFeatures: GPUFeatureName[] = [];
   for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"] as const) {
     const value = adapter.limits[key];
     if (Number.isFinite(value) && value > 0) {
       requiredLimits[key] = value;
     }
   }
-  if (Object.keys(requiredLimits).length === 0) {
+  if (adapter.features?.has("timestamp-query" as GPUFeatureName)) {
+    requiredFeatures.push("timestamp-query" as GPUFeatureName);
+  }
+  if (Object.keys(requiredLimits).length === 0 && requiredFeatures.length === 0) {
     return adapter.requestDevice();
   }
   try {
-    return await adapter.requestDevice({ requiredLimits });
+    return await adapter.requestDevice({ requiredLimits, requiredFeatures });
   } catch {
     return adapter.requestDevice();
   }
@@ -1163,8 +1570,15 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     randomSeed = 0,
     gpuMode = "hybrid"
   } = event.data;
+  const searchGeneration = type === "search" ? ++activeSearchGeneration : activeSearchGeneration;
 
   try {
+    if (type === "debugLoseDevice") {
+      const hadDevice = await destroyCachedGpuDeviceForSmoke();
+      self.postMessage({ id, ok: true, lostDevice: hadDevice });
+      return;
+    }
+
     const snapshotOverride = clientGame ? { ...clientGame, format: "json" } : null;
     if (!snapshotOverride) {
       throw new Error("GPU worker calculations require a client game snapshot.");
@@ -1199,7 +1613,14 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     try {
       const gpuResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode, snapshotOverride, temperature, randomSeed });
       if (isPostableSearchResult(gpuResult)) {
-        self.postMessage({ id, ok: true, result: gpuResult, partitionIndex: partitionIndex ?? 0 });
+        const validatedResult = await validateSearchResultBeforePost(snapshotOverride, gpuResult);
+        if (!validatedResult) {
+          throw new Error("GPU search produced a turn that failed authoritative WASM replay.");
+        }
+        if (searchGeneration !== activeSearchGeneration) {
+          return;
+        }
+        self.postMessage({ id, ok: true, result: validatedResult, partitionIndex: partitionIndex ?? 0 });
         return;
       }
     } catch (gpuError) {
@@ -1208,7 +1629,14 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         try {
           const hybridResult = await tryGpuSearch({ depth, nodes, timeMs: searchTimeMs, gpuMode: "hybrid", snapshotOverride, temperature, randomSeed });
           if (isPostableSearchResult(hybridResult)) {
-            self.postMessage({ id, ok: true, result: hybridResult, partitionIndex: partitionIndex ?? 0 });
+            const validatedResult = await validateSearchResultBeforePost(snapshotOverride, hybridResult);
+            if (!validatedResult) {
+              throw new Error("Hybrid GPU search produced a turn that failed authoritative WASM replay.", { cause: gpuError });
+            }
+            if (searchGeneration !== activeSearchGeneration) {
+              return;
+            }
+            self.postMessage({ id, ok: true, result: validatedResult, partitionIndex: partitionIndex ?? 0 });
             return;
           }
         } catch (hybridError) {
@@ -1220,15 +1648,15 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
 
     throw new Error("GPU search did not produce a legal turn.");
   } catch (error) {
+    if (type === "search" && searchGeneration !== activeSearchGeneration) {
+      return;
+    }
     self.postMessage({ id, ok: false, error: errorMessage(error), partitionIndex: partitionIndex ?? 0 });
   }
 });
 
 function isPostableSearchResult(result: SearchResult | null): result is SearchResult {
-  return Boolean(
-    (result?.status === "ok" && result.moves?.length)
-    || result?.status === "incompleteTurn"
-  );
+  return Boolean(result?.status === "ok" && result.moves?.length);
 }
 
 function errorMessage(error: unknown): string {

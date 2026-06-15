@@ -12,8 +12,9 @@ struct Params {
 @group(0) @binding(4) var<uniform> params: Params;
 @group(0) @binding(5) var<storage, read> boards: array<i32>;
 
-const BOARD_STRIDE: u32 = 69u;
-const BOARD_SQUARE_OFFSET: u32 = 5u;
+const BOARD_STRIDE: u32 = 73u;
+const BOARD_EP: u32 = 5u;
+const BOARD_SQUARE_OFFSET: u32 = 9u;
 const SOURCE_STRIDE: u32 = 10u;
 const TARGET_STRIDE: u32 = 10u;
 
@@ -112,7 +113,7 @@ fn royal_move_penalty(piece_type: i32, target_piece: i32) -> i32 {
   return 0;
 }
 
-fn legal_shape(piece_type: i32, color: i32, from_y: i32, dx: i32, dy: i32, dt: i32, dl: i32, same_board: bool, target_piece: i32, target_color: i32, castling: i32) -> bool {
+fn legal_shape(piece_type: i32, color: i32, from_y: i32, to_x: i32, to_y: i32, dx: i32, dy: i32, dt: i32, dl: i32, same_board: bool, target_piece: i32, target_color: i32, castling: i32, ep_x: i32, ep_y: i32) -> bool {
   let ax = abs_i32(dx);
   let ay = abs_i32(dy);
   let at = abs_i32(dt);
@@ -141,6 +142,7 @@ fn legal_shape(piece_type: i32, color: i32, from_y: i32, dx: i32, dy: i32, dt: i
     if (same_board && dx == 0 && dy == forward && target_piece == 0) { return true; }
     if (same_board && dx == 0 && dy == forward * 2 && !has_moved && target_piece == 0) { return true; }
     if (same_board && ax == 1 && dy == forward && target_piece != 0 && target_color != color) { return true; }
+    if (same_board && ax == 1 && dy == forward && target_piece == 0 && ep_x == to_x && ep_y == to_y) { return true; }
     if (!same_board && dx == 0 && dy == 0 && dt == 0 && (dl == timeline_forward || (dl == timeline_forward * 2 && !has_moved)) && target_piece == 0) { return true; }
     return at == 1 && dl == timeline_forward && dx == 0 && dy == 0 && target_piece != 0 && target_color != color;
   }
@@ -150,6 +152,7 @@ fn legal_shape(piece_type: i32, color: i32, from_y: i32, dx: i32, dy: i32, dt: i
     }
     if (same_board && dx == 0 && dy == forward && target_piece == 0) { return true; }
     if (same_board && dx == 0 && dy == forward * 2 && !has_moved && target_piece == 0) { return true; }
+    if (same_board && ax == 1 && dy == forward && target_piece == 0 && ep_x == to_x && ep_y == to_y) { return true; }
     return !same_board && dx == 0 && dy == 0 && dt == 0 && (dl == timeline_forward || (dl == timeline_forward * 2 && !has_moved)) && target_piece == 0;
   }
   if (piece_type == 6) {
@@ -298,8 +301,13 @@ fn score_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
   let target_latest = targets[target_base + 9u] != 0;
   let source_board_base_i32 = board_base_by_row_time(from_row, from_time);
   var source_castling = 0;
+  var source_ep_x = -1;
+  var source_ep_y = -1;
   if (source_board_base_i32 >= 0) {
-    source_castling = boards[u32(source_board_base_i32) + 4u];
+    let source_board_base = u32(source_board_base_i32);
+    source_castling = boards[source_board_base + 4u];
+    source_ep_x = boards[source_board_base + BOARD_EP];
+    source_ep_y = boards[source_board_base + BOARD_EP + 1u];
   }
   let active_distance = active_distance_from_targets();
   let present = present_time_from_targets(active_distance);
@@ -349,7 +357,7 @@ fn score_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
     scores[index] = -2147483647;
     return;
   }
-  if (!legal_shape(piece_type, color, from_y, dx, dy, dt, dl, same_board, target_piece, target_color, source_castling)) {
+  if (!legal_shape(piece_type, color, from_y, to_x, to_y, dx, dy, dt, dl, same_board, target_piece, target_color, source_castling, source_ep_x, source_ep_y)) {
     scores[index] = -2147483647;
     return;
   }
