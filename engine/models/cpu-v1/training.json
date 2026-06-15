@@ -1,0 +1,20 @@
+{
+  "timeMs": 10000,
+  "nodes": 20000,
+  "candidates": 8,
+  "finalists": 1,
+  "pairBatch": 4,
+  "opponentVariants": 8,
+  "screeningOpponentVariants": 2,
+  "roundsPerVariant": 1,
+  "hallOfFameEntries": 1,
+  "leagueContenders": 2,
+  "leagueHallOfFameEntries": 2,
+  "minPairs": 2,
+  "maxPairs": 8,
+  "drawWindow": 4,
+  "drawRateLimit": 0.8,
+  "maxMatchPlies": 40,
+  "maxMatchTimeMs": 0,
+  "maxGenerationsWithoutCandidate": 2
+}
