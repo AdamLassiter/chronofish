@@ -343,7 +343,7 @@ impl EvaluationLimits {
                 zugzwang_moves_per_board: 4,
                 setup_results: 4,
                 setup_probes: 96,
-                attack_checks: 4_096,
+                attack_checks: 256,
                 deadline: None,
             }
         } else {

@@ -156,6 +156,32 @@ fn incremental_hash_tracks_branch_search_moves() {
 }
 
 #[test]
+fn quiescence_search_restores_position_after_forcing_moves() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0d7pd5",
+    )
+    .expect("notation should create a capture target");
+    let initial_json = game.to_json();
+    let initial_hash = game.position_hash;
+    let weights = EvalWeights::default_tuned();
+    let mut context = SearchContext::new(weights, game.turn, 2_000, None);
+
+    game.quiescence(
+        -CHECKMATE_SCORE * 2,
+        CHECKMATE_SCORE * 2,
+        Color::White,
+        &mut context,
+        1,
+    );
+
+    assert_eq!(game.position_hash, initial_hash);
+    assert_eq!(game.position_hash, game.recompute_position_hash());
+    assert_eq!(game.to_json(), initial_json);
+}
+
+#[test]
 fn verbose_notation_writes_and_replays_turns() {
     let mut game = Game::new();
     assert_eq!(
@@ -360,6 +386,33 @@ fn submit_detects_committed_branch_royal_capture() {
             winner: Some(Color::White),
             reason: GameResultReason::RoyalCapture,
         })
+    );
+}
+
+#[test]
+fn direct_royal_capture_probe_matches_legal_move_probe() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0e2Pe4\n\
+         2. T1L0g7pg6\n\
+         3. T2L0d1Qg4\n\
+         4. T3L0g8nf6\n\
+         5. T4L0f1Bc4\n\
+         6. T5L0d7pd5\n\
+         7. T6L0c4Bd5xp\n\
+         8. T7L0d8qd6\n\
+         9. T8L0g4Qc8xb+\n\
+         10. T9L0d6qd8",
+    )
+    .expect("notation should replay before royal capture probe");
+
+    assert_eq!(
+        game.royal_capture_available(Color::White),
+        game.royal_capture_available_via_legal_moves(Color::White)
+    );
+    assert_eq!(
+        game.royal_capture_available(Color::Black),
+        game.royal_capture_available_via_legal_moves(Color::Black)
     );
 }
 

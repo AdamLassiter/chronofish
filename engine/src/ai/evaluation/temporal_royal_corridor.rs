@@ -58,23 +58,21 @@ impl Game {
         }
 
         let royal_targets = self.royal_pieces(color.opposite());
-        let mut score = 0;
-        for (from, piece) in self.latest_pieces() {
+        self.latest_piece_score_sum_with_attack_budget(limits, stats, |from, piece, stats| {
             if piece.color != color
                 || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
             {
-                continue;
+                return 0;
             }
-            score += self.temporal_royal_corridor_from_with_targets(
+            self.temporal_royal_corridor_from_with_targets(
                 piece,
                 from,
                 &royal_targets,
                 weights,
                 limits,
                 stats,
-            );
-        }
-        score
+            )
+        })
     }
 
     pub(crate) fn temporal_royal_corridor_from_with_targets(
@@ -88,6 +86,9 @@ impl Game {
     ) -> i32 {
         let mut score = 0;
         for (target, _) in royal_targets {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if from.timeline_id == target.timeline_id
                 && from.time == target.time
                 && from.x == target.x
@@ -97,6 +98,9 @@ impl Game {
             }
 
             for wait in 1..=4 {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 let future_from = Position {
                     time: from.time + wait,
                     ..from

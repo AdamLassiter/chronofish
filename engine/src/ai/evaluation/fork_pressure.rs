@@ -61,6 +61,9 @@ impl Game {
             .filter(|(_, piece)| piece.color == color.opposite());
         let mut score = 0;
         for (from, piece) in &view.pieces {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if piece.color != color {
                 continue;
             }
@@ -68,6 +71,9 @@ impl Game {
             let mut value_sum = 0;
             let mut royal = false;
             for (target, enemy) in enemies.clone() {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if !self.attacks_square_with_limits(*piece, *from, *target, limits, stats) {
                     continue;
                 }

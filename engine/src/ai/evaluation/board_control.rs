@@ -51,6 +51,9 @@ impl Game {
     ) -> i32 {
         let mut score = 0;
         for (from, piece) in &view.pieces {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if piece.color != color {
                 continue;
             }
@@ -58,6 +61,9 @@ impl Game {
             let mut central = 0;
             let mut royal_zone = 0;
             for target in &view.board_positions {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if !self.attacks_square_with_limits(*piece, *from, *target, limits, stats) {
                     continue;
                 }

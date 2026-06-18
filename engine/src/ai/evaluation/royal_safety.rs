@@ -30,12 +30,13 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        self.latest_royal_pieces(color)
-            .into_iter()
-            .map(|(position, _)| {
+        self.latest_piece_score_sum(|position, piece| {
+            if piece.color == color && Self::is_royal_piece(piece.piece_type) {
                 self.individual_royal_safety_with_limits(position, color, weights, limits, stats)
-            })
-            .sum()
+            } else {
+                0
+            }
+        })
     }
 
     pub(crate) fn royal_escape_count(&self, position: Position, color: Color) -> i32 {

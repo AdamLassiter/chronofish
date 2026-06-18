@@ -92,6 +92,9 @@ impl Game {
             {
                 continue;
             }
+            let Some(source_board) = self.board(from.timeline_id, from.time) else {
+                continue;
+            };
             let major_piece_bonus = match piece.piece_type {
                 PieceType::Queen | PieceType::RoyalQueen => weights.royal_capture_setup / 2,
                 PieceType::Bishop
@@ -107,15 +110,17 @@ impl Game {
                     if counted >= result_limit || probes >= probe_limit {
                         break 'pieces;
                     }
+                    if !stats.allow_setup_probe(limits) {
+                        break 'pieces;
+                    }
                     probes += 1;
-                    stats.setup_probes += 1;
                     let to = Position {
                         timeline_id: from.timeline_id,
                         time: from.time,
                         x,
                         y,
                     };
-                    let target = self.piece_at(to);
+                    let target = source_board.board[y as usize][x as usize];
                     if target.is_some_and(|target| target.color == color)
                         || self.move_kind_for(piece, from, to).is_none()
                     {

@@ -413,14 +413,54 @@ impl Game {
     }
 
     pub(crate) fn has_threefold_repetition(&self) -> bool {
+        const SMALL_REPETITION_HISTORY: usize = 24;
         self.timelines.iter().any(|timeline| {
+            if timeline.boards.len() <= SMALL_REPETITION_HISTORY {
+                for (index, board) in timeline.boards.iter().enumerate() {
+                    let key = Self::board_repetition_key_array(board);
+                    let mut count = 1;
+                    for later in &timeline.boards[index + 1..] {
+                        if Self::board_repetition_key_array(later) == key {
+                            count += 1;
+                            if count >= 3 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
             let mut counts = std::collections::HashMap::new();
             timeline.boards.iter().any(|board| {
-                let count = counts.entry(Self::board_repetition_key(board)).or_insert(0);
+                let count = counts
+                    .entry(Self::board_repetition_key_array(board))
+                    .or_insert(0);
                 *count += 1;
                 *count >= 3
             })
         })
+    }
+
+    pub(crate) fn board_repetition_key_array(board: &BoardSnapshot) -> [i32; 70] {
+        let mut key = [0; 70];
+        key[0] = Self::repetition_color_code(board.side_to_move);
+        key[1] = Self::repetition_castling_code(board.castling);
+        if let Some(en_passant) = board.en_passant {
+            key[2] = en_passant.x;
+            key[3] = en_passant.y;
+            key[4] = en_passant.captured_x;
+            key[5] = en_passant.captured_y;
+        } else {
+            key[2..6].fill(-1);
+        }
+        let mut index = 6;
+        for row in &board.board {
+            for square in row {
+                key[index] = Self::repetition_piece_code(*square);
+                index += 1;
+            }
+        }
+        key
     }
 
     pub(crate) fn board_repetition_key(board: &BoardSnapshot) -> Vec<i32> {
@@ -671,14 +711,31 @@ impl Game {
     }
 
     pub(crate) fn has_pending_present_board(&self, color: Color) -> bool {
-        let Some(present_time) = self.present_time() else {
-            return false;
-        };
-        self.timelines
-            .iter()
-            .filter(|timeline| self.is_active_timeline(timeline.id))
-            .filter_map(|timeline| timeline.boards.last())
-            .any(|board| board.time == present_time && board.side_to_move == color)
+        let mut present_time = None;
+        let mut pending = false;
+        for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            match present_time {
+                None => {
+                    present_time = Some(board.time);
+                    pending = board.side_to_move == color;
+                }
+                Some(time) if board.time < time => {
+                    present_time = Some(board.time);
+                    pending = board.side_to_move == color;
+                }
+                Some(time) if board.time == time => {
+                    pending |= board.side_to_move == color;
+                }
+                Some(_) => {}
+            }
+        }
+        pending
     }
 
     pub(crate) fn is_active_timeline(&self, timeline_id: i32) -> bool {

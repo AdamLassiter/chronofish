@@ -257,9 +257,6 @@ impl Game {
         context: &mut SearchContext,
     ) -> i32 {
         context.nodes += 1;
-        if let Some(score) = self.terminal_score_until(maximizing_color, context.deadline) {
-            return score;
-        }
         if context.exhausted() {
             return context.evaluate(self, maximizing_color);
         }
@@ -321,9 +318,6 @@ impl Game {
         context: &mut SearchContext,
     ) -> (i32, Vec<Vec<MoveStep>>) {
         context.nodes += 1;
-        if let Some(score) = self.terminal_score_until(maximizing_color, context.deadline) {
-            return (score, Vec::new());
-        }
         if context.exhausted() {
             return (context.evaluate(self, maximizing_color), Vec::new());
         }

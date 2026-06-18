@@ -1,6 +1,14 @@
 use super::*;
 
 impl EvaluationStats {
+    pub(crate) fn allow_setup_probe(&mut self, limits: EvaluationLimits) -> bool {
+        if deadline_expired(limits.deadline) || self.setup_probes >= limits.setup_probes {
+            return false;
+        }
+        self.setup_probes += 1;
+        true
+    }
+
     pub(crate) fn allow_attack_check(&mut self, limits: EvaluationLimits) -> bool {
         if deadline_expired(limits.deadline) || self.attack_checks >= limits.attack_checks {
             self.attack_caps += 1;
@@ -8,6 +16,10 @@ impl EvaluationStats {
         }
         self.attack_checks += 1;
         true
+    }
+
+    pub(crate) fn attack_budget_exhausted(&self, limits: EvaluationLimits) -> bool {
+        deadline_expired(limits.deadline) || self.attack_checks >= limits.attack_checks
     }
 }
 
@@ -155,11 +167,27 @@ impl Game {
     }
 
     pub(crate) fn latest_arrival_position(&self, color: Color, x: i32, y: i32) -> Option<Position> {
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(position, piece)| piece.color == color && position.x == x && position.y == y)
-            .max_by_key(|(position, _)| position.time)
-            .map(|(position, _)| position)
+        if !Self::in_bounds(x, y) {
+            return None;
+        }
+        let mut latest = None;
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            let piece = board.board[y as usize][x as usize];
+            if piece.is_some_and(|piece| piece.color == color)
+                && latest.is_none_or(|position: Position| board.time > position.time)
+            {
+                latest = Some(Position {
+                    timeline_id: timeline.id,
+                    time: board.time,
+                    x,
+                    y,
+                });
+            }
+        }
+        latest
     }
 
     pub(crate) fn active_timeline_count(&self) -> i32 {
@@ -208,6 +236,70 @@ impl Game {
         pieces
     }
 
+    pub(crate) fn latest_piece_score_sum(
+        &self,
+        mut score_for: impl FnMut(Position, Piece) -> i32,
+    ) -> i32 {
+        let mut score = 0;
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    score += score_for(
+                        Position {
+                            timeline_id: timeline.id,
+                            time: board.time,
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                        piece,
+                    );
+                }
+            }
+        }
+        score
+    }
+
+    pub(crate) fn latest_piece_score_sum_with_attack_budget(
+        &self,
+        limits: EvaluationLimits,
+        stats: &mut EvaluationStats,
+        mut score_for: impl FnMut(Position, Piece, &mut EvaluationStats) -> i32,
+    ) -> i32 {
+        let mut score = 0;
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    if stats.attack_budget_exhausted(limits) {
+                        return score;
+                    }
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    score += score_for(
+                        Position {
+                            timeline_id: timeline.id,
+                            time: board.time,
+                            x: x as i32,
+                            y: y as i32,
+                        },
+                        piece,
+                        stats,
+                    );
+                }
+            }
+        }
+        score
+    }
+
     pub(crate) fn near_enemy_royal_in_view(
         &self,
         target: Position,
@@ -246,12 +338,16 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        view.board_positions
-            .iter()
-            .filter(|target| {
-                self.attacks_square_with_limits(piece, position, **target, limits, stats)
-            })
-            .count() as i32
+        let mut count = 0;
+        for target in &view.board_positions {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if self.attacks_square_with_limits(piece, position, *target, limits, stats) {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(crate) fn open_line_count(&self, position: Position, piece: Piece) -> i32 {
@@ -302,17 +398,22 @@ impl Game {
             (0, 0, 0, 1),
             (0, 0, 0, -1),
         ];
-        directions
-            .iter()
-            .filter(|(dx, dy, dt, dl)| {
-                self.first_step_on_line(position, *dx, *dy, *dt, *dl)
-                    .is_some_and(|target| {
-                        self.piece_at(target).is_none()
-                            && self
-                                .attacks_square_with_limits(piece, position, target, limits, stats)
-                    })
-            })
-            .count() as i32
+        let mut count = 0;
+        for (dx, dy, dt, dl) in directions {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if self
+                .first_step_on_line(position, *dx, *dy, *dt, *dl)
+                .is_some_and(|target| {
+                    self.piece_at(target).is_none()
+                        && self.attacks_square_with_limits(piece, position, target, limits, stats)
+                })
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(crate) fn first_step_on_line(
@@ -419,26 +520,42 @@ impl Game {
         let mut timelines = Vec::new();
         let mut times = Vec::new();
 
-        for (from, piece) in self.latest_pieces() {
-            if piece.color != by_color
-                || from.timeline_id == target.timeline_id
-                    && from.time == target.time
-                    && from.x == target.x
-                    && from.y == target.y
-                || !self.attacks_square(piece, from, target)
-            {
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
                 continue;
-            }
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    if piece.color != by_color
+                        || from.timeline_id == target.timeline_id
+                            && from.time == target.time
+                            && from.x == target.x
+                            && from.y == target.y
+                        || !self.attacks_square(piece, from, target)
+                    {
+                        continue;
+                    }
 
-            summary.count += 1;
-            if from.timeline_id != target.timeline_id || from.time != target.time {
-                summary.temporal_count += 1;
-            }
-            if !timelines.contains(&from.timeline_id) {
-                timelines.push(from.timeline_id);
-            }
-            if !times.contains(&from.time) {
-                times.push(from.time);
+                    summary.count += 1;
+                    if from.timeline_id != target.timeline_id || from.time != target.time {
+                        summary.temporal_count += 1;
+                    }
+                    if !timelines.contains(&from.timeline_id) {
+                        timelines.push(from.timeline_id);
+                    }
+                    if !times.contains(&from.time) {
+                        times.push(from.time);
+                    }
+                }
             }
         }
 
@@ -469,26 +586,45 @@ impl Game {
         let mut timelines = Vec::new();
         let mut times = Vec::new();
 
-        for (from, piece) in self.latest_pieces() {
-            if piece.color != by_color
-                || from.timeline_id == target.timeline_id
-                    && from.time == target.time
-                    && from.x == target.x
-                    && from.y == target.y
-                || !self.attacks_square_with_limits(piece, from, target, limits, stats)
-            {
+        'timelines: for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
                 continue;
-            }
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    if stats.attack_budget_exhausted(limits) {
+                        break 'timelines;
+                    }
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    if piece.color != by_color
+                        || from.timeline_id == target.timeline_id
+                            && from.time == target.time
+                            && from.x == target.x
+                            && from.y == target.y
+                        || !self.attacks_square_with_limits(piece, from, target, limits, stats)
+                    {
+                        continue;
+                    }
 
-            summary.count += 1;
-            if from.timeline_id != target.timeline_id || from.time != target.time {
-                summary.temporal_count += 1;
-            }
-            if !timelines.contains(&from.timeline_id) {
-                timelines.push(from.timeline_id);
-            }
-            if !times.contains(&from.time) {
-                times.push(from.time);
+                    summary.count += 1;
+                    if from.timeline_id != target.timeline_id || from.time != target.time {
+                        summary.temporal_count += 1;
+                    }
+                    if !timelines.contains(&from.timeline_id) {
+                        timelines.push(from.timeline_id);
+                    }
+                    if !times.contains(&from.time) {
+                        times.push(from.time);
+                    }
+                }
             }
         }
 

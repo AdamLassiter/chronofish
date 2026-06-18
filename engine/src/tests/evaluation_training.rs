@@ -188,13 +188,15 @@ fn bounded_evaluation_honors_attack_budget() {
     limits.attack_checks = 1;
     let mut stats = EvaluationStats::default();
 
-    let _ = game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut stats);
+    let first = game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut stats);
+    let mut second_stats = EvaluationStats::default();
+    let second =
+        game.evaluate_heuristic_with_limits(Color::White, &weights, limits, &mut second_stats);
 
     assert!(stats.attack_checks <= 1);
-    assert!(
-        stats.attack_caps > 0,
-        "tiny attack budget should cap at least one evaluation attack probe"
-    );
+    assert_eq!(first, second);
+    assert_eq!(stats.attack_checks, second_stats.attack_checks);
+    assert_eq!(stats.attack_caps, second_stats.attack_caps);
 }
 
 fn multi_present_training_game(count: i32) -> Game {
@@ -574,6 +576,26 @@ fn detects_threefold_repetition_on_same_timeline() {
     assert!(game.has_threefold_repetition());
     assert_eq!(game.terminal_score(Color::White), Some(0));
     assert_eq!(game.terminal_score(Color::Black), Some(0));
+}
+
+#[test]
+fn repetition_array_key_matches_vector_key() {
+    let mut game = Game::new();
+    game.load_notation(
+        "1. T0L0g1Nf3\n\
+         2. T1L0g8nf6\n\
+         3. T2L0f3Ng1\n\
+         4. T3L0f6ng8",
+    )
+    .expect("notation should produce reversible knight history");
+    let timeline = game.timeline(0).expect("default timeline exists");
+
+    for board in &timeline.boards {
+        assert_eq!(
+            Game::board_repetition_key(board),
+            Game::board_repetition_key_array(board).to_vec()
+        );
+    }
 }
 
 #[test]

@@ -21,14 +21,13 @@ impl Game {
             .iter()
             .filter(|timeline| timeline.owner == owner && !self.is_active_timeline(timeline.id))
             .count() as i32;
-        let active_material: i32 = self
-            .latest_pieces()
-            .into_iter()
-            .filter(|(position, piece)| {
-                piece.color == color && self.is_active_timeline(position.timeline_id)
-            })
-            .map(|(_, piece)| weights.piece_value(piece.piece_type) / 200)
-            .sum();
+        let active_material = self.latest_piece_score_sum(|position, piece| {
+            if piece.color == color && self.is_active_timeline(position.timeline_id) {
+                weights.piece_value(piece.piece_type) / 200
+            } else {
+                0
+            }
+        });
         own_active * weights.timeline_economy + active_material
             - own_inactive * weights.timeline_economy * 2
     }

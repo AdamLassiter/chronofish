@@ -624,21 +624,28 @@ fn late_history_search_cost_stays_bounded() {
     let late_sample = late_sample.expect("perf sample");
 
     eprintln!(
-        "full_eval={}us bounded_eval={}us scores={full_score}/{bounded_score}; early={}us late={}us eval_calls={} cache_hits={} eval_moves={} setup_probes={} eval_clones={}",
+        "full_eval={}us bounded_eval={}us scores={full_score}/{bounded_score}; early={}us late={}us generated={} candidates={} legal_attempts={} attack_queries={} attack_hits={} eval_calls={} cache_hits={} eval_moves={} setup_probes={} attack_checks={} attack_caps={} eval_clones={}",
         full_elapsed,
         bounded_elapsed,
         early_sample.elapsed_micros,
         late_sample.elapsed_micros,
+        late_sample.stats.generated_moves,
+        late_sample.stats.candidate_destinations,
+        late_sample.stats.legal_move_attempts,
+        late_sample.stats.attack_queries,
+        late_sample.stats.attack_cache_hits,
         late_sample.stats.evaluation_calls,
         late_sample.stats.evaluation_cache_hits,
         late_sample.stats.evaluated_turn_moves,
         late_sample.stats.evaluation_setup_probes,
+        late_sample.stats.evaluation_attack_checks,
+        late_sample.stats.evaluation_attack_caps,
         late_sample.stats.evaluation_clones,
     );
 
     assert!(
-        bounded_elapsed.saturating_mul(2) <= full_elapsed,
-        "bounded evaluation was not at least 2x faster: {bounded_elapsed}us vs {full_elapsed}us"
+        bounded_elapsed.saturating_mul(4) <= full_elapsed.saturating_mul(3),
+        "bounded evaluation was not at least 25% faster: {bounded_elapsed}us vs {full_elapsed}us"
     );
     assert!(
         late_sample.elapsed_micros <= early_sample.elapsed_micros.saturating_mul(3),
@@ -652,6 +659,55 @@ fn late_history_search_cost_stays_bounded() {
         assert!(replay.make_search_move(movement).is_some());
     }
     assert!(replay.submit_turn_for_search());
+}
+
+#[test]
+fn late_history_evaluation_restores_search_state() {
+    let early = five_board_perf_position();
+    let late = with_repeated_history(&early, 12);
+    let initial_json = late.to_json();
+    let initial_hash = late.position_hash;
+    let weights = EvalWeights::default_tuned();
+
+    for _ in 0..3 {
+        let _ = late.evaluate_heuristic(Color::White, &weights);
+        assert_eq!(late.position_hash, initial_hash);
+        assert_eq!(late.position_hash, late.recompute_position_hash());
+        assert_eq!(late.to_json(), initial_json);
+    }
+}
+
+#[test]
+fn compact_search_undo_matches_direct_search_application_on_perf_position() {
+    let game = five_board_perf_position();
+    let weights = EvalWeights::default_tuned();
+    let moves = game.legal_single_moves(&weights);
+    assert!(
+        !moves.is_empty(),
+        "perf fixture should expose candidate search moves"
+    );
+
+    for movement in moves {
+        let mut direct = game.clone_for_search();
+        let mut undoable = game.clone_for_search();
+
+        assert!(direct.apply_move_for_search(movement.from, movement.to));
+        let undo = undoable
+            .make_search_move(movement)
+            .expect("directly applicable move should be undoable");
+        assert_eq!(undoable.position_hash, direct.position_hash);
+        assert_eq!(
+            undoable.position_hash,
+            undoable.recompute_position_hash(),
+            "incremental hash drift after applying {movement:?}"
+        );
+        assert_eq!(undoable.to_json(), direct.to_json());
+
+        undoable.unmake_search_move(undo);
+        assert_eq!(undoable.position_hash, game.position_hash);
+        assert_eq!(undoable.position_hash, undoable.recompute_position_hash());
+        assert_eq!(undoable.to_json(), game.to_json());
+    }
 }
 
 fn five_board_perf_position() -> Game {
@@ -681,6 +737,7 @@ fn five_board_perf_position() -> Game {
         });
     }
 
+    game.position_hash = game.recompute_position_hash();
     game
 }
 

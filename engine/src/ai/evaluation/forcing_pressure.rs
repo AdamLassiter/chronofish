@@ -35,17 +35,16 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        let mut score = 0;
-        for (position, piece) in self.latest_pieces() {
+        self.latest_piece_score_sum_with_attack_budget(limits, stats, |position, piece, stats| {
             if piece.color != color.opposite() {
-                continue;
+                return 0;
             }
             let attackers = self.attack_summary_with_limits(position, color, limits, stats);
             if attackers.count == 0 {
-                continue;
+                return 0;
             }
             let value = weights.piece_value(piece.piece_type);
-            score += attackers.count * weights.forcing_move_pressure + value / 48;
+            let mut score = attackers.count * weights.forcing_move_pressure + value / 48;
             if Self::is_royal_piece(piece.piece_type) {
                 score += weights.royal_threat + attackers.temporal_count * weights.temporal_threat;
             }
@@ -54,7 +53,7 @@ impl Game {
                     + weights.timeline_pincer * (attackers.timeline_count - 1).max(0)
                     + weights.historical_pincer * (attackers.time_count - 1).max(0);
             }
-        }
-        score
+            score
+        })
     }
 }

@@ -14,8 +14,7 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        let mut score = 0;
-        for (position, piece) in self.latest_pieces() {
+        self.latest_piece_score_sum_with_attack_budget(limits, stats, |position, piece, stats| {
             let attackers =
                 self.attack_summary_with_limits(position, piece.color.opposite(), limits, stats);
             let defenders = self.attack_summary_with_limits(position, piece.color, limits, stats);
@@ -47,12 +46,11 @@ impl Game {
                 piece_score -= weights.historical_pincer * (attackers.time_count - 1);
             }
 
-            score += if piece.color == color {
+            if piece.color == color {
                 piece_score
             } else {
                 -piece_score
-            };
-        }
-        score
+            }
+        })
     }
 }

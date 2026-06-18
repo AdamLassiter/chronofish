@@ -6,12 +6,12 @@ impl Game {
     }
 
     pub(crate) fn royal_shelter_for(&self, color: Color, weights: &EvalWeights) -> i32 {
-        let mut score = 0;
-        for (position, _) in self.latest_royal_pieces(color) {
+        self.latest_piece_score_sum(|position, piece| {
+            if piece.color != color || !Self::is_royal_piece(piece.piece_type) {
+                return 0;
+            }
             let shield_count = self.royal_shield_count(position, color);
-            score += shield_count * weights.royal_shelter;
-            score -= (3 - shield_count) * (weights.royal_shelter / 2);
-        }
-        score
+            shield_count * weights.royal_shelter - (3 - shield_count) * (weights.royal_shelter / 2)
+        })
     }
 }

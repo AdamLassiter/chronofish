@@ -4,10 +4,47 @@ impl Game {
     // Check is evaluated over the latest board of every timeline because royal
     // pieces may exist on multiple active branch fronts.
     pub(crate) fn is_in_check(&self, color: Color) -> bool {
-        let royal_pieces = self.royal_piece_positions(color);
-        royal_pieces
-            .iter()
-            .any(|position| self.is_square_attacked(*position, color.opposite()))
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    if piece.color == color
+                        && Self::is_royal_piece(piece.piece_type)
+                        && self.is_square_attacked(
+                            Position {
+                                timeline_id: timeline.id,
+                                time: board.time,
+                                x: x as i32,
+                                y: y as i32,
+                            },
+                            color.opposite(),
+                        )
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub(crate) fn has_latest_royal_piece(&self, color: Color) -> bool {
+        self.timelines.iter().any(|timeline| {
+            timeline.boards.last().is_some_and(|board| {
+                board.board.iter().any(|rank| {
+                    rank.iter().any(|piece| {
+                        piece.is_some_and(|piece| {
+                            piece.color == color && Self::is_royal_piece(piece.piece_type)
+                        })
+                    })
+                })
+            })
+        })
     }
 
     #[allow(dead_code)]
@@ -47,7 +84,7 @@ impl Game {
         color: Color,
         deadline: Option<SearchInstant>,
     ) -> bool {
-        if self.royal_piece_positions(color).is_empty() || self.is_in_check(color) {
+        if !self.has_latest_royal_piece(color) || self.is_in_check(color) {
             return false;
         }
 
@@ -58,6 +95,93 @@ impl Game {
 
     #[allow(dead_code)]
     pub(crate) fn royal_capture_available(&self, color: Color) -> bool {
+        let Some(present_time) = self.present_time() else {
+            return false;
+        };
+
+        for target_timeline in &self.timelines {
+            let Some(target_board) = target_timeline.boards.last() else {
+                continue;
+            };
+            for target_y in 0..8 {
+                for target_x in 0..8 {
+                    let Some(target_piece) = target_board.board[target_y][target_x] else {
+                        continue;
+                    };
+                    if target_piece.color != color.opposite()
+                        || !Self::is_royal_piece(target_piece.piece_type)
+                    {
+                        continue;
+                    }
+                    let target = Position {
+                        timeline_id: target_timeline.id,
+                        time: target_board.time,
+                        x: target_x as i32,
+                        y: target_y as i32,
+                    };
+                    if self.royal_capture_target_is_reachable(
+                        color,
+                        present_time,
+                        target,
+                        target_board.side_to_move,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
+    }
+
+    fn royal_capture_target_is_reachable(
+        &self,
+        color: Color,
+        present_time: i32,
+        target: Position,
+        target_side_to_move: Color,
+    ) -> bool {
+        for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            if board.time != present_time || board.side_to_move != color {
+                continue;
+            }
+
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    if piece.color != color {
+                        continue;
+                    }
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    let same_board =
+                        from.timeline_id == target.timeline_id && from.time == target.time;
+                    if !same_board && target_side_to_move != color {
+                        continue;
+                    }
+                    if self.move_kind_for(piece, from, target).is_some() {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(test)]
+    pub(crate) fn royal_capture_available_via_legal_moves(&self, color: Color) -> bool {
         let mut search = self.clone_for_search();
         search.turn = color;
 
@@ -75,18 +199,15 @@ impl Game {
 
                 for y in 0..8 {
                     for x in 0..8 {
+                        if !board.board[y][x].is_some_and(|piece| piece.color == color) {
+                            continue;
+                        }
                         let from = Position {
                             timeline_id: timeline.id,
                             time: board.time,
-                            x,
-                            y,
+                            x: x as i32,
+                            y: y as i32,
                         };
-                        if !search
-                            .piece_at(from)
-                            .is_some_and(|piece| piece.color == color)
-                        {
-                            continue;
-                        }
                         if search.legal_move_kind(from, target).is_some() {
                             return true;
                         }
@@ -215,10 +336,28 @@ impl Game {
     }
 
     pub(crate) fn royal_piece_positions(&self, color: Color) -> Vec<Position> {
-        self.latest_royal_pieces(color)
-            .into_iter()
-            .map(|(position, _)| position)
-            .collect()
+        let mut positions = Vec::new();
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x] else {
+                        continue;
+                    };
+                    if piece.color == color && Self::is_royal_piece(piece.piece_type) {
+                        positions.push(Position {
+                            timeline_id: timeline.id,
+                            time: board.time,
+                            x: x as i32,
+                            y: y as i32,
+                        });
+                    }
+                }
+            }
+        }
+        positions
     }
 
     pub(crate) fn latest_royal_pieces(&self, color: Color) -> Vec<(Position, Piece)> {
@@ -391,6 +530,9 @@ impl Game {
             from.y != 6
         };
         let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
+        let source_board = same_board
+            .then(|| self.board(from.timeline_id, from.time))
+            .flatten();
 
         // Orthodox forward movement and captures are same-board only.
         if same_board && delta.x == 0 && delta.y == forward && destination.is_none() {
@@ -405,8 +547,8 @@ impl Game {
             && !has_moved
             && destination.is_none()
         {
-            return self.board(from.timeline_id, from.time).and_then(|board| {
-                board.board[(from.y + forward) as usize][from.x as usize]
+            return source_board.and_then(|source_board| {
+                source_board.board[(from.y + forward) as usize][from.x as usize]
                     .is_none()
                     .then_some(MoveKind::Standard)
             });
@@ -432,23 +574,16 @@ impl Game {
             return Some(MoveKind::Branch);
         }
 
-        if same_board
-            && delta.x.abs() == 1
-            && delta.y == forward
-            && destination.is_none()
-            && self
-                .board(from.timeline_id, from.time)
-                .and_then(|board| board.en_passant)
-                .is_some_and(|target| target.x == to.x && target.y == to.y)
-        {
-            let target = self
-                .board(from.timeline_id, from.time)
-                .and_then(|board| board.en_passant)
-                .expect("checked en passant target");
-            return Some(MoveKind::EnPassant {
-                captured_x: target.captured_x,
-                captured_y: target.captured_y,
-            });
+        if same_board && delta.x.abs() == 1 && delta.y == forward && destination.is_none() {
+            if let Some(target) = source_board
+                .and_then(|source_board| source_board.en_passant)
+                .filter(|target| target.x == to.x && target.y == to.y)
+            {
+                return Some(MoveKind::EnPassant {
+                    captured_x: target.captured_x,
+                    captured_y: target.captured_y,
+                });
+            }
         }
 
         // Pawns can also capture through one time step and one timeline step in
@@ -540,22 +675,37 @@ impl Game {
         let forward = if piece.color == Color::White { 1 } else { -1 };
         let timeline_forward = if piece.color == Color::White { 1 } else { -1 };
         let distances = [delta.x.abs(), delta.y.abs(), delta.t.abs(), delta.l.abs()];
-        let non_zero = distances.iter().filter(|distance| **distance > 0).count();
+        let mut non_zero = 0;
+        for distance in distances {
+            if distance > 1 {
+                return false;
+            }
+            non_zero += (distance > 0) as i32;
+        }
 
         non_zero >= 2
-            && distances.iter().all(|distance| *distance <= 1)
             && (delta.y == forward || delta.l == timeline_forward)
             && delta.y != -forward
             && delta.l != -timeline_forward
     }
 
-    pub(crate) fn is_knight_move(mut distances: [i32; 4]) -> bool {
-        distances.sort_by(|a, b| b.cmp(a));
-        distances[0] == 2 && distances[1] == 1 && distances[2] == 0 && distances[3] == 0
+    pub(crate) fn is_knight_move(distances: [i32; 4]) -> bool {
+        let mut twos = 0;
+        let mut ones = 0;
+        let mut zeros = 0;
+        for distance in distances {
+            match distance {
+                0 => zeros += 1,
+                1 => ones += 1,
+                2 => twos += 1,
+                _ => return false,
+            }
+        }
+        twos == 1 && ones == 1 && zeros == 2
     }
 
     pub(crate) fn is_king_move(non_zero: &[i32]) -> bool {
-        non_zero.iter().all(|distance| *distance == 1)
+        matches!(non_zero, [] | [1] | [1, 1] | [1, 1, 1] | [1, 1, 1, 1])
     }
 
     pub(crate) fn is_rook_move(non_zero: &[i32]) -> bool {
@@ -579,9 +729,14 @@ impl Game {
     }
 
     pub(crate) fn same_distance(non_zero: &[i32]) -> bool {
-        non_zero
-            .first()
-            .is_some_and(|distance| non_zero.iter().all(|other| other == distance))
+        match non_zero {
+            [] => false,
+            [_] => true,
+            [a, b] => a == b,
+            [a, b, c] => a == b && a == c,
+            [a, b, c, d] => a == b && a == c && a == d,
+            _ => false,
+        }
     }
 
     pub(crate) fn non_zero_distances(distances: [i32; 4]) -> ([i32; 4], usize) {

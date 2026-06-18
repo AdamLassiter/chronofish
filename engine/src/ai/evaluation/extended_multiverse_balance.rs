@@ -457,7 +457,7 @@ impl Game {
     }
 
     pub(crate) fn current_turn_moves_for(
-        &self,
+        &mut self,
         color: Color,
         weights: &EvalWeights,
         limit: usize,
@@ -466,14 +466,17 @@ impl Game {
         if deadline_expired(deadline) || !self.has_pending_present_board(color) {
             return Vec::new();
         }
-        let mut search = self.clone_for_search();
-        search.turn = color;
+        let previous_turn = self.turn;
+        self.turn = color;
         if limit == EvaluationLimits::FULL.turn_moves {
-            let mut moves = search.legal_single_moves_until(weights, deadline);
+            let mut moves = self.legal_single_moves_until(weights, deadline);
             moves.truncate(limit);
+            self.turn = previous_turn;
             return moves;
         }
-        search.sampled_current_turn_moves(weights, limit, deadline)
+        let moves = self.sampled_current_turn_moves(weights, limit, deadline);
+        self.turn = previous_turn;
+        moves
     }
 
     fn sampled_current_turn_moves(
@@ -599,11 +602,13 @@ impl Game {
     }
 
     pub(crate) fn latest_material_for(&self, color: Color, weights: &EvalWeights) -> i32 {
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(_, piece)| piece.color == color)
-            .map(|(_, piece)| weights.piece_value(piece.piece_type))
-            .sum()
+        self.latest_piece_score_sum(|_, piece| {
+            if piece.color == color {
+                weights.piece_value(piece.piece_type)
+            } else {
+                0
+            }
+        })
     }
 
     pub(crate) fn source_material_abandonment_cost(
@@ -679,20 +684,28 @@ impl Game {
         stats: &mut EvaluationStats,
     ) -> i32 {
         let enemy_royals = self.latest_royal_pieces(color.opposite());
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(_, piece)| piece.color == color)
-            .map(|(from, piece)| {
-                enemy_royals
-                    .iter()
-                    .filter(|(target, _)| {
-                        self.attacks_square_with_limits(piece, from, *target, limits, stats)
-                    })
-                    .count() as i32
-            })
-            .filter(|count| *count >= 2)
-            .map(|count| count - 1)
-            .sum()
+        let mut score = 0;
+        for (from, piece) in self.latest_pieces() {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if piece.color != color {
+                continue;
+            }
+            let mut count = 0;
+            for (target, _) in &enemy_royals {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
+                if self.attacks_square_with_limits(piece, from, *target, limits, stats) {
+                    count += 1;
+                }
+            }
+            if count >= 2 {
+                score += count - 1;
+            }
+        }
+        score
     }
 
     pub(crate) fn urgent_threat_count_for(&self, color: Color) -> i32 {
@@ -706,22 +719,30 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        let enemy_royals = self.latest_royal_pieces(color.opposite()).len() as i32;
-        let enemy_hanging = self
-            .latest_pieces()
-            .into_iter()
-            .filter(|(position, piece)| {
-                piece.color == color.opposite()
-                    && self
-                        .attack_summary_with_limits(*position, color, limits, stats)
-                        .count
-                        > 0
-                    && self
-                        .attack_summary_with_limits(*position, color.opposite(), limits, stats)
-                        .count
-                        == 0
-            })
-            .count() as i32;
+        let enemy_royals = self.latest_piece_score_sum(|_, piece| {
+            (piece.color == color.opposite() && Self::is_royal_piece(piece.piece_type)) as i32
+        });
+        let mut enemy_hanging = 0;
+        for (position, piece) in self.latest_pieces() {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if piece.color != color.opposite() {
+                continue;
+            }
+            let attackers = self
+                .attack_summary_with_limits(position, color, limits, stats)
+                .count;
+            if attackers == 0 || stats.attack_budget_exhausted(limits) {
+                continue;
+            }
+            let defenders = self
+                .attack_summary_with_limits(position, color.opposite(), limits, stats)
+                .count;
+            if defenders == 0 {
+                enemy_hanging += 1;
+            }
+        }
         enemy_royals + enemy_hanging
     }
 
@@ -798,14 +819,13 @@ impl Game {
     }
 
     pub(crate) fn timeline_compaction_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
-        let active_material: i32 = self
-            .latest_pieces()
-            .into_iter()
-            .filter(|(position, piece)| {
-                piece.color == color && self.is_active_timeline(position.timeline_id)
-            })
-            .map(|(_, piece)| weights.piece_value(piece.piece_type) / 100)
-            .sum();
+        let active_material = self.latest_piece_score_sum(|position, piece| {
+            if piece.color == color && self.is_active_timeline(position.timeline_id) {
+                weights.piece_value(piece.piece_type) / 100
+            } else {
+                0
+            }
+        });
         let inactive_material = self.inactive_material_score_for(color, weights);
         let present_material = self.present_board_material(color, weights).max(0);
         active_material + present_material - inactive_material
@@ -851,16 +871,31 @@ impl Game {
     ) -> i32 {
         let mut score = 0;
         for (from, piece) in self.latest_pieces() {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if piece.color != color {
                 continue;
             }
             for timeline in &self.timelines {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 for board in &timeline.boards {
+                    if stats.attack_budget_exhausted(limits) {
+                        break;
+                    }
                     if self.is_latest_board(timeline.id, board.time) {
                         continue;
                     }
                     for y in 0..8 {
+                        if stats.attack_budget_exhausted(limits) {
+                            break;
+                        }
                         for x in 0..8 {
+                            if stats.attack_budget_exhausted(limits) {
+                                break;
+                            }
                             let target = Position {
                                 timeline_id: timeline.id,
                                 time: board.time,
@@ -894,13 +929,16 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(_, piece)| piece.color == color)
-            .map(|(position, piece)| {
-                self.temporal_open_line_count_with_limits(position, piece, limits, stats)
-            })
-            .sum()
+        let mut score = 0;
+        for (position, piece) in self.latest_pieces() {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if piece.color == color {
+                score += self.temporal_open_line_count_with_limits(position, piece, limits, stats);
+            }
+        }
+        score
     }
 
     pub(crate) fn temporal_open_line_count(&self, position: Position, piece: Piece) -> i32 {
@@ -935,17 +973,22 @@ impl Game {
             (1, 0, 0, 1),
             (-1, 0, 0, -1),
         ];
-        directions
-            .iter()
-            .filter(|(dx, dy, dt, dl)| {
-                self.first_step_on_line(position, *dx, *dy, *dt, *dl)
-                    .is_some_and(|target| {
-                        self.piece_at(target).is_none()
-                            && self
-                                .attacks_square_with_limits(piece, position, target, limits, stats)
-                    })
-            })
-            .count() as i32
+        let mut count = 0;
+        for (dx, dy, dt, dl) in directions {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if self
+                .first_step_on_line(position, *dx, *dy, *dt, *dl)
+                .is_some_and(|target| {
+                    self.piece_at(target).is_none()
+                        && self.attacks_square_with_limits(piece, position, target, limits, stats)
+                })
+            {
+                count += 1;
+            }
+        }
+        count
     }
 
     pub(crate) fn temporal_pin_score_for(&self, color: Color, weights: &EvalWeights) -> i32 {
@@ -1010,10 +1053,16 @@ impl Game {
         let enemy_royals = self.latest_royal_pieces(color.opposite());
         let mut score = 0;
         for (from, piece) in self.latest_pieces() {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if piece.color != color || !self.is_temporal_slider(piece.piece_type) {
                 continue;
             }
             for (target, victim) in self.latest_pieces() {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if victim.color != color.opposite() || Self::is_royal_piece(victim.piece_type) {
                     continue;
                 }
@@ -1027,6 +1076,9 @@ impl Game {
                 let mut cleared = self.clone_for_search();
                 cleared.clear_piece_at(target);
                 for (royal_position, royal_piece) in &enemy_royals {
+                    if stats.attack_budget_exhausted(limits) {
+                        break;
+                    }
                     if !cleared.attacks_square_with_limits(
                         piece,
                         from,
@@ -1063,6 +1115,9 @@ impl Game {
         let own_pieces = self.latest_pieces();
         let mut score = 0;
         for (front_pos, front_piece) in &own_pieces {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if front_piece.color != color || !self.is_temporal_slider(front_piece.piece_type) {
                 continue;
             }
@@ -1072,6 +1127,9 @@ impl Game {
                 continue;
             }
             for (rear_pos, rear_piece) in &own_pieces {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if rear_piece.color != color || !self.is_temporal_slider(rear_piece.piece_type) {
                     continue;
                 }
@@ -1121,23 +1179,30 @@ impl Game {
         stats: &mut EvaluationStats,
     ) -> i32 {
         let view = self.latest_position_view();
-        view.pieces
-            .iter()
-            .filter(|(_, piece)| piece.color == color)
-            .map(|(position, piece)| {
-                let mut spatial = false;
-                let mut temporal = false;
-                for target in &view.board_positions {
-                    if !self.attacks_square_with_limits(*piece, *position, *target, limits, stats) {
-                        continue;
-                    }
-                    let delta = self.movement_delta(*position, *target);
-                    spatial |= delta.x != 0 || delta.y != 0;
-                    temporal |= delta.t != 0 || delta.l != 0;
+        let mut score = 0;
+        for (position, piece) in &view.pieces {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if piece.color != color {
+                continue;
+            }
+            let mut spatial = false;
+            let mut temporal = false;
+            for target in &view.board_positions {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
                 }
-                (spatial && temporal) as i32
-            })
-            .sum()
+                if !self.attacks_square_with_limits(*piece, *position, *target, limits, stats) {
+                    continue;
+                }
+                let delta = self.movement_delta(*position, *target);
+                spatial |= delta.x != 0 || delta.y != 0;
+                temporal |= delta.t != 0 || delta.l != 0;
+            }
+            score += (spatial && temporal) as i32;
+        }
+        score
     }
 
     pub(crate) fn dimension_coverage_score_for(&self, color: Color) -> i32 {
@@ -1157,10 +1222,16 @@ impl Game {
         let mut t = 0;
         let mut l = 0;
         for (position, piece) in &view.pieces {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
             if piece.color != color {
                 continue;
             }
             for target in &view.board_positions {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if !self.attacks_square_with_limits(*piece, *position, *target, limits, stats) {
                     continue;
                 }
@@ -1189,34 +1260,37 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        self.royal_pieces(color)
-            .into_iter()
-            .filter(|(position, _)| !self.is_latest_board(position.timeline_id, position.time))
-            .map(|(position, _)| {
-                self.attack_summary_with_limits(position, color.opposite(), limits, stats)
-                    .count
-            })
-            .sum()
+        let mut score = 0;
+        for (position, _) in self.royal_pieces(color) {
+            if stats.attack_budget_exhausted(limits) {
+                break;
+            }
+            if !self.is_latest_board(position.timeline_id, position.time) {
+                score += self
+                    .attack_summary_with_limits(position, color.opposite(), limits, stats)
+                    .count;
+            }
+        }
+        score
     }
 
     pub(crate) fn safe_haven_board_score_for(&self, color: Color) -> i32 {
-        self.latest_royal_pieces(color)
-            .into_iter()
-            .map(|(position, _)| {
+        self.latest_piece_score_sum(|position, piece| {
+            if piece.color == color && Self::is_royal_piece(piece.piece_type) {
                 let shield = self.royal_shield_count(position, color);
                 let escapes = self.royal_escape_count(position, color);
                 let active = self.is_active_timeline(position.timeline_id) as i32;
                 (shield + escapes + active).saturating_sub(1)
-            })
-            .sum()
+            } else {
+                0
+            }
+        })
     }
 
     pub(crate) fn royal_distance_score_for(&self, color: Color) -> i32 {
         let enemy_royals = self.latest_royal_pieces(color.opposite());
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(_, piece)| piece.color == color)
-            .map(|(from, piece)| {
+        self.latest_piece_score_sum(|from, piece| {
+            if piece.color == color {
                 enemy_royals
                     .iter()
                     .map(|(target, _)| {
@@ -1225,8 +1299,10 @@ impl Game {
                     })
                     .max()
                     .unwrap_or(0)
-            })
-            .sum()
+            } else {
+                0
+            }
+        })
     }
 
     pub(crate) fn board_importance_material_score_for(
@@ -1301,11 +1377,8 @@ impl Game {
     }
 
     pub(crate) fn development_count_for(&self, color: Color) -> i32 {
-        self.latest_pieces()
-            .into_iter()
-            .filter(|(position, piece)| {
-                piece.color == color && development(color, piece.piece_type, position.y) > 0
-            })
-            .count() as i32
+        self.latest_piece_score_sum(|position, piece| {
+            (piece.color == color && development(color, piece.piece_type, position.y) > 0) as i32
+        })
     }
 }

@@ -346,7 +346,8 @@ impl Game {
         }
 
         if depth <= 0 {
-            return self.quiescence(
+            let mut game = self.clone_for_search();
+            return game.quiescence(
                 -CHECKMATE_SCORE * 2,
                 CHECKMATE_SCORE * 2,
                 maximizing_color,
@@ -475,7 +476,7 @@ impl Game {
     }
 
     pub(crate) fn quiescence(
-        &self,
+        &mut self,
         mut alpha: i32,
         mut beta: i32,
         maximizing_color: Color,
@@ -512,14 +513,14 @@ impl Game {
                 if context.exhausted() {
                     break;
                 }
-                if !context.charge_clone() {
+                if !context.charge_move_application() {
                     break;
                 }
-                let mut next = self.clone_for_search();
-                if !next.apply_move_for_search(movement.from, movement.to) {
+                let Some(undo) = self.make_search_move(movement) else {
                     continue;
-                }
-                let score = next.quiescence(alpha, beta, maximizing_color, context, depth - 1);
+                };
+                let score = self.quiescence(alpha, beta, maximizing_color, context, depth - 1);
+                self.unmake_search_move(undo);
                 best = best.max(score);
                 alpha = alpha.max(best);
                 if alpha >= beta {
@@ -538,14 +539,14 @@ impl Game {
                 if context.exhausted() {
                     break;
                 }
-                if !context.charge_clone() {
+                if !context.charge_move_application() {
                     break;
                 }
-                let mut next = self.clone_for_search();
-                if !next.apply_move_for_search(movement.from, movement.to) {
+                let Some(undo) = self.make_search_move(movement) else {
                     continue;
-                }
-                let score = next.quiescence(alpha, beta, maximizing_color, context, depth - 1);
+                };
+                let score = self.quiescence(alpha, beta, maximizing_color, context, depth - 1);
+                self.unmake_search_move(undo);
                 best = best.min(score);
                 beta = beta.min(best);
                 if alpha >= beta {
@@ -753,13 +754,20 @@ impl Game {
             return;
         }
         let score = self.cheap_move_order_score(&movement, weights);
-        scored.push((score, movement));
-        scored.sort_by(|(left_score, left), (right_score, right)| {
-            right_score
-                .cmp(left_score)
-                .then_with(|| Self::move_cmp(left, right))
-        });
-        scored.truncate(limit);
+        let insert_at = scored
+            .iter()
+            .position(|(existing_score, existing)| {
+                score > *existing_score
+                    || score == *existing_score && Self::move_cmp(&movement, existing).is_lt()
+            })
+            .unwrap_or(scored.len());
+        if insert_at >= limit && scored.len() >= limit {
+            return;
+        }
+        scored.insert(insert_at, (score, movement));
+        if scored.len() > limit {
+            scored.pop();
+        }
     }
 
     pub(crate) fn order_moves(&self, moves: Vec<MoveStep>, weights: &EvalWeights) -> Vec<MoveStep> {
@@ -1006,6 +1014,7 @@ impl Game {
         let Some((timeline_id, time)) = self.next_pending_board_key(self.turn) else {
             return moves;
         };
+        let mut setup_probe = None;
         for movement in
             self.legal_single_moves_for_board_until(timeline_id, time, weights, deadline)
         {
@@ -1015,7 +1024,11 @@ impl Game {
             if self.piece_at(movement.to).is_some()
                 || movement.from.timeline_id != movement.to.timeline_id
                 || movement.from.time != movement.to.time
-                || self.move_creates_royal_capture_setup(movement, weights)
+                || self.move_creates_royal_capture_setup_with_probe(
+                    movement,
+                    weights,
+                    &mut setup_probe,
+                )
             {
                 moves.push(movement);
             }
@@ -1024,6 +1037,35 @@ impl Game {
             }
         }
         moves
+    }
+
+    fn move_creates_royal_capture_setup_with_probe(
+        &self,
+        movement: MoveStep,
+        weights: &EvalWeights,
+        probe: &mut Option<Game>,
+    ) -> bool {
+        if weights.royal_capture_setup == 0
+            || self
+                .piece_at(movement.to)
+                .is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
+        {
+            return false;
+        }
+        let Some(piece) = self.piece_at(movement.from) else {
+            return false;
+        };
+        let current_corridor_pressure =
+            self.temporal_royal_corridor_pressure_for(piece.color, weights);
+        let search = probe.get_or_insert_with(|| self.clone_for_search());
+        let Some(undo) = search.make_search_move(movement) else {
+            return false;
+        };
+        let creates_setup = search.royal_capture_available(piece.color)
+            || search.temporal_royal_corridor_pressure_for(piece.color, weights)
+                > current_corridor_pressure;
+        search.unmake_search_move(undo);
+        creates_setup
     }
 
     pub(crate) fn cheap_move_order_score(&self, movement: &MoveStep, weights: &EvalWeights) -> i32 {
@@ -1100,30 +1142,6 @@ impl Game {
         score
     }
 
-    pub(crate) fn move_creates_royal_capture_setup(
-        &self,
-        movement: MoveStep,
-        weights: &EvalWeights,
-    ) -> bool {
-        if weights.royal_capture_setup == 0
-            || self
-                .piece_at(movement.to)
-                .is_some_and(|piece| Self::is_royal_piece(piece.piece_type))
-        {
-            return false;
-        }
-        let Some(piece) = self.piece_at(movement.from) else {
-            return false;
-        };
-        let current_corridor_pressure =
-            self.temporal_royal_corridor_pressure_for(piece.color, weights);
-        let mut next = self.clone_for_search();
-        next.apply_move_for_search(movement.from, movement.to)
-            && (next.royal_capture_available(piece.color)
-                || next.temporal_royal_corridor_pressure_for(piece.color, weights)
-                    > current_corridor_pressure)
-    }
-
     pub(crate) fn submit_turn_for_search(&mut self) -> bool {
         // Search mirrors user submission but returns a bool rather than writing a
         // user-facing status message.
@@ -1149,32 +1167,65 @@ impl Game {
             return false;
         }
 
-        let captured = self.captured_piece(to, move_kind);
-        self.record_staged_capture(piece.color, captured);
-        self.apply_move_unchecked(from, to, piece, move_kind);
+        self.apply_legal_move_for_search(from, to, piece, move_kind);
         true
     }
 
+    fn apply_legal_move_for_search(
+        &mut self,
+        from: Position,
+        to: Position,
+        piece: Piece,
+        move_kind: MoveKind,
+    ) {
+        let captured = self.captured_piece(to, move_kind);
+        self.record_staged_capture(piece.color, captured);
+        self.apply_move_unchecked(from, to, piece, move_kind);
+    }
+
     pub(crate) fn make_search_move(&mut self, movement: MoveStep) -> Option<SearchUndo> {
+        let (piece, move_kind) = self.legal_move_kind(movement.from, movement.to)?;
+        if !self.allows_search_move(movement.from, movement.to, piece, move_kind) {
+            return None;
+        }
+
+        let source_board_len = (
+            movement.from.timeline_id,
+            self.timeline(movement.from.timeline_id)?.boards.len(),
+        );
+        let target_board_len = if matches!(move_kind, MoveKind::Branch)
+            && !self.is_latest_board(movement.to.timeline_id, movement.to.time)
+        {
+            None
+        } else if matches!(move_kind, MoveKind::Branch)
+            && movement.to.timeline_id != movement.from.timeline_id
+        {
+            Some((
+                movement.to.timeline_id,
+                self.timeline(movement.to.timeline_id)?.boards.len(),
+            ))
+        } else {
+            None
+        };
         let undo = SearchUndo {
             timeline_count: self.timelines.len(),
-            board_lengths: self
-                .timelines
-                .iter()
-                .map(|timeline| (timeline.id, timeline.boards.len()))
-                .collect(),
+            source_board_len,
+            target_board_len,
             next_timeline_id: self.next_timeline_id,
             next_black_timeline_id: self.next_black_timeline_id,
             staged_royal_capture_by: self.staged_royal_capture_by,
             position_hash: self.position_hash,
         };
-        self.apply_move_for_search(movement.from, movement.to)
-            .then_some(undo)
+        self.apply_legal_move_for_search(movement.from, movement.to, piece, move_kind);
+        Some(undo)
     }
 
     pub(crate) fn unmake_search_move(&mut self, undo: SearchUndo) {
         self.timelines.truncate(undo.timeline_count);
-        for (timeline_id, board_len) in undo.board_lengths {
+        if let Some(timeline) = self.timeline_mut(undo.source_board_len.0) {
+            timeline.boards.truncate(undo.source_board_len.1);
+        }
+        if let Some((timeline_id, board_len)) = undo.target_board_len {
             if let Some(timeline) = self.timeline_mut(timeline_id) {
                 timeline.boards.truncate(board_len);
             }

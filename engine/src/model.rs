@@ -138,7 +138,8 @@ pub(crate) struct GameCheckpoint {
 
 pub(crate) struct SearchUndo {
     pub(crate) timeline_count: usize,
-    pub(crate) board_lengths: Vec<(i32, usize)>,
+    pub(crate) source_board_len: (i32, usize),
+    pub(crate) target_board_len: Option<(i32, usize)>,
     pub(crate) next_timeline_id: i32,
     pub(crate) next_black_timeline_id: i32,
     pub(crate) staged_royal_capture_by: Option<Color>,

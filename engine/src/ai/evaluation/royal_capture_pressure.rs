@@ -35,13 +35,16 @@ impl Game {
         limits: EvaluationLimits,
         stats: &mut EvaluationStats,
     ) -> i32 {
-        let mut score = 0;
         let royal_targets = self.royal_pieces(color.opposite());
-        for (from, piece) in self.latest_pieces() {
+        self.latest_piece_score_sum_with_attack_budget(limits, stats, |from, piece, stats| {
             if piece.color != color {
-                continue;
+                return 0;
             }
+            let mut score = 0;
             for (target, _) in &royal_targets {
+                if stats.attack_budget_exhausted(limits) {
+                    break;
+                }
                 if self.attacks_square_with_limits(piece, from, *target, limits, stats) {
                     let distance = tactical_distance(self.movement_delta(from, *target));
                     let urgency = 6_i32.saturating_sub(distance.min(6)).max(1);
@@ -51,7 +54,7 @@ impl Game {
                     }
                 }
             }
-        }
-        score
+            score
+        })
     }
 }
