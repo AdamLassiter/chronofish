@@ -27,6 +27,7 @@ interface AiChoice {
   nodes?: number | null;
   gpuSearch?: string | null;
   cpuSearch?: string | null;
+  principalVariation?: PrincipalVariation;
 }
 
 type PrincipalVariation = Move[][];
@@ -69,6 +70,8 @@ interface PendingSearch {
   deadlineAt: number;
   results: PendingResult[];
   errors: string[];
+  minimumFallbackStarted: boolean;
+  incompleteDepthAttempt: boolean;
 }
 
 interface AiWorkerResponse {
@@ -86,6 +89,7 @@ interface RankedBotChoice {
   nodes?: number | null | undefined;
   gpuSearch?: string | null | undefined;
   cpuSearch?: string | null | undefined;
+  principalVariation?: PrincipalVariation | undefined;
   partitionIndex: number | null;
   selected: boolean;
 }
@@ -97,6 +101,7 @@ interface BotDecisionChoice {
   nodes: number | null;
   gpuSearch: string | null;
   cpuSearch: string | null;
+  principalVariation: PrincipalVariation;
 }
 
 export interface BotDecisionRecord {
@@ -241,11 +246,15 @@ export function createBotController({
   }
 
   function terminateAiWorkers(): void {
+    terminateAiWorkerInstances();
+    bot.pendingSearch = null;
+  }
+
+  function terminateAiWorkerInstances(): void {
     for (const worker of aiWorkers) {
       worker.terminate();
     }
     aiWorkers = [];
-    bot.pendingSearch = null;
   }
 
   function botSearchWorkerCount(_effortName: string, _backend: BotBackend): number {
@@ -270,6 +279,14 @@ export function createBotController({
     return `${seconds}s`;
   }
 
+  function formatBotCountdown(deadlineAt: number, now = Date.now()): string {
+    const deltaMs = deadlineAt - now;
+    if (deltaMs >= 0) {
+      return `${formatBotTimeLimit(deltaMs)} left`;
+    }
+    return `${formatBotTimeLimit(-deltaMs)} overtime`;
+  }
+
   function botMoveCredentials(color: BotColor): BotCredentials {
     return { color, token: bot.tokens[color] ?? botToken(color) };
   }
@@ -279,11 +296,10 @@ export function createBotController({
     if (!bot.thinking || !pending || pending.id !== id) {
       return;
     }
-    const remainingMs = Math.max(0, pending.deadlineAt - Date.now());
     const workerText = `${pending.workerCount} worker${pending.workerCount === 1 ? "" : "s"}`;
     const bestDepth = deepestStoredDepth(pending);
     const bestText = bestDepth > 0 ? ` Best depth ${bestDepth}.` : "";
-    message.textContent = `${botDisplayName(pending.botColor)} searching depth ${pending.currentDepth}/${pending.targetDepth} across ${workerText}. ${formatBotTimeLimit(remainingMs)} left.${bestText}`;
+    message.textContent = `${botDisplayName(pending.botColor)} searching depth ${pending.currentDepth}/${pending.targetDepth} across ${workerText}. ${formatBotCountdown(pending.deadlineAt)}.${bestText}`;
   }
 
   async function seatBot(color: BotColor): Promise<void> {
@@ -317,10 +333,10 @@ export function createBotController({
       return;
     }
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
-    const targetDepth = Math.max(1, effort.depth ?? 1);
+    const targetDepth = evenSearchDepthAtMost(effort.depth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH);
     const minDepth = Math.min(
       targetDepth,
-      Math.max(1, Math.floor(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH))
+      evenSearchDepthAtLeast(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH)
     );
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
@@ -342,7 +358,9 @@ export function createBotController({
       bestByDepth: new Map(),
       deadlineAt: Date.now() + timeMs,
       results: [],
-      errors: []
+      errors: [],
+      minimumFallbackStarted: false,
+      incompleteDepthAttempt: false
     };
     clearBotTimeout();
     bot.timeoutId = setTimeout(() => handleBotTimeout(id, botColor, timeMs), timeMs);
@@ -356,10 +374,11 @@ export function createBotController({
     if (!bot.thinking || !pending || pending.id !== id) {
       return;
     }
-    const nextDepth = pending.currentDepth + 1;
+    const nextDepth = nextBotSearchDepth(pending.currentDepth);
+    const completedDepth = deepestStoredDepth(pending);
     if (
       nextDepth > pending.targetDepth
-      || (Date.now() >= pending.deadlineAt && pending.currentDepth >= pending.minDepth)
+      || (Date.now() >= pending.deadlineAt && completedDepth >= pending.minDepth)
     ) {
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
       return;
@@ -368,6 +387,7 @@ export function createBotController({
     pending.depthExpected = 0;
     pending.depthReceived = 0;
     pending.depthResults = [];
+    pending.incompleteDepthAttempt = false;
     const remainingMs = pending.currentDepth <= pending.minDepth
       ? pending.timeMs
       : Math.max(1, pending.deadlineAt - Date.now());
@@ -380,6 +400,7 @@ export function createBotController({
           depth: nextDepth,
           nodes: pending.nodes,
           timeMs: workerTimeMs,
+          minDepth: Math.min(nextDepth, pending.minDepth),
           gpuMode: botGpuMode(),
           partitionIndex,
           partitionCount: pending.workerCount
@@ -411,6 +432,28 @@ export function createBotController({
     return Math.max(1, timeMs - margin);
   }
 
+  function nextBotSearchDepth(currentDepth: number): number {
+    return currentDepth <= 0 ? 2 : currentDepth + 2;
+  }
+
+  function evenSearchDepthAtMost(depth: number): number {
+    const value = Math.max(2, Math.floor(depth));
+    return value % 2 === 0 ? value : Math.max(2, value - 1);
+  }
+
+  function evenSearchDepthAtLeast(depth: number): number {
+    const value = Math.max(2, Math.floor(depth));
+    return value % 2 === 0 ? value : value + 1;
+  }
+
+  function completedEvenSearchDepth(depth: number | null | undefined, requestedDepth: number): number | null {
+    if (!Number.isFinite(depth)) {
+      return null;
+    }
+    const completedDepth = Math.min(requestedDepth, Math.floor(depth ?? 0));
+    return completedDepth === requestedDepth && completedDepth >= 2 && completedDepth % 2 === 0 ? completedDepth : null;
+  }
+
   function botGpuMode(): "full" | "hybrid" {
     return localStorage.getItem(GPU_MODE_STORAGE_KEY) === "full" ? "full" : "hybrid";
   }
@@ -433,6 +476,14 @@ export function createBotController({
         finishBotSearch(pending, "timeout");
         return;
       }
+      if (pending.currentDepth <= pending.minDepth && pending.depthReceived < pending.depthExpected) {
+        message.textContent = `${botDisplayName(botColor)} reached ${formatBotTimeLimit(timeMs)} and is completing minimum depth ${pending.minDepth} before moving.`;
+        return;
+      }
+      if (pending.backend === "gpu" && !pending.minimumFallbackStarted) {
+        startMinimumDepthCpuFallback(pending);
+        return;
+      }
       message.textContent = `${botDisplayName(botColor)} reached ${formatBotTimeLimit(timeMs)} and is completing depth ${Math.max(1, pending.currentDepth)} before moving.`;
     } else {
       aiRequestId += 1;
@@ -441,6 +492,38 @@ export function createBotController({
       terminateAiWorkers();
       message.textContent = `${botDisplayName(botColor)} found no legal turn in ${formatBotTimeLimit(timeMs)}.`;
       void completeBotTurn(botColor, { status: "noLegalTurn", moves: [] });
+    }
+  }
+
+  function startMinimumDepthCpuFallback(pending: PendingSearch): void {
+    terminateAiWorkerInstances();
+    pending.minimumFallbackStarted = true;
+    pending.currentDepth = pending.minDepth;
+    pending.depthExpected = 1;
+    pending.depthReceived = 0;
+    pending.depthResults = [];
+    pending.incompleteDepthAttempt = false;
+    message.textContent = `${botDisplayName(pending.botColor)} reached ${formatBotTimeLimit(pending.timeMs)} and is completing minimum depth ${pending.minDepth} on the CPU before moving.`;
+    try {
+      createAiWorker("cpu").postMessage({
+        id: pending.id,
+        game: getGame(),
+        depth: pending.minDepth,
+        minDepth: pending.minDepth,
+        nodes: pending.nodes,
+        timeMs: pending.timeMs,
+        partitionIndex: 0,
+        partitionCount: 1
+      });
+    } catch (error: unknown) {
+      handleAiWorkerMessage({
+        data: {
+          id: pending.id,
+          ok: false,
+          error: errorMessage(error),
+          partitionIndex: 0
+        }
+      } as MessageEvent<AiWorkerResponse>);
     }
   }
 
@@ -457,11 +540,16 @@ export function createBotController({
 
     pending.depthReceived += 1;
     if (ok && result) {
-      const receivedDepth = pending.currentDepth;
-      const depthResult = { ...result, depth: receivedDepth };
-      const entry = { result: depthResult, partitionIndex: partitionIndex ?? null, depth: receivedDepth };
-      pending.results.push(entry);
-      pending.depthResults.push(entry);
+      const receivedDepth = completedEvenSearchDepth(result.depth ?? pending.currentDepth, pending.currentDepth);
+      if (receivedDepth === null) {
+        pending.incompleteDepthAttempt = true;
+        pending.errors.push(`AI worker returned odd or incomplete depth ${result.depth ?? "unknown"} for requested depth ${pending.currentDepth}.`);
+      } else {
+        const depthResult = { ...result, depth: receivedDepth };
+        const entry = { result: depthResult, partitionIndex: partitionIndex ?? null, depth: receivedDepth };
+        pending.results.push(entry);
+        pending.depthResults.push(entry);
+      }
     } else {
       pending.errors.push(error ?? "AI worker returned no result.");
     }
@@ -470,17 +558,40 @@ export function createBotController({
       return;
     }
 
-    const depthBest = selectBestAiResult(pending.depthResults.map((entry) => entry.result));
-    if (depthBest) {
-      pending.bestByDepth.set(pending.currentDepth, depthBest);
+    for (const entry of pending.depthResults) {
+      const existing = pending.bestByDepth.get(entry.depth);
+      const depthBest = selectBestAiResult(existing ? [existing, entry.result] : [entry.result]);
+      if (depthBest) {
+        pending.bestByDepth.set(entry.depth, depthBest);
+      }
     }
 
     const bestResult = selectDeepestStoredResult(pending)
       ?? selectBestAiResult(pending.results.map((entry) => entry.result));
-    const reachedTarget = pending.currentDepth >= pending.targetDepth;
+    const reachedTarget = (bestResult?.depth ?? 0) >= pending.targetDepth;
     const reachedTimedMinimum = Date.now() >= pending.deadlineAt
       && (bestResult?.depth ?? 0) >= pending.minDepth;
     if (reachedTarget || reachedTimedMinimum) {
+      finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
+      return;
+    }
+
+    if (pending.incompleteDepthAttempt && pending.currentDepth >= pending.minDepth) {
+      if (pending.backend === "gpu" && !pending.minimumFallbackStarted) {
+        startMinimumDepthCpuFallback(pending);
+        return;
+      }
+      if (Date.now() < pending.deadlineAt && nextBotSearchDepth(pending.currentDepth) <= pending.targetDepth) {
+        launchNextBotDepth(pending.id);
+        return;
+      }
+    }
+
+    if (!bestResult && nextBotSearchDepth(pending.currentDepth) > pending.targetDepth) {
+      if (pending.backend === "gpu" && !pending.minimumFallbackStarted) {
+        startMinimumDepthCpuFallback(pending);
+        return;
+      }
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
       return;
     }
@@ -517,17 +628,7 @@ export function createBotController({
   function selectBestAiResult(results: AiSearchResult[]): AiSearchResult | null {
     return results
       .filter((result) => result.status === "ok" && result.moves.length > 0)
-      .sort((left, right) => {
-        const depth = (right.depth ?? 0) - (left.depth ?? 0);
-        if (depth !== 0) {
-          return depth;
-        }
-        const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
-        if (score !== 0) {
-          return score;
-        }
-        return (right.nodes ?? 0) - (left.nodes ?? 0);
-      })[0] ?? null;
+      .sort(compareAiResultPreference)[0] ?? null;
   }
 
   function selectDeepestStoredResult(pending: PendingSearch): AiSearchResult | null {
@@ -562,6 +663,7 @@ export function createBotController({
       selected: choice.selected ? "yes" : "",
       eval: formatBotEvaluation(choice.score),
       moves: choice.moves.map((move) => formatBotMove(move, pending.game)).join(" | "),
+      plan: formatBotPlan(choice.principalVariation ?? [choice.moves], pending.game),
       depth: choice.depth ?? "",
       nodes: choice.nodes ?? "",
       worker: choice.partitionIndex ?? "",
@@ -584,7 +686,15 @@ export function createBotController({
       const rawChoices = Array.isArray(result.choices) && result.choices.length
         ? result.choices
         : result.moves.length
-          ? [{ moves: result.moves, score: result.score, depth: result.depth, nodes: result.nodes, gpuSearch: result.gpuSearch, cpuSearch: result.cpuSearch }]
+          ? [{
+              moves: result.moves,
+              score: result.score,
+              depth: result.depth,
+              nodes: result.nodes,
+              gpuSearch: result.gpuSearch,
+              cpuSearch: result.cpuSearch,
+              principalVariation: result.principalVariation
+            }]
           : [];
       for (const choice of rawChoices) {
         const moves = choice.moves ?? [];
@@ -600,10 +710,11 @@ export function createBotController({
           nodes: choice.nodes ?? result.nodes,
           gpuSearch: choice.gpuSearch ?? result.gpuSearch,
           cpuSearch: choice.cpuSearch ?? result.cpuSearch,
+          principalVariation: normalizePrincipalVariation(choice.principalVariation ?? result.principalVariation, moves),
           partitionIndex: entry.partitionIndex,
           selected: key === selectedKey
         };
-        if (!current || (next.score ?? -Infinity) > (current.score ?? -Infinity)) {
+        if (!current || compareBotChoicePreference(next, current) < 0) {
           byMoves.set(key, next);
         } else if (key === selectedKey) {
           current.selected = true;
@@ -611,13 +722,7 @@ export function createBotController({
       }
     }
     return Array.from(byMoves.values())
-      .sort((left, right) => {
-        const score = botChoiceScore(right) - botChoiceScore(left);
-        if (score !== 0) {
-          return score;
-        }
-        return botMovesKey(left.moves).localeCompare(botMovesKey(right.moves));
-      })
+      .sort(compareBotChoicePreference)
       .slice(0, 16);
   }
 
@@ -641,7 +746,8 @@ export function createBotController({
         depth: choice.depth ?? null,
         nodes: choice.nodes ?? null,
         gpuSearch: choice.gpuSearch ?? null,
-        cpuSearch: choice.cpuSearch ?? null
+        cpuSearch: choice.cpuSearch ?? null,
+        principalVariation: normalizePrincipalVariation(choice.principalVariation, choice.moves)
       }))
     };
   }
@@ -663,8 +769,46 @@ export function createBotController({
     return Number.isFinite(choice.score) ? choice.score ?? -Infinity : -Infinity;
   }
 
+  function botChoiceDepth(choice: Pick<RankedBotChoice, "depth">): number {
+    return Number.isFinite(choice.depth) ? choice.depth ?? 0 : 0;
+  }
+
+  function compareAiResultPreference(left: AiSearchResult, right: AiSearchResult): number {
+    const depth = (right.depth ?? 0) - (left.depth ?? 0);
+    if (depth !== 0) {
+      return depth;
+    }
+    const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
+    if (score !== 0) {
+      return score;
+    }
+    return (right.nodes ?? 0) - (left.nodes ?? 0);
+  }
+
+  function compareBotChoicePreference(left: RankedBotChoice, right: RankedBotChoice): number {
+    const depth = botChoiceDepth(right) - botChoiceDepth(left);
+    if (depth !== 0) {
+      return depth;
+    }
+    const score = botChoiceScore(right) - botChoiceScore(left);
+    if (score !== 0) {
+      return score;
+    }
+    const nodes = (right.nodes ?? 0) - (left.nodes ?? 0);
+    if (nodes !== 0) {
+      return nodes;
+    }
+    return botMovesKey(left.moves).localeCompare(botMovesKey(right.moves));
+  }
+
   function botMovesKey(moves: Move[]): string {
     return moves.map((move) => formatBotMove(move)).join("|");
+  }
+
+  function formatBotPlan(variation: PrincipalVariation, game: GameSnapshot | null = null): string {
+    return normalizePrincipalVariation(variation, variation[0] ?? [])
+      .map((turn, index) => `d${index + 1}: ${turn.map((move) => formatBotMove(move, game)).join(" | ")}`)
+      .join(" => ");
   }
 
   function formatBotMove(move: Move, game: GameSnapshot | null = null): string {

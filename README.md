@@ -196,10 +196,10 @@ Start the server with model-replacement and loss-log endpoints enabled:
 
 Open <http://localhost:5173> and use the Training control. The browser UI can:
 
-- train the compact GPU value model from GPU search, self-play, distillation,
-  CPU labels, or a mixture of those sources;
-- mutate and score CPU heuristic parameters against CPU search, GPU search, or
-  both;
+- train the compact GPU value model from any selected mix of GPU search, CPU
+  heuristic, self-play, and distillation modes;
+- mutate and score CPU heuristic parameters from selected GPU search, CPU
+  heuristic, and self modes;
 - upload accepted GPU models to
   `engine/models/gpu-v1/value-model.cfnn`;
 - upload accepted CPU parameters to

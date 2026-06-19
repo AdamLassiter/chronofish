@@ -1006,17 +1006,6 @@ function collectPlannedRenderData(): { plannedArrows: PlannedArrow[]; ghostBoard
   return { plannedArrows, ghostBoards };
 }
 
-function applyBotReviewTurn(snapshot: GameSnapshot, moves: Move[]): GameSnapshot | null {
-  let nextSnapshot: GameSnapshot | null = cloneGame(snapshot);
-  for (const move of moves) {
-    nextSnapshot = previewPlannedMove(nextSnapshot, move);
-    if (!nextSnapshot) {
-      return null;
-    }
-  }
-  return nextSnapshot;
-}
-
 function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnapshot, skipTurns = 0): void {
   clearPlannedMoveTree();
   let parentId: string | null = null;
@@ -1033,6 +1022,20 @@ function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnaps
   }
 }
 
+function botReviewDecisionForBoard(position: Position, snapshot: GameSnapshot): BotDecisionRecord | null {
+  const clickedBoard = boardAt(snapshot, position.timelineId, position.time);
+  if (!clickedBoard) {
+    return null;
+  }
+  return botController.allDecisions().slice().reverse().find((decision) => {
+    if (decision.botColor !== clickedBoard.sideToMove) {
+      return false;
+    }
+    const decisionBoard = boardAt(decision.game, position.timelineId, position.time);
+    return decisionBoard ? boardSnapshotKey(decisionBoard) === boardSnapshotKey(clickedBoard) : false;
+  }) ?? null;
+}
+
 function showBotPlanForPosition(position: Position): boolean {
   if (phase !== "review") {
     return false;
@@ -1041,43 +1044,24 @@ function showBotPlanForPosition(position: Position): boolean {
     clearPlannedMoves();
     return true;
   }
-  const clickedBoard = boardAt(game, position.timelineId, position.time);
-  const originMove = clickedBoard?.origin?.from && clickedBoard.origin.to
-    ? { from: clickedBoard.origin.from, to: clickedBoard.origin.to }
-    : null;
-  const decisions = botController.allDecisions().slice().reverse();
-  const decision = (originMove
-    ? decisions.find((candidate) => candidate.selectedMoves.some((move) => sameMove(move, originMove)))
-    : null)
-    ?? decisions.find((candidate) => snapshotHasBoard(candidate.game, position));
+  const reviewSnapshot = botReviewProjection?.finalGame ?? game;
+  const decision = botReviewDecisionForBoard(position, reviewSnapshot);
   if (!decision) {
     return false;
   }
-  const selectedTurnClicked = Boolean(originMove
-    && decision.selectedMoves.some((move) => sameMove(move, originMove)));
-  const baseSnapshot = selectedTurnClicked
-    ? applyBotReviewTurn(decision.game, decision.selectedMoves)
-    : cloneGame(decision.game);
-  if (!baseSnapshot) {
-    return false;
-  }
-  const skippedTurns = selectedTurnClicked ? 1 : 0;
+  const baseSnapshot = cloneGame(decision.game);
   botReviewProjection = {
-    finalGame: botReviewProjection?.finalGame ?? cloneGame(game),
+    finalGame: botReviewProjection?.finalGame ?? cloneGame(reviewSnapshot),
     finalCommittedGame: botReviewProjection?.finalCommittedGame ?? cloneGame(committedGame),
     decision
   };
   game = cloneGame(baseSnapshot);
   committedGame = cloneGame(baseSnapshot);
-  buildBotReviewPlan(decision, baseSnapshot, skippedTurns);
+  buildBotReviewPlan(decision, baseSnapshot);
   elements.message.textContent = `${botDisplayName(decision.botColor)} depth ${decision.selectedDepth ?? "?"} plan from turn ${decision.ply}.`;
-  const focusMove = originMove
-    ? decision.selectedMoves.find((move) => sameMove(move, originMove))
-    : null;
-  const focusPosition = selectedTurnClicked && snapshotHasBoard(baseSnapshot, position)
+  const focusPosition = snapshotHasBoard(baseSnapshot, position)
     ? position
-    : focusMove?.from
-    ?? decision.selectedMoves[0]?.from
+    : decision.selectedMoves[0]?.from
     ?? (snapshotHasBoard(baseSnapshot, position) ? position : null);
   render(focusPosition ? { focusPosition } : {});
   return true;

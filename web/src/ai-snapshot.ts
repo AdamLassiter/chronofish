@@ -501,6 +501,18 @@ export function pieceTypeFromCode(code: number): PieceType | null {
   return pieceTypes[code] ?? null;
 }
 
-export function colorCode(color: Color): number {
-  return color === "black" ? 1 : 0;
+export function colorCode(color: Color | string | number | null | undefined): number {
+  if (typeof color === "number") {
+    return color === 1 ? 1 : 0;
+  }
+  if (typeof color === "string") {
+    const normalized = color.toLowerCase();
+    if (normalized === "black") {
+      return 1;
+    }
+    if (normalized === "white") {
+      return 0;
+    }
+  }
+  throw new Error(`Unsupported color value: ${String(color)}`);
 }

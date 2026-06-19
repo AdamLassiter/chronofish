@@ -219,84 +219,62 @@ struct ReduceParams {
   state_stride: u32,
   ancestry_offset: u32,
   target_depth: u32,
+  level: u32,
+  read_from_summaries: u32,
+  _pad0: u32,
+  _pad1: u32,
 };
 
 @group(0) @binding(0) var<storage, read_write> reduce_states: array<i32>;
 @group(0) @binding(1) var<storage, read_write> reduce_summaries: array<i32>;
 @group(0) @binding(2) var<uniform> reduce_params: ReduceParams;
 
-@compute @workgroup_size(1)
-fn minimax_reduce(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x != 0u || reduce_params.target_depth == 0u) { return; }
-  var node_ids: array<i32, 128>;
-  var parent_ids: array<i32, 128>;
-  var values: array<i32, 128>;
-  var count = 0u;
-  let deepest = reduce_params.target_depth - 1u;
-  for (var state = 0u; state < min(128u, reduce_params.state_count); state = state + 1u) {
-    let base = state * reduce_params.state_stride;
-    if (reduce_states[base + HEADER_DEPTH] < i32(reduce_params.target_depth)) { continue; }
-    let node = reduce_states[base + reduce_params.ancestry_offset + deepest];
-    if (node == 0) { continue; }
-    node_ids[count] = node;
-    parent_ids[count] = node;
-    if (deepest > 0u) {
-      parent_ids[count] = reduce_states[base + reduce_params.ancestry_offset + deepest - 1u];
-    }
-    values[count] = reduce_states[base + HEADER_SCORE];
-    count = count + 1u;
+fn reduction_value(state: u32) -> i32 {
+  if (reduce_params.read_from_summaries != 0u) {
+    return reduce_summaries[state * SUMMARY_STRIDE + 1u];
   }
+  return reduce_states[state * reduce_params.state_stride + HEADER_SCORE];
+}
 
-  var level = deepest;
-  loop {
-    if (level == 0u || count == 0u) { break; }
-    var next_ids: array<i32, 128>;
-    var next_values: array<i32, 128>;
-    var next_count = 0u;
-    for (var index = 0u; index < count; index = index + 1u) {
-      let parent = parent_ids[index];
-      var output = -1;
-      for (var existing = 0u; existing < next_count; existing = existing + 1u) {
-        if (next_ids[existing] == parent) { output = i32(existing); break; }
-      }
-      if (output < 0) {
-        output = i32(next_count);
-        next_ids[next_count] = parent;
-        next_values[next_count] = values[index];
-        next_count = next_count + 1u;
-      } else if ((level & 1u) == 0u) {
-        next_values[u32(output)] = max(next_values[u32(output)], values[index]);
-      } else {
-        next_values[u32(output)] = min(next_values[u32(output)], values[index]);
-      }
-    }
-    level = level - 1u;
-    count = next_count;
-    for (var index = 0u; index < count; index = index + 1u) {
-      node_ids[index] = next_ids[index];
-      values[index] = next_values[index];
-      parent_ids[index] = next_ids[index];
-      if (level > 0u) {
-        for (var state = 0u; state < min(128u, reduce_params.state_count); state = state + 1u) {
-          let base = state * reduce_params.state_stride;
-          if (reduce_states[base + reduce_params.ancestry_offset + level] == node_ids[index]) {
-            parent_ids[index] = reduce_states[base + reduce_params.ancestry_offset + level - 1u];
-            break;
-          }
-        }
-      }
-    }
-  }
+fn reduction_state_valid(state: u32) -> bool {
+  let base = state * reduce_params.state_stride;
+  return reduce_states[base + HEADER_DEPTH] >= i32(reduce_params.target_depth)
+    && reduce_states[base + reduce_params.ancestry_offset + reduce_params.level] != 0;
+}
 
-  for (var state = 0u; state < min(128u, reduce_params.state_count); state = state + 1u) {
-    let base = state * reduce_params.state_stride;
-    let root = reduce_states[base + reduce_params.ancestry_offset];
-    for (var index = 0u; index < count; index = index + 1u) {
-      if (node_ids[index] == root) {
-        reduce_states[base + HEADER_SCORE] = values[index];
-        reduce_summaries[state * SUMMARY_STRIDE + 1u] = values[index];
-        break;
-      }
-    }
+@compute @workgroup_size(64)
+fn minimax_reduce_stage(@builtin(global_invocation_id) id: vec3<u32>) {
+  let state = id.x;
+  if (state >= reduce_params.state_count || reduce_params.level == 0u || !reduction_state_valid(state)) {
+    return;
   }
+  let base = state * reduce_params.state_stride;
+  let parent = reduce_states[base + reduce_params.ancestry_offset + reduce_params.level - 1u];
+  let maximize = (reduce_params.level & 1u) == 0u;
+  var value = select(2147483647, -2147483647, maximize);
+  var found = false;
+  for (var peer = 0u; peer < reduce_params.state_count; peer = peer + 1u) {
+    if (!reduction_state_valid(peer)) { continue; }
+    let peer_base = peer * reduce_params.state_stride;
+    if (reduce_states[peer_base + reduce_params.ancestry_offset + reduce_params.level - 1u] != parent) {
+      continue;
+    }
+    let peer_value = reduction_value(peer);
+    value = select(min(value, peer_value), max(value, peer_value), maximize);
+    found = true;
+  }
+  if (!found) { return; }
+  if (reduce_params.read_from_summaries != 0u) {
+    reduce_states[base + HEADER_SCORE] = value;
+  } else {
+    reduce_summaries[state * SUMMARY_STRIDE + 1u] = value;
+  }
+}
+
+@compute @workgroup_size(64)
+fn minimax_copy_scores(@builtin(global_invocation_id) id: vec3<u32>) {
+  let state = id.x;
+  if (state >= reduce_params.state_count || !reduction_state_valid(state)) { return; }
+  let base = state * reduce_params.state_stride;
+  reduce_states[base + HEADER_SCORE] = reduce_summaries[state * SUMMARY_STRIDE + 1u];
 }

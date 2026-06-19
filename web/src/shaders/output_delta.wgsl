@@ -1,6 +1,6 @@
 struct Params {
   batch_count: u32,
-  _pad0: u32,
+  total_weight: f32,
   _pad1: u32,
   _pad2: u32,
 };
@@ -19,5 +19,8 @@ fn output_delta(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
   let dataset_sample = batch_indices[sample];
-  deltas[sample] = (predictions[sample] - labels[dataset_sample]) * label_weights[dataset_sample];
+  let normalization = f32(params.batch_count) / max(params.total_weight, 0.000001);
+  deltas[sample] = (predictions[sample] - labels[dataset_sample])
+    * label_weights[dataset_sample]
+    * normalization;
 }

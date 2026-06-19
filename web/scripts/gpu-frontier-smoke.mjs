@@ -6,7 +6,12 @@ import { spawn } from "node:child_process";
 const url = optionValue("--url") ?? process.env.CHRONOFISH_URL ?? "http://127.0.0.1:5173";
 const benchmarkIterations = positiveNumber(optionValue("--benchmark-iterations") ?? process.env.CHRONOFISH_GPU_SMOKE_ITERATIONS, 3, 1);
 const benchmarkTimeMs = positiveNumber(optionValue("--benchmark-time-ms") ?? process.env.CHRONOFISH_GPU_SMOKE_TIME_MS, 5_000, 1000);
+const smokeTimeoutMs = positiveNumber(optionValue("--smoke-timeout-ms") ?? process.env.CHRONOFISH_GPU_SMOKE_TIMEOUT_MS, 45_000, 5_000);
 const runPerformanceGates = !hasFlag("--skip-performance-gates");
+const smokeGpuMode = optionValue("--gpu-mode") ?? "full";
+const allowSoftwareAdapter = hasFlag("--allow-software-adapter");
+const disableNeural = hasFlag("--disable-neural");
+const cpuMinDepthOnly = hasFlag("--cpu-min-depth-only");
 const browser = process.env.CHRONOFISH_BROWSER ?? await findBrowser();
 if (!browser) {
   throw new Error("Set CHRONOFISH_BROWSER to a Chrome/Chromium binary for GPU frontier smoke tests.");
@@ -64,89 +69,144 @@ const fixtures = [
   }
 ];
 
-const userDataDir = await mkdtemp(path.join(os.tmpdir(), "chronofish-gpu-smoke-"));
-const child = spawn(browser, [
-  "--headless=new",
-  "--disable-gpu-sandbox",
-  "--enable-unsafe-webgpu",
-  "--enable-features=Vulkan",
-  "--remote-debugging-port=0",
-  "--user-data-dir=" + userDataDir,
-  "about:blank"
-], { stdio: ["ignore", "ignore", "pipe"] });
+async function main() {
+  const userDataDir = await mkdtemp(path.join(os.tmpdir(), "chronofish-gpu-smoke-"));
+  const child = spawn(browser, [
+    "--headless=new",
+    "--disable-gpu-sandbox",
+    "--enable-unsafe-webgpu",
+    "--use-angle=vulkan",
+    "--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan",
+    "--remote-debugging-port=0",
+    "--user-data-dir=" + userDataDir,
+    "about:blank"
+  ], { stdio: ["ignore", "ignore", "pipe"] });
 
-try {
-  const endpoint = await devtoolsEndpoint(child);
-  const cdp = await CdpSession.connect(endpoint);
-  const target = await cdp.send("Target.createTarget", { url });
-  const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
-  const sessionId = attached.sessionId;
-  await cdp.send("Page.enable", {}, sessionId);
-  await cdp.send("Runtime.enable", {}, sessionId);
-  await cdp.send("Page.navigate", { url }, sessionId);
-  await delay(1000);
-
-  for (const fixture of fixtures) {
-    if (fixture.expectedTarget) {
-      const legal = await cdp.evaluate(legalTargetExpression(fixture), sessionId);
-      if (!legal.ok) {
-        throw new Error(fixture.name + " legal-target preflight failed: " + (legal.error ?? "unknown error"));
+  try {
+    const endpoint = await devtoolsEndpoint(child);
+    const cdp = await CdpSession.connect(endpoint);
+    const target = await cdp.send("Target.createTarget", { url });
+    const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
+    const sessionId = attached.sessionId;
+    await cdp.send("Page.enable", {}, sessionId);
+    await cdp.send("Runtime.enable", {}, sessionId);
+    await cdp.send("Page.navigate", { url }, sessionId);
+    await delay(1000);
+    if (cpuMinDepthOnly) {
+      const cpu = await cdp.evaluate(cpuMinimumDepthExpression(), sessionId);
+      if (!cpu.ok) {
+        throw new Error("CPU minimum-depth smoke failed: " + (cpu.error ?? "unknown error"));
       }
-      console.log(JSON.stringify(legal.result));
+      console.log(JSON.stringify(cpu.result));
+      cdp.close();
+      return;
     }
-    const result = await cdp.evaluate(workerSmokeExpression(fixture), sessionId);
-    if (!result.ok) {
-      throw new Error(fixture.name + " failed: " + (result.error ?? "unknown error"));
+    const adapter = await cdp.evaluate(adapterInfoExpression(), sessionId);
+    console.log(JSON.stringify({ fixture: "adapter", ...adapter }));
+    if (smokeGpuMode === "full" && adapter.fallback && !allowSoftwareAdapter) {
+      throw new Error("Full GPU smoke selected a fallback software adapter. Install/configure Chromium with native Vulkan WebGPU support, or pass --allow-software-adapter for a deliberately slow functional run.");
     }
-    const search = result.result;
-    if (search.status !== "ok" || !Array.isArray(search.moves) || search.moves.length === 0) {
-      throw new Error(fixture.name + " returned no legal full-mode turn: " + JSON.stringify(search));
+
+    for (const fixture of fixtures) {
+      if (fixture.expectedTarget) {
+        const legal = await cdp.evaluate(legalTargetExpression(fixture), sessionId);
+        if (!legal.ok) {
+          throw new Error(fixture.name + " legal-target preflight failed: " + (legal.error ?? "unknown error"));
+        }
+        console.log(JSON.stringify(legal.result));
+      }
+      const result = await cdp.evaluate(workerSmokeExpression(fixture), sessionId);
+      if (!result.ok) {
+        throw new Error(fixture.name + " failed: " + (result.error ?? "unknown error"));
+      }
+      const search = result.result;
+      if (search.status !== "ok" || !Array.isArray(search.moves) || search.moves.length === 0) {
+        throw new Error(fixture.name + " returned no legal full-mode turn: " + JSON.stringify(search));
+      }
+      if (search.authoritativeReplay !== true) {
+        throw new Error(fixture.name + " did not report authoritative WASM replay validation.");
+      }
+      if (fixture.minMoves && search.moves.length < fixture.minMoves) {
+        throw new Error(fixture.name + " did not complete the expected multi-board turn: " + JSON.stringify(search.moves));
+      }
+      if (smokeGpuMode === "full" && (!search.gpuDiagnostics || search.gpuDiagnostics.readbacks !== 1)) {
+        throw new Error(fixture.name + " did not report the expected single-readback frontier diagnostics.");
+      }
+      if (smokeGpuMode === "full" && search.gpuSearch !== "neural-frontier" && search.gpuSearch !== "heuristic-frontier") {
+        throw new Error(fixture.name + " did not use the resident frontier path: " + JSON.stringify(search));
+      }
+      if (smokeGpuMode === "full" && search.gpuDiagnostics.candidateOverflow) {
+        throw new Error(fixture.name + " reported a capacity-truncated frontier: " + JSON.stringify(search.gpuDiagnostics));
+      }
+      if (smokeGpuMode === "full" && (search.gpuDiagnostics.nodes ?? 0) > 0 && search.gpuDiagnostics.selectedCount < Math.min(search.gpuDiagnostics.frontierWidth ?? 0, search.gpuDiagnostics.nodes ?? 0)) {
+        throw new Error(fixture.name + " underfilled the resident frontier: " + JSON.stringify(search.gpuDiagnostics));
+      }
+      console.log(JSON.stringify({
+        fixture: fixture.name,
+        moves: search.moves.length,
+        depth: search.depth,
+        nodes: search.nodes,
+        gpuSearch: search.gpuSearch,
+        diagnostics: search.gpuDiagnostics
+      }));
     }
-    if (search.authoritativeReplay !== true) {
-      throw new Error(fixture.name + " did not report authoritative WASM replay validation.");
+    const stale = await cdp.evaluate(staleGenerationExpression(multiBoardGame(5), initialGame()), sessionId);
+    if (!stale.ok) {
+      throw new Error("stale-generation failed: " + (stale.error ?? "unknown error"));
     }
-    if (fixture.minMoves && search.moves.length < fixture.minMoves) {
-      throw new Error(fixture.name + " did not complete the expected multi-board turn: " + JSON.stringify(search.moves));
+    console.log(JSON.stringify(stale.result));
+    const deviceLoss = await cdp.evaluate(deviceLossExpression(initialGame()), sessionId);
+    if (!deviceLoss.ok) {
+      throw new Error("device-loss failed: " + (deviceLoss.error ?? "unknown error"));
     }
-    if (!search.gpuDiagnostics || search.gpuDiagnostics.readbacks !== 1) {
-      throw new Error(fixture.name + " did not report the expected single-readback frontier diagnostics.");
+    console.log(JSON.stringify(deviceLoss.result));
+    if (runPerformanceGates) {
+      const benchmark = await cdp.evaluate(benchmarkExpression(benchmarkIterations, benchmarkTimeMs), sessionId);
+      if (!benchmark.ok) {
+        throw new Error("performance-gates failed: " + (benchmark.error ?? "unknown error"));
+      }
+      console.log(JSON.stringify(benchmark.result));
     }
-    if (search.gpuSearch !== "neural-frontier" && search.gpuSearch !== "heuristic-frontier") {
-      throw new Error(fixture.name + " did not use the resident frontier path: " + JSON.stringify(search));
-    }
-    if (search.gpuDiagnostics.candidateOverflow) {
-      throw new Error(fixture.name + " reported a capacity-truncated frontier: " + JSON.stringify(search.gpuDiagnostics));
-    }
-    console.log(JSON.stringify({
-      fixture: fixture.name,
-      moves: search.moves.length,
-      depth: search.depth,
-      nodes: search.nodes,
-      gpuSearch: search.gpuSearch,
-      diagnostics: search.gpuDiagnostics
-    }));
+    cdp.close();
+  } finally {
+    child.kill("SIGTERM");
+    await rm(userDataDir, { recursive: true, force: true });
   }
-  const stale = await cdp.evaluate(staleGenerationExpression(multiBoardGame(5), initialGame()), sessionId);
-  if (!stale.ok) {
-    throw new Error("stale-generation failed: " + (stale.error ?? "unknown error"));
-  }
-  console.log(JSON.stringify(stale.result));
-  const deviceLoss = await cdp.evaluate(deviceLossExpression(initialGame()), sessionId);
-  if (!deviceLoss.ok) {
-    throw new Error("device-loss failed: " + (deviceLoss.error ?? "unknown error"));
-  }
-  console.log(JSON.stringify(deviceLoss.result));
-  if (runPerformanceGates) {
-    const benchmark = await cdp.evaluate(benchmarkExpression(benchmarkIterations, benchmarkTimeMs), sessionId);
-    if (!benchmark.ok) {
-      throw new Error("performance-gates failed: " + (benchmark.error ?? "unknown error"));
-    }
-    console.log(JSON.stringify(benchmark.result));
-  }
-  cdp.close();
-} finally {
-  child.kill("SIGTERM");
-  await rm(userDataDir, { recursive: true, force: true });
+}
+
+function cpuMinimumDepthExpression() {
+  const payload = {
+    id: "cpu-minimum-depth",
+    game: initialGame(),
+    depth: 3,
+    minDepth: 3,
+    nodes: 20_000,
+    timeMs: 1,
+    partitionIndex: 0
+  };
+  return "new Promise((resolve) => {"
+    + "const worker = new Worker('./cpu-ai-worker.js', { type: 'module' });"
+    + "const timeout = setTimeout(() => { worker.terminate(); resolve({ ok: false, error: 'timed out waiting for CPU minimum-depth worker' }); }, 30000);"
+    + "worker.onmessage = (event) => {"
+    + "clearTimeout(timeout); worker.terminate();"
+    + "const data = event.data; const result = data && data.result;"
+    + "resolve(data && data.ok && result && result.status === 'ok' && result.depth >= 3 && Array.isArray(result.moves) && result.moves.length > 0"
+    + " ? { ok: true, result: { fixture: 'cpu-minimum-depth', depth: result.depth, moves: result.moves.length, nodes: result.nodes } }"
+    + " : { ok: false, error: JSON.stringify(data) });"
+    + "};"
+    + "worker.onerror = (event) => { clearTimeout(timeout); worker.terminate(); resolve({ ok: false, error: event.message || 'CPU worker error' }); };"
+    + "worker.postMessage(" + JSON.stringify(payload) + ");"
+    + "})";
+}
+
+function adapterInfoExpression() {
+  return "(async () => {"
+    + "if (!navigator.gpu) return { available: false };"
+    + "const adapter = await navigator.gpu.requestAdapter();"
+    + "if (!adapter) return { available: false };"
+    + "const info = adapter.info || {};"
+    + "return { available: true, vendor: info.vendor || '', architecture: info.architecture || '', device: info.device || '', description: info.description || '', fallback: Boolean(info.isFallbackAdapter) };"
+    + "})()";
 }
 
 function legalTargetExpression(fixture) {
@@ -181,10 +241,11 @@ function workerSmokeExpression(fixture) {
     depth: fixture.depth,
     nodes: fixture.nodes,
     timeMs: 15_000,
-    gpuMode: "full",
+    gpuMode: smokeGpuMode,
+    disableNeural,
     randomSeed: 12345
   };
-  return singleSearchExpression(payload, 20_000);
+  return singleSearchExpression(payload, smokeTimeoutMs);
 }
 
 function move(from, to) {
@@ -198,7 +259,8 @@ function staleGenerationExpression(slowGame, fastGame) {
     depth: 3,
     nodes: 1024,
     timeMs: 15_000,
-    gpuMode: "full",
+    gpuMode: smokeGpuMode,
+    disableNeural,
     randomSeed: 12345
   };
   const second = {
@@ -207,7 +269,8 @@ function staleGenerationExpression(slowGame, fastGame) {
     depth: 1,
     nodes: 64,
     timeMs: 15_000,
-    gpuMode: "full",
+    gpuMode: smokeGpuMode,
+    disableNeural,
     randomSeed: 12345
   };
   return "new Promise((resolve) => {"
@@ -238,7 +301,8 @@ function deviceLossExpression(game) {
     depth: 1,
     nodes: 64,
     timeMs: 15_000,
-    gpuMode: "full",
+    gpuMode: smokeGpuMode,
+    disableNeural,
     randomSeed: 12345
   };
   const after = { ...before, id: "device-loss-after" };
@@ -250,7 +314,8 @@ function deviceLossExpression(game) {
     + "const timeout = setTimeout(() => { worker.terminate(); resolve({ ok: false, error: 'timed out waiting for device-loss check: ' + JSON.stringify(messages) }); }, 45000);"
     + "function fail(error) { clearTimeout(timeout); worker.terminate(); resolve({ ok: false, error }); }"
     + "function assertFrontier(message, label) {"
-    + "if (!message.ok || !message.result || message.result.status !== 'ok' || message.result.authoritativeReplay !== true || !message.result.gpuDiagnostics || message.result.gpuDiagnostics.readbacks !== 1 || message.result.gpuDiagnostics.candidateOverflow || (message.result.gpuSearch !== 'neural-frontier' && message.result.gpuSearch !== 'heuristic-frontier')) {"
+    + "const needsFrontierDiagnostics = " + JSON.stringify(smokeGpuMode === "full") + ";"
+    + "if (!message.ok || !message.result || message.result.status !== 'ok' || message.result.authoritativeReplay !== true || (needsFrontierDiagnostics && (!message.result.gpuDiagnostics || message.result.gpuDiagnostics.readbacks !== 1 || message.result.gpuDiagnostics.candidateOverflow || message.result.gpuDiagnostics.selectedCount < Math.min(message.result.gpuDiagnostics.frontierWidth || 0, message.result.gpuDiagnostics.nodes || 0) || (message.result.gpuSearch !== 'neural-frontier' && message.result.gpuSearch !== 'heuristic-frontier')))) {"
     + "fail(label + ' did not return resident frontier diagnostics: ' + JSON.stringify(message));"
     + "return false;"
     + "}"
@@ -297,7 +362,7 @@ function benchmarkExpression(iterations, timeMs) {
     + "for (let index = 0; index < iterations; index += 1) {"
     + "const fullRun = await run({ id: entry.name + '-full-' + index, game: entry.game, depth: entry.depth, nodes: entry.nodes, timeMs, gpuMode: 'full', randomSeed: 12345 });"
     + "const hybridRun = await run({ id: entry.name + '-hybrid-' + index, game: entry.game, depth: entry.depth, nodes: entry.nodes, timeMs, gpuMode: 'hybrid', randomSeed: 12345 });"
-    + "if (!fullRun.result.gpuDiagnostics || fullRun.result.gpuDiagnostics.readbacks !== 1 || fullRun.result.gpuDiagnostics.candidateOverflow || (fullRun.result.gpuSearch !== 'neural-frontier' && fullRun.result.gpuSearch !== 'heuristic-frontier')) { throw new Error(entry.name + ' full mode did not use resident frontier diagnostics'); }"
+    + "if (!fullRun.result.gpuDiagnostics || fullRun.result.gpuDiagnostics.readbacks !== 1 || fullRun.result.gpuDiagnostics.candidateOverflow || fullRun.result.gpuDiagnostics.selectedCount < Math.min(fullRun.result.gpuDiagnostics.frontierWidth || 0, fullRun.result.gpuDiagnostics.nodes || 0) || (fullRun.result.gpuSearch !== 'neural-frontier' && fullRun.result.gpuSearch !== 'heuristic-frontier')) { throw new Error(entry.name + ' full mode did not use filled resident frontier diagnostics'); }"
     + "full.push(fullRun.elapsedMs);"
     + "hybrid.push(hybridRun.elapsedMs);"
     + "}"
@@ -580,3 +645,5 @@ function emptyBoardWithKings() {
 function emptyBoard() {
   return Array.from({ length: 8 }, () => Array(8).fill(null));
 }
+
+main();

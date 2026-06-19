@@ -1,6 +1,7 @@
 import { decodeCompactModel, modelArchitectureMatches } from "./training-gpu.js";
 import type { CompactValueModel } from "./training-gpu.js";
-import { FORWARD_LAYER_SHADER, FORWARD_OUTPUT_SHADER, FRONTIER_NEURAL_SHADER, PROJECT_FEATURES_SHADER } from "./training-shaders.js";
+import { FRONTIER_NEURAL_SHADER } from "./training-shaders.js";
+import frontierForward from "./shaders/frontier_forward.wgsl";
 
 interface BufferUsageConstants {
   COPY_DST: number;
@@ -14,8 +15,6 @@ const usage: BufferUsageConstants = (globalThis as unknown as { GPUBufferUsage?:
   UNIFORM: 64
 };
 
-const NEURAL_INPUT_SIZE = 16 * 32 * 64;
-
 interface ModelBuffers {
   model: CompactValueModel;
   hiddenWeights: GPUBuffer[];
@@ -25,7 +24,7 @@ interface ModelBuffers {
 interface NeuralWorkspace {
   capacity: number;
   selectedBoards: GPUBuffer;
-  rawFeatures: GPUBuffer;
+  activeStates: GPUBuffer;
   projected: GPUBuffer;
   activations: GPUBuffer[];
   predictions: GPUBuffer;
@@ -33,7 +32,6 @@ interface NeuralWorkspace {
 
 interface Pipelines {
   selectBoards: GPUComputePipeline;
-  encodeFeatures: GPUComputePipeline;
   project: GPUComputePipeline;
   forwardLayer: GPUComputePipeline;
   forwardOutput: GPUComputePipeline;
@@ -64,7 +62,8 @@ export class FrontierNeuralEvaluator {
     boardOffset: number,
     maxBoards: number,
     rootColor: number,
-    batchSize: number
+    batchSize: number,
+    targetDepth: number
   ): Promise<boolean> {
     const modelBuffers = await this.model();
     if (!modelBuffers) {
@@ -75,24 +74,23 @@ export class FrontierNeuralEvaluator {
     const workspace = this.workspace(effectiveBatchSize, modelBuffers.model);
     for (let stateOffset = 0; stateOffset < stateCount; stateOffset += effectiveBatchSize) {
       const batchCount = Math.min(effectiveBatchSize, stateCount - stateOffset);
-      const common = this.keep(uniformU32(this.device, [batchCount, stateStride, boardOffset, maxBoards, stateOffset, 0, 0, 0]));
+      const common = this.keep(uniformU32(this.device, [
+        batchCount,
+        stateStride,
+        boardOffset,
+        maxBoards,
+        stateOffset,
+        modelBuffers.model.projectionSize,
+        modelBuffers.model.projectionSeed,
+        targetDepth
+      ]));
       const apply = this.keep(uniformMixed(this.device, batchCount, rootColor, modelBuffers.model.scale ?? 1, modelBuffers.model.bias ?? 0, stateOffset));
 
       encodeBindings(this.device, encoder, pipelines.selectBoards, [
-        [0, states], [1, workspace.selectedBoards], [5, common]
+        [0, states], [1, workspace.selectedBoards], [5, common], [7, workspace.activeStates]
       ], Math.ceil(batchCount * 16 / 64));
-      encodeBindings(this.device, encoder, pipelines.encodeFeatures, [
-        [0, states], [1, workspace.selectedBoards], [2, workspace.rawFeatures], [5, common]
-      ], Math.ceil(batchCount * NEURAL_INPUT_SIZE / 256));
-
-      const projectionParams = this.keep(uniformU32(this.device, [
-        batchCount,
-        NEURAL_INPUT_SIZE,
-        modelBuffers.model.projectionSize,
-        modelBuffers.model.projectionSeed
-      ]));
       encodeBindings(this.device, encoder, pipelines.project, [
-        [0, workspace.rawFeatures], [1, workspace.projected], [2, projectionParams]
+        [0, states], [1, workspace.selectedBoards], [2, workspace.projected], [5, common], [7, workspace.activeStates]
       ], Math.ceil(batchCount / 16), Math.ceil(modelBuffers.model.projectionSize / 16));
 
       for (let layer = 0; layer < modelBuffers.model.hiddenLayers.length; layer += 1) {
@@ -103,7 +101,8 @@ export class FrontierNeuralEvaluator {
           [0, layer === 0 ? workspace.projected : workspace.activations[layer - 1]!],
           [1, modelBuffers.hiddenWeights[layer]!],
           [2, workspace.activations[layer]!],
-          [3, layerParams]
+          [3, layerParams],
+          [4, workspace.activeStates]
         ], Math.ceil(batchCount / 16), Math.ceil(outputSize / 16));
       }
 
@@ -113,10 +112,11 @@ export class FrontierNeuralEvaluator {
         [0, workspace.activations.at(-1)!],
         [1, modelBuffers.outputWeights],
         [2, workspace.predictions],
-        [3, outputParams]
+        [3, outputParams],
+        [4, workspace.activeStates]
       ], Math.ceil(batchCount / 64));
       encodeBindings(this.device, encoder, pipelines.applyValues, [
-        [0, states], [3, workspace.predictions], [4, summaries], [5, common], [6, apply]
+        [0, states], [3, workspace.predictions], [4, summaries], [5, common], [6, apply], [7, workspace.activeStates]
       ], Math.ceil(batchCount / 64));
     }
     return true;
@@ -162,7 +162,7 @@ export class FrontierNeuralEvaluator {
     this.#workspace = {
       capacity,
       selectedBoards: gpuBuffer(this.device, capacity * 16 * 4),
-      rawFeatures: gpuBuffer(this.device, capacity * NEURAL_INPUT_SIZE * 4),
+      activeStates: gpuBuffer(this.device, capacity * 4),
       projected: gpuBuffer(this.device, capacity * model.projectionSize * 4),
       activations: model.hiddenLayers.map((size) => gpuBuffer(this.device, capacity * size * 4)),
       predictions: gpuBuffer(this.device, capacity * 4)
@@ -211,15 +211,14 @@ function splitHiddenWeights(model: CompactValueModel): Float32Array[] {
 }
 
 async function createPipelines(device: GPUDevice): Promise<Pipelines> {
-  const [selectBoards, encodeFeatures, project, forwardLayer, forwardOutput, applyValues] = await Promise.all([
+  const [selectBoards, project, forwardLayer, forwardOutput, applyValues] = await Promise.all([
     pipeline(device, "frontier_select_neural_boards", FRONTIER_NEURAL_SHADER, "select_neural_boards"),
-    pipeline(device, "frontier_encode_neural", FRONTIER_NEURAL_SHADER, "encode_neural_features"),
-    pipeline(device, "frontier_project", PROJECT_FEATURES_SHADER, "project_features"),
-    pipeline(device, "frontier_forward_layer", FORWARD_LAYER_SHADER, "forward_layer"),
-    pipeline(device, "frontier_forward_output", FORWARD_OUTPUT_SHADER, "forward_output"),
+    pipeline(device, "frontier_project", FRONTIER_NEURAL_SHADER, "project_neural_features"),
+    pipeline(device, "frontier_forward_layer", frontierForward, "forward_layer_masked"),
+    pipeline(device, "frontier_forward_output", frontierForward, "forward_output_masked"),
     pipeline(device, "frontier_apply_neural", FRONTIER_NEURAL_SHADER, "apply_neural_values")
   ]);
-  return { selectBoards, encodeFeatures, project, forwardLayer, forwardOutput, applyValues };
+  return { selectBoards, project, forwardLayer, forwardOutput, applyValues };
 }
 
 async function pipeline(device: GPUDevice, label: string, code: string, entryPoint: string): Promise<GPUComputePipeline> {
@@ -278,7 +277,7 @@ function uniformMixed(device: GPUDevice, stateCount: number, rootColor: number, 
 
 function destroyWorkspace(workspace: NeuralWorkspace): void {
   workspace.selectedBoards.destroy();
-  workspace.rawFeatures.destroy();
+  workspace.activeStates.destroy();
   workspace.projected.destroy();
   workspace.activations.forEach((buffer) => buffer.destroy());
   workspace.predictions.destroy();

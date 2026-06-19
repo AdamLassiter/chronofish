@@ -191,39 +191,28 @@
         </header>
         <div class="training-tab-panel" id="training-gpu-panel" data-training-panel="gpu">
           <label>
-            Target
-            <select id="training-target"
-              title="GPU model training target. vs GPU uses WebGPU search, self-play, and distillation labels. vs CPU uses the restored CPU heuristic bot as the label source. vs Both runs both label sources and then adds a CPU-vs-GPU duel rollout batch."
-              aria-describedby="training-target-help">
-              <option value="trainGpu" selected title="Train from GPU search, GPU self-play, and distillation labels.">vs GPU</option>
-              <option value="trainCpu" title="Train from CPU heuristic bot search labels.">vs CPU</option>
-              <option value="trainBoth" title="Train from CPU and GPU labels, then collect an extra CPU-vs-GPU duel rollout batch.">vs Both</option>
-            </select>
-            <span id="training-target-help" class="field-help field-help-wide">Selects which opponent source trains the compact GPU model.</span>
-          </label>
-          <label>
             Mode
-            <select id="training-label-mode"
-              title="Label source strategy. Mixed is the recommended default: it combines a small number of fresh GPU search labels, bounded GPU self-play outcomes, and distillation when a model exists."
-              aria-describedby="training-label-mode-help">
-              <option value="mixed" selected title="Recommended. Runs expensive GPU Search on about 1/16 of Labels, Self-play on about 1/8 of Labels, plus distillation when available.">Mixed</option>
-              <option value="search" title="Samples positions, runs GPU search, and trains from the selected move and search score. Best for tactical value/policy labels.">GPU Search</option>
-              <option value="selfPlay" title="Runs bounded GPU self-play from the current position and backfills discounted outcome labels after royal captures.">Self-play</option>
+            <select id="training-mode" multiple size="4"
+              title="Select one or more GPU model label modes. Multiple modes split the label budget across sources."
+              aria-describedby="training-mode-help">
+              <option value="vsGpu" selected title="Samples positions, runs GPU search, and trains from the selected move and search score.">vs GPU search</option>
+              <option value="vsCpu" title="Uses CPU heuristic bot search labels.">vs CPU heuristic</option>
+              <option value="self" selected title="Runs bounded GPU self-play from the current position and backfills discounted outcome labels.">vs Self</option>
               <option value="distill" title="Uses the current neural model as a low-weight bootstrap label source. Fast, but it cannot discover better play by itself.">Distill</option>
             </select>
-            <span id="training-label-mode-help" class="field-help field-help-wide">Mixed: small search and self-play sets plus distillation, recommended. GPU Search: tactical search labels. Self-play: outcome labels. Distill: bootstrap from the current model only.</span>
+            <span id="training-mode-help" class="field-help field-help-wide">Choose one or more label modes. Distill is available only for GPU model training.</span>
           </label>
           <label>
             Labels
             <input id="training-samples" type="number" min="1" max="65536" step="1024" value="1024"
-              title="Base label budget per cycle. In Mixed mode, expensive search uses about 1/16 of this value and self-play uses about 1/8; Distill can still use the full value when a model exists."
+              title="Base label budget per cycle. When multiple modes are selected, expensive search and self-play modes use smaller budget slices while Distill can still use the full value when selected."
               aria-describedby="training-samples-help">
             <span id="training-samples-help" class="field-help">Fresh labels per cycle. Higher keeps GPU search busier and improves replay diversity.</span>
           </label>
           <label>
             Self-play
             <input id="training-self-play-workers" type="number" min="1" max="64" step="1" value="16"
-              title="Parallel GPU self-play rollout workers used in Mixed and Self-play modes. More workers can keep the GPU queue busier, but too many workers compete for the same GPU memory and device time."
+              title="Parallel GPU self-play rollout workers used when vs Self mode is selected. More workers can keep the GPU queue busier, but too many workers compete for the same GPU memory and device time."
               aria-describedby="training-self-play-workers-help">
             <span id="training-self-play-workers-help" class="field-help">Parallel outcome rollouts. Start with 2; raise if GPU utilization remains low.</span>
           </label>
@@ -321,15 +310,15 @@
         </div>
         <div class="training-tab-panel" id="training-cpu-panel" data-training-panel="cpu" hidden>
           <label>
-            CPU Target
-            <select id="training-cpu-target"
-              title="CPU heuristic training opponent. vs CPU scores mutations against the current CPU heuristic. vs GPU scores against the GPU search worker. vs Both scores against both targets."
-              aria-describedby="training-cpu-target-help">
-              <option value="vsCpu" selected title="Train CPU heuristic mutations against the current CPU heuristic baseline.">vs CPU</option>
-              <option value="vsGpu" title="Train CPU heuristic mutations against GPU search labels.">vs GPU</option>
-              <option value="vsBoth" title="Train CPU heuristic mutations against both CPU baseline and GPU search.">vs Both</option>
+            Mode
+            <select id="training-cpu-mode" multiple size="3"
+              title="Select one or more CPU heuristic scoring modes."
+              aria-describedby="training-cpu-mode-help">
+              <option value="vsGpu" title="Score CPU heuristic mutations against GPU search labels.">vs GPU search</option>
+              <option value="vsCpu" selected title="Score CPU heuristic mutations against the current CPU heuristic baseline.">vs CPU heuristic</option>
+              <option value="self" title="Score CPU heuristic mutations using current CPU baseline self-comparisons.">vs Self</option>
             </select>
-            <span id="training-cpu-target-help" class="field-help field-help-wide">Selects which opponent scores CPU heuristic parameter mutations.</span>
+            <span id="training-cpu-mode-help" class="field-help field-help-wide">CPU training supports GPU-search, CPU-heuristic, and self comparison modes. Distill is only shown for GPU model training.</span>
           </label>
           <label>
             CPU Depth

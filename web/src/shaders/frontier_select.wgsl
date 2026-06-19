@@ -17,6 +17,7 @@ struct Params {
 @group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(6) var<uniform> params: Params;
 @group(0) @binding(7) var<uniform> sort_stage: vec4<u32>;
+@group(0) @binding(8) var<storage, read_write> eligibility: array<atomic<u32>>;
 
 override SELECT_WORKGROUP_SIZE: u32 = 256u;
 
@@ -102,22 +103,31 @@ fn hash_candidates(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(SELECT_WORKGROUP_SIZE)
-fn initialize_order(@builtin(global_invocation_id) id: vec3<u32>) {
-  let index = id.x;
-  if (index < params.candidate_count) {
-    order[index] = select(-1, i32(index), index < atomicLoad(&counters[0]));
+fn bucket_order(@builtin(global_invocation_id) id: vec3<u32>) {
+  let bucket = id.x;
+  if (bucket >= params.max_scan) {
+    return;
   }
+  let actual_count = min(params.candidate_count, atomicLoad(&counters[0]));
+  var best_index = -1;
+  for (var index = bucket; index < actual_count; index = index + params.max_scan) {
+    let candidate_index = i32(index);
+    if (better(candidate_index, best_index)) {
+      best_index = candidate_index;
+    }
+  }
+  order[bucket] = best_index;
 }
 
-// A host-encoded bitonic network invokes this entry point once per (k, j)
-// stage. Each stage has its own uniform, so all stages share one command buffer.
+// A host-encoded bitonic network invokes this entry point once per (k, j) stage
+// over the bounded shortlist produced by bucket_order.
 @compute @workgroup_size(SELECT_WORKGROUP_SIZE)
 fn bitonic_sort(@builtin(global_invocation_id) id: vec3<u32>) {
   let index = id.x;
   let k = sort_stage.x;
   let j = sort_stage.y;
   let partner = index ^ j;
-  if (index >= params.candidate_count || partner >= params.candidate_count || partner <= index) {
+  if (index >= params.max_scan || partner >= params.max_scan || partner <= index) {
     return;
   }
   let ascending = (index & k) != 0u;
@@ -152,30 +162,92 @@ fn parent_selected_count(parent: i32, selected_count: u32) -> u32 {
   return count;
 }
 
+@compute @workgroup_size(SELECT_WORKGROUP_SIZE)
+fn mark_unique(@builtin(global_invocation_id) id: vec3<u32>) {
+  let rank = id.x;
+  if (rank >= params.max_scan) { return; }
+  let candidate_index = order[rank];
+  if (candidate_index < 0) {
+    atomicStore(&eligibility[rank], 0u);
+    return;
+  }
+  let base = candidate_base(u32(candidate_index));
+  let hash_low = candidates[base + CANDIDATE_HASH_LOW];
+  let hash_high = candidates[base + CANDIDATE_HASH_HIGH];
+  for (var earlier = 0u; earlier < rank; earlier = earlier + 1u) {
+    let earlier_index = order[earlier];
+    if (earlier_index < 0) { continue; }
+    let earlier_base = candidate_base(u32(earlier_index));
+    if (candidates[earlier_base + CANDIDATE_HASH_LOW] == hash_low
+      && candidates[earlier_base + CANDIDATE_HASH_HIGH] == hash_high) {
+      atomicStore(&eligibility[rank], 0u);
+      return;
+    }
+  }
+  atomicStore(&eligibility[rank], 1u);
+}
+
+@compute @workgroup_size(SELECT_WORKGROUP_SIZE)
+fn mark_parent_quota(@builtin(global_invocation_id) id: vec3<u32>) {
+  let rank = id.x;
+  if (rank >= params.max_scan || atomicLoad(&eligibility[rank]) == 0u) { return; }
+  let candidate_index = order[rank];
+  let parent = candidates[candidate_base(u32(candidate_index)) + CANDIDATE_PARENT];
+  var count = 0u;
+  for (var earlier = 0u; earlier < rank; earlier = earlier + 1u) {
+    if (atomicLoad(&eligibility[earlier]) == 0u) { continue; }
+    let earlier_index = order[earlier];
+    if (earlier_index >= 0 && candidates[candidate_base(u32(earlier_index)) + CANDIDATE_PARENT] == parent) {
+      count = count + 1u;
+    }
+  }
+  atomicStore(&eligibility[rank], select(2u, 0u, count >= params.per_parent_limit));
+}
+
+@compute @workgroup_size(SELECT_WORKGROUP_SIZE)
+fn compact_selected(@builtin(global_invocation_id) id: vec3<u32>) {
+  let rank = id.x;
+  if (rank >= params.max_scan || atomicLoad(&eligibility[rank]) != 2u) { return; }
+  var output = 0u;
+  for (var earlier = 0u; earlier < rank; earlier = earlier + 1u) {
+    if (atomicLoad(&eligibility[earlier]) == 2u) {
+      output = output + 1u;
+    }
+  }
+  if (output < params.selected_limit) {
+    selected[output] = order[rank];
+    atomicMax(&counters[1], output + 1u);
+  }
+}
+
+fn try_select_candidate(candidate_index: i32, selected_count: ptr<function, u32>) {
+  if (candidate_index < 0 || (*selected_count) >= params.selected_limit) {
+    return;
+  }
+  let base = candidate_base(u32(candidate_index));
+  let parent = candidates[base + CANDIDATE_PARENT];
+  let hash_low = candidates[base + CANDIDATE_HASH_LOW];
+  let hash_high = candidates[base + CANDIDATE_HASH_HIGH];
+  if (already_selected(hash_low, hash_high, *selected_count)) {
+    return;
+  }
+  if (parent_selected_count(parent, *selected_count) >= params.per_parent_limit) {
+    return;
+  }
+  selected[*selected_count] = candidate_index;
+  *selected_count = (*selected_count) + 1u;
+}
+
 @compute @workgroup_size(1)
-fn select_top_k(@builtin(global_invocation_id) id: vec3<u32>) {
+fn fill_selection_underflow(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x != 0u) {
     return;
   }
-  var selected_count = 0u;
-  let scan_limit = min(min(params.candidate_count, atomicLoad(&counters[0])), params.max_scan);
-  for (var rank = 0u; rank < scan_limit && selected_count < params.selected_limit; rank = rank + 1u) {
-    let candidate_index = order[rank];
-    if (candidate_index < 0) {
-      continue;
-    }
-    let base = candidate_base(u32(candidate_index));
-    let parent = candidates[base + CANDIDATE_PARENT];
-    let hash_low = candidates[base + CANDIDATE_HASH_LOW];
-    let hash_high = candidates[base + CANDIDATE_HASH_HIGH];
-    if (already_selected(hash_low, hash_high, selected_count)) {
-      continue;
-    }
-    if (parent_selected_count(parent, selected_count) >= params.per_parent_limit) {
-      continue;
-    }
-    selected[selected_count] = candidate_index;
-    selected_count = selected_count + 1u;
+  var selected_count = atomicLoad(&counters[1]);
+  if (selected_count >= params.selected_limit) { return; }
+  let actual_count = min(params.candidate_count, atomicLoad(&counters[0]));
+  for (var index = 0u; index < actual_count && selected_count < params.selected_limit; index = index + 1u) {
+    try_select_candidate(i32(index), &selected_count);
   }
   atomicStore(&counters[1], selected_count);
 }

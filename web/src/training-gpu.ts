@@ -40,6 +40,7 @@ export type TrainingLabelKind = "search" | "outcome" | "distilled" | "unknown" |
 export interface TrainingSample {
   sideToMove?: Color;
   boardCount?: number;
+  positionKey?: string;
   features: number[] | Float32Array;
   label: number;
   labelKind?: TrainingLabelKind;
@@ -308,7 +309,9 @@ export async function trainValue(
   );
   const forwardOutputParams = outputParamsBuffer(device, batchSize, outputSize, 0);
   const applyOutputParams = outputParamsBuffer(device, batchSize, outputSize, config.learningRate, config.weightDecay);
-  const outputDeltaParams = outputDeltaParamsBuffer(device, batchSize);
+  const outputDeltaParams = Array.from({ length: batchesPerSubmit }, () =>
+    outputDeltaParamsBuffer(device, batchSize, batchSize)
+  );
   const lastHiddenDeltaParams = hiddenDeltaParamsBuffer(
     device,
     batchSize,
@@ -348,10 +351,17 @@ export async function trainValue(
       const epochOrder = shuffledIndices(trainIndices, epoch, split.seed);
       const batchStart = ((epoch - 1) * batchSize) % epochOrder.length;
       const batch = new Uint32Array(batchSize);
+      let batchWeight = 0;
       for (let index = 0; index < batchSize; index += 1) {
         batch[index] = epochOrder[(batchStart + index) % epochOrder.length]!;
+        batchWeight += Math.max(0, labelWeights[batch[index]!] ?? 1);
       }
       device.queue.writeBuffer(batchIndexBuffer, 0, batch);
+      device.queue.writeBuffer(
+        outputDeltaParams[batchSlot]!,
+        0,
+        outputDeltaParamsData(batchSize, batchWeight)
+      );
       for (let layerIndex = 0; layerIndex < HIDDEN_LAYERS.length; layerIndex += 1) {
         const inputSize = previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE);
         const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1]!;
@@ -376,7 +386,7 @@ export async function trainValue(
         predictionBuffer,
         labelBuffer,
         outputDeltaBuffer,
-        outputDeltaParams,
+        outputDeltaParams[batchSlot]!,
         batchIndexBuffer,
         labelWeightBuffer
       ], Math.ceil(batchSize / 64));
@@ -508,6 +518,7 @@ export async function trainPolicy(
     return policyLogitsArray(activeModel) ?? new Float32Array(POLICY_BUCKETS);
   }
   const targets = new Uint32Array(policySamples.map((sample) => Math.min(POLICY_BUCKETS - 1, sample.policy)));
+  const labelWeights = new Float32Array(policySamples.map((sample) => Math.max(0, sample.labelWeight ?? 1)));
   const logits = new Float32Array(POLICY_BUCKETS);
   const activePolicy = policyLogitsArray(activeModel);
   if (activePolicy) {
@@ -515,6 +526,7 @@ export async function trainPolicy(
   }
   const params = paramsBuffer([policySamples.length, POLICY_BUCKETS], config.learningRate, 1);
   const targetBuffer = storageBuffer(device, targets, gpuBufferUsage.STORAGE);
+  const labelWeightBuffer = storageBuffer(device, labelWeights, gpuBufferUsage.STORAGE);
   let inputLogits = storageBuffer(device, logits, gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC);
   let outputLogits = device.createBuffer({
     size: logits.byteLength,
@@ -531,7 +543,7 @@ export async function trainPolicy(
         device,
         encoder,
         pipeline,
-        [targetBuffer, inputLogits, outputLogits, paramsGpuBuffer],
+        [targetBuffer, inputLogits, outputLogits, paramsGpuBuffer, labelWeightBuffer],
         Math.ceil(POLICY_BUCKETS / 64)
       );
       [inputLogits, outputLogits] = [outputLogits, inputLogits];
@@ -591,10 +603,16 @@ export function outputParamsBuffer(device: GPUDevice, sampleCount: number, input
   return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
 }
 
-export function outputDeltaParamsBuffer(device: GPUDevice, sampleCount: number): GPUBuffer {
+export function outputDeltaParamsBuffer(device: GPUDevice, sampleCount: number, totalWeight = sampleCount): GPUBuffer {
+  return storageBuffer(device, outputDeltaParamsData(sampleCount, totalWeight), gpuBufferUsage.UNIFORM);
+}
+
+function outputDeltaParamsData(sampleCount: number, totalWeight: number): ArrayBuffer {
   const params = new ArrayBuffer(16);
-  new DataView(params).setUint32(0, sampleCount, true);
-  return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
+  const view = new DataView(params);
+  view.setUint32(0, sampleCount, true);
+  view.setFloat32(4, Math.max(0, totalWeight), true);
+  return params;
 }
 
 export function hiddenDeltaParamsBuffer(device: GPUDevice, sampleCount: number, currentSize: number, nextSize: number): GPUBuffer {
@@ -689,14 +707,29 @@ export function splitValidationSamples(samples: TrainingSample[], validationSpli
   return { trainIndices, validationIndices, seed };
 }
 
-export function stableSampleHash(sample: TrainingSample, index: number): number {
+export function stableSampleHash(sample: TrainingSample, _index: number): number {
   let hash = 2166136261;
-  const text = `${sample.labelKind ?? ""}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}|${index}`;
+  const text = sample.positionKey
+    ? `${sample.positionKey}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}`
+    : `${featureFingerprint(sample.features)}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}`;
   for (let offset = 0; offset < text.length; offset += 1) {
     hash ^= text.charCodeAt(offset);
     hash = Math.imul(hash, 16777619) >>> 0;
   }
   return hash >>> 0;
+}
+
+function featureFingerprint(features: number[] | Float32Array): string {
+  let hash = 2166136261;
+  for (let index = 0; index < features.length; index += 1) {
+    const value = features[index] ?? 0;
+    if (value === 0) { continue; }
+    hash ^= index;
+    hash = Math.imul(hash, 16777619) >>> 0;
+    hash ^= Math.round(value * 1024);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(16);
 }
 
 export function shuffledIndices(indices: number[], epoch: number, seed: number): number[] {
@@ -760,11 +793,14 @@ export async function readFloats(device: GPUDevice, buffer: GPUBuffer, byteLengt
 export async function predictionLossOnGpu(device: GPUDevice, samples: TrainingSample[], model: PredictionModel): Promise<number> {
   const predictions = await predictValuesOnGpu(device, samples, model);
   let total = 0;
+  let totalWeight = 0;
   for (let index = 0; index < samples.length; index += 1) {
     const error = predictions[index]! - samples[index]!.label;
-    total += error * error;
+    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    total += weight * error * error;
+    totalWeight += weight;
   }
-  return total / samples.length;
+  return totalWeight > 0 ? total / totalWeight : 0;
 }
 
 export function splitHiddenWeights(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number[]): Float32Array[] {

@@ -541,6 +541,20 @@ fn timed_ai_search_completes_default_minimum_depth_before_timing_out() {
 }
 
 #[test]
+fn timed_ai_search_completes_requested_minimum_depth_before_timing_out() {
+    let mut game = Game::new();
+    game.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];
+    let json = game.ai_turn_timed_min_depth_json(3, 3, 20_000, 1);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
+
+    assert_eq!(
+        value["depth"].as_i64(),
+        Some(3),
+        "timed search should complete the caller's minimum depth before returning: {json}"
+    );
+}
+
+#[test]
 fn timed_ai_search_respects_lower_requested_depth() {
     let game = Game::new();
     let json = game.ai_turn_timed_json(1, 20_000, 1);

@@ -188,6 +188,19 @@ pub extern "C" fn chronofish_ai_turn_timed_json(
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_ai_turn_timed_min_depth_json(
+    max_depth: i32,
+    min_depth: i32,
+    max_nodes: i32,
+    millis: i32,
+) -> *const u8 {
+    let json = with_game(|game| {
+        game.ai_turn_timed_min_depth_json(max_depth, min_depth, max_nodes, millis)
+    });
+    set_output(json)
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_last_message() -> *const u8 {
     let message = with_game(|game| game.last_message.clone());
     set_output(message)

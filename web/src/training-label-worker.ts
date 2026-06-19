@@ -55,6 +55,7 @@ type TrainingLabelResponse =
 interface NeuralSample {
   sideToMove: Color;
   boardCount: number;
+  positionKey: string;
   features: number[];
 }
 
@@ -112,8 +113,19 @@ async function neuralPosition(game: GameSnapshot): Promise<NeuralSample> {
   return {
     sideToMove: game.turn,
     boardCount: encoded.boardCount,
+    positionKey: positionKey(game),
     features: encoded.values
   };
+}
+
+function positionKey(game: GameSnapshot): string {
+  const text = JSON.stringify(game);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
 }
 
 async function encodeNeuralPositionOnGpu(game: GameSnapshot, color: Color): Promise<EncodedPosition> {
@@ -214,11 +226,23 @@ function pieceCode(piece: Piece | null | undefined): number {
   if (!piece) {
     return 0;
   }
-  return pieceTypeCode(piece.type) | ((piece.color === "black" ? 1 : 0) << 8);
+  return pieceTypeCode(piece.type) | (colorCode(piece.color) << 8);
 }
 
-function colorCode(color: Color): number {
-  return color === "black" ? 1 : 0;
+function colorCode(color: Color | string | number | null | undefined): number {
+  if (typeof color === "number") {
+    return color === 1 ? 1 : 0;
+  }
+  if (typeof color === "string") {
+    const normalized = color.toLowerCase();
+    if (normalized === "black") {
+      return 1;
+    }
+    if (normalized === "white") {
+      return 0;
+    }
+  }
+  throw new Error(`Unsupported color value: ${String(color)}`);
 }
 
 function ownerCode(owner: TimelineOwner): number {

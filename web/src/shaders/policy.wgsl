@@ -9,6 +9,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read> logits_in: array<f32>;
 @group(0) @binding(2) var<storage, read_write> logits_out: array<f32>;
 @group(0) @binding(3) var<uniform> params: Params;
+@group(0) @binding(4) var<storage, read> label_weights: array<f32>;
 
 @compute @workgroup_size(64)
 fn train_policy(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -27,13 +28,17 @@ fn train_policy(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let probability = exp(logits_in[bucket] - max_logit) / total;
 
-  var target_count = 0.0;
+  var target_weight = 0.0;
+  var total_weight = 0.0;
   for (var sample = 0u; sample < params.sample_count; sample = sample + 1u) {
+    let weight = max(0.0, label_weights[sample]);
+    total_weight = total_weight + weight;
     if (targets[sample] == bucket) {
-      target_count = target_count + 1.0;
+      target_weight = target_weight + weight;
     }
   }
 
-  let gradient = probability - target_count / f32(params.sample_count);
+  let normalized_target = select(0.0, target_weight / total_weight, total_weight > 0.0);
+  let gradient = probability - normalized_target;
   logits_out[bucket] = logits_in[bucket] - params.learning_rate * gradient;
 }

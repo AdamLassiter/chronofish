@@ -69,12 +69,14 @@ const gpuMapMode: GpuMapModeConstants = (globalThis as unknown as { GPUMapMode?:
 };
 
 const I32_BYTES = Int32Array.BYTES_PER_ELEMENT;
+const GPU_SHADER_STAGE_COMPUTE = 4;
 const DEFAULT_STORAGE_LIMIT = 128 * 1024 * 1024;
 const DEFAULT_BUFFER_LIMIT = 256 * 1024 * 1024;
 const MIN_FRONTIER_WIDTH = 8;
-const MAX_FRONTIER_WIDTH = 128;
+const MAX_FRONTIER_WIDTH = 512;
 const MIN_CANDIDATES = 256;
-const MAX_CANDIDATES = 32_768;
+const MAX_CANDIDATES = 65_536;
+const MAX_SELECTION_SCAN = 2048;
 const tuningCache = new Map<string, Promise<FrontierTuning>>();
 
 export interface FrontierTuning {
@@ -94,6 +96,7 @@ export interface FrontierBufferSet {
   deltas: GPUBuffer;
   counters: GPUBuffer;
   order: GPUBuffer;
+  eligibility: GPUBuffer;
   selected: GPUBuffer;
   summaries: GPUBuffer;
   indirect: GPUBuffer;
@@ -110,6 +113,7 @@ export interface FrontierPassOptions {
   rootColor: number;
   targetDepth: number;
   cycleIndex: number;
+  stateCount?: number;
   perParentLimit?: number;
   maxSelectionScan?: number;
 }
@@ -117,11 +121,22 @@ export interface FrontierPassOptions {
 interface FrontierPipelines {
   expand: GPUComputePipeline;
   hash: GPUComputePipeline;
-  initializeOrder: GPUComputePipeline;
+  bucketOrder: GPUComputePipeline;
   bitonicSort: GPUComputePipeline;
+  markUnique: GPUComputePipeline;
+  markParentQuota: GPUComputePipeline;
+  compactSelected: GPUComputePipeline;
   select: GPUComputePipeline;
   materialize: GPUComputePipeline;
   reduce: GPUComputePipeline;
+  copyReduced: GPUComputePipeline;
+}
+
+interface FrontierPipelineLayouts {
+  expand: GPUBindGroupLayout;
+  select: GPUBindGroupLayout;
+  materialize: GPUBindGroupLayout;
+  reduce: GPUBindGroupLayout;
 }
 
 interface PooledBuffer {
@@ -154,6 +169,7 @@ export class FrontierBufferPool {
       deltas: this.acquire(deltaBytes, storageCopy),
       counters: this.acquire(64, storageCopy),
       order: this.acquire(this.tuning.candidateCapacity * I32_BYTES, storageCopy),
+      eligibility: this.acquire(this.tuning.candidateCapacity * I32_BYTES, storageCopy),
       selected: this.acquire(this.tuning.frontierWidth * I32_BYTES, storageCopy),
       summaries: this.acquire(this.tuning.frontierWidth * GPU_FRONTIER_SUMMARY_STRIDE * I32_BYTES, storageCopy),
       indirect: this.acquire(16, gpuBufferUsage.STORAGE | gpuBufferUsage.INDIRECT | gpuBufferUsage.COPY_DST)
@@ -224,6 +240,11 @@ export class FrontierGpuPipeline {
   ): Promise<void> {
     const pipelines = await this.pipelines();
     const candidateCapacity = floorPowerOfTwo(this.tuning.candidateCapacity);
+    const selectionCapacity = floorPowerOfTwo(Math.min(
+      candidateCapacity,
+      MAX_SELECTION_SCAN,
+      options.maxSelectionScan ?? this.tuning.frontierWidth * 4
+    ));
     const stateStride = frontierStateStride(this.tuning.maxBoards);
     const boardOffset = GPU_FRONTIER_BOARD_OFFSET;
     encoder.clearBuffer(buffers.counters, 0, 12);
@@ -232,14 +253,16 @@ export class FrontierGpuPipeline {
     encoder.clearBuffer(buffers.candidates);
     encoder.clearBuffer(buffers.deltas);
     encoder.clearBuffer(buffers.order);
+    encoder.clearBuffer(buffers.eligibility);
     encoder.clearBuffer(buffers.selected);
 
-    const sourceScans = this.tuning.frontierWidth * this.tuning.maxBoards * 64;
+    const stateCount = Math.max(1, Math.min(this.tuning.frontierWidth, options.stateCount ?? this.tuning.frontierWidth));
+    const sourceScans = stateCount * this.tuning.maxBoards * 64;
     const sourceScanLimit = Math.max(this.tuning.candidateWorkgroupSize, this.tuning.dispatchCandidateLimit);
     for (let base = 0; base < sourceScans; base += sourceScanLimit) {
       const count = Math.min(sourceScanLimit, sourceScans - base);
       const expandParams = u32Uniform([
-        this.tuning.frontierWidth,
+        stateCount,
         this.tuning.maxBoards,
         stateStride,
         boardOffset,
@@ -259,14 +282,14 @@ export class FrontierGpuPipeline {
       const expandParamsBuffer = this.temporaryUniform(expandParams);
       encodePass(this.device, encoder, pipelines.expand, [
         buffers.states, buffers.candidates, buffers.deltas, buffers.counters, expandParamsBuffer
-      ], Math.ceil(count / this.tuning.candidateWorkgroupSize));
+      ], Math.ceil(count / this.tuning.candidateWorkgroupSize), 1, `frontier_expand_${options.cycleIndex}_${base}`);
     }
 
     const selectParams = u32Uniform([
       candidateCapacity,
       this.tuning.frontierWidth,
       options.perParentLimit ?? 8,
-      Math.min(candidateCapacity, options.maxSelectionScan ?? this.tuning.frontierWidth * 16),
+      selectionCapacity,
       stateStride,
       GPU_FRONTIER_DELTA_STRIDE,
       0,
@@ -274,27 +297,27 @@ export class FrontierGpuPipeline {
     ]);
     const selectParamsBuffer = this.temporaryUniform(selectParams);
     const inertSortBuffer = this.temporaryUniform(new Uint32Array(4));
-    const selectionBuffers = [
-      buffers.candidates,
-      buffers.states,
-      buffers.deltas,
-      buffers.order,
-      buffers.selected,
-      buffers.counters,
-      selectParamsBuffer,
-      inertSortBuffer
-    ];
-    encodePass(this.device, encoder, pipelines.hash, selectionBuffers, Math.ceil(candidateCapacity / this.tuning.candidateWorkgroupSize));
-    encodePass(this.device, encoder, pipelines.initializeOrder, selectionBuffers, Math.ceil(candidateCapacity / this.tuning.candidateWorkgroupSize));
-    for (let k = 2; k <= candidateCapacity; k *= 2) {
+    const selectionBuffers = selectionPassBuffers(buffers, selectParamsBuffer, inertSortBuffer);
+    encodePass(this.device, encoder, pipelines.hash, selectionBuffers, Math.ceil(candidateCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_hash");
+    encodePass(this.device, encoder, pipelines.bucketOrder, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_bucket_order");
+    for (let k = 2; k <= selectionCapacity; k *= 2) {
       for (let j = k / 2; j > 0; j = Math.floor(j / 2)) {
         const stageBuffer = this.temporaryUniform(new Uint32Array([k, j, 0, 0]));
-        encodePass(this.device, encoder, pipelines.bitonicSort, [
-          ...selectionBuffers.slice(0, 7), stageBuffer
-        ], Math.ceil(candidateCapacity / this.tuning.candidateWorkgroupSize));
+        encodePass(
+          this.device,
+          encoder,
+          pipelines.bitonicSort,
+          selectionPassBuffers(buffers, selectParamsBuffer, stageBuffer),
+          Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize),
+          1,
+          `frontier_bitonic_sort_${k}_${j}`
+        );
       }
     }
-    encodePass(this.device, encoder, pipelines.select, selectionBuffers, 1);
+    encodePass(this.device, encoder, pipelines.markUnique, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_mark_unique");
+    encodePass(this.device, encoder, pipelines.markParentQuota, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_mark_parent_quota");
+    encodePass(this.device, encoder, pipelines.compactSelected, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_compact_selected");
+    encodePass(this.device, encoder, pipelines.select, selectionBuffers, 1, 1, "frontier_fill_selection_underflow");
 
     const stateParams = u32Uniform([
       this.tuning.frontierWidth,
@@ -320,7 +343,7 @@ export class FrontierGpuPipeline {
       buffers.summaries,
       buffers.counters,
       stateParamsBuffer
-    ], Math.ceil(this.tuning.frontierWidth / this.tuning.mutationTileSize));
+    ], Math.ceil(this.tuning.frontierWidth / this.tuning.mutationTileSize), 1, "frontier_materialize_selected");
   }
 
   swapFrontiers(buffers: FrontierBufferSet): void {
@@ -331,13 +354,51 @@ export class FrontierGpuPipeline {
 
   async encodeMinimax(encoder: GPUCommandEncoder, buffers: FrontierBufferSet, targetDepth: number): Promise<void> {
     const pipelines = await this.pipelines();
-    const params = this.temporaryUniform(u32Uniform([
-      this.tuning.frontierWidth,
-      frontierStateStride(this.tuning.maxBoards),
-      GPU_FRONTIER_HEADER_STRIDE,
-      Math.min(targetDepth, GPU_FRONTIER_ANCESTRY_STRIDE)
-    ]));
-    encodePass(this.device, encoder, pipelines.reduce, [buffers.states, buffers.summaries, params], 1);
+    const boundedDepth = Math.min(targetDepth, GPU_FRONTIER_ANCESTRY_STRIDE);
+    let readFromSummaries = true;
+    for (let level = boundedDepth - 1; level > 0; level -= 1) {
+      const params = this.temporaryUniform(u32Uniform([
+        this.tuning.frontierWidth,
+        frontierStateStride(this.tuning.maxBoards),
+        GPU_FRONTIER_HEADER_STRIDE,
+        boundedDepth,
+        level,
+        readFromSummaries ? 1 : 0,
+        0,
+        0
+      ]));
+      encodePass(
+        this.device,
+        encoder,
+        pipelines.reduce,
+        [buffers.states, buffers.summaries, params],
+        Math.ceil(this.tuning.frontierWidth / 64),
+        1,
+        `frontier_minimax_reduce_${level}`
+      );
+      readFromSummaries = !readFromSummaries;
+    }
+    if (boundedDepth > 1 && readFromSummaries) {
+      const params = this.temporaryUniform(u32Uniform([
+        this.tuning.frontierWidth,
+        frontierStateStride(this.tuning.maxBoards),
+        GPU_FRONTIER_HEADER_STRIDE,
+        boundedDepth,
+        0,
+        1,
+        0,
+        0
+      ]));
+      encodePass(
+        this.device,
+        encoder,
+        pipelines.copyReduced,
+        [buffers.states, buffers.summaries, params],
+        Math.ceil(this.tuning.frontierWidth / 64),
+        1,
+        "frontier_minimax_copy_scores"
+      );
+    }
   }
 
   releaseCycleTemporaries(): void {
@@ -367,12 +428,21 @@ export class FrontierGpuPipeline {
   }
 }
 
-export function deriveFrontierTuning(device: GPUDevice, requestedNodes: number, boardCount: number): FrontierTuning {
+export function deriveFrontierTuning(
+  device: GPUDevice,
+  requestedNodes: number,
+  boardCount: number,
+  additionalBoardCapacity = 0
+): FrontierTuning {
   const storageLimit = finiteLimit(device.limits?.maxStorageBufferBindingSize, DEFAULT_STORAGE_LIMIT);
   const bufferLimit = finiteLimit(device.limits?.maxBufferSize, DEFAULT_BUFFER_LIMIT);
   const maxInvocations = finiteLimit(device.limits?.maxComputeInvocationsPerWorkgroup, 256);
   const maxBoardsByState = Math.max(1, Math.floor((storageLimit / MIN_FRONTIER_WIDTH / I32_BYTES - GPU_FRONTIER_HEADER_STRIDE - GPU_FRONTIER_PLAN_STRIDE) / GPU_FRONTIER_BOARD_STRIDE));
-  const maxBoards = Math.max(boardCount, Math.min(64, maxBoardsByState));
+  const desiredMaxBoards = Math.min(
+    64,
+    nextPowerOfTwo(Math.max(boardCount, boardCount + Math.max(0, additionalBoardCapacity)))
+  );
+  const maxBoards = Math.max(boardCount, Math.min(desiredMaxBoards, maxBoardsByState));
   const stateBytes = frontierStateBytes(maxBoards);
   const frontierWidth = clamp(
     Math.floor(Math.min(storageLimit, bufferLimit) / Math.max(1, stateBytes * 2)),
@@ -404,9 +474,10 @@ export function autotuneFrontier(
   device: GPUDevice,
   requestedNodes: number,
   boardCount: number,
-  modelVersion: string
+  modelVersion: string,
+  additionalBoardCapacity = 0
 ): Promise<FrontierTuning> {
-  const base = deriveFrontierTuning(device, requestedNodes, boardCount);
+  const base = deriveFrontierTuning(device, requestedNodes, boardCount, additionalBoardCapacity);
   const key = adapterTuningCacheKey(adapter, modelVersion, base);
   const cached = tuningCache.get(key);
   if (cached) {
@@ -453,7 +524,8 @@ export function encodeFrontierRoot(snapshot: GpuSnapshot, maxBoards: number): En
     .map((timeline) => ({ timeline, board: latestBoard(timeline) }))
     .filter((entry): entry is typeof entry & { board: NonNullable<typeof entry.board> } => Boolean(entry.board));
   const present = activeLatest.reduce<number | null>((value, entry) => value === null ? entry.board.time : Math.min(value, entry.board.time), null) ?? 0;
-  const pending = activeLatest.filter(({ board }) => board.time === present && board.sideToMove === snapshot.turn).length;
+  const rootColor = colorCode(snapshot.turn);
+  const pending = activeLatest.filter(({ board }) => board.time === present && colorCode(board.sideToMove) === rootColor).length;
   words[GPU_FRONTIER_HEADER_PRESENT_TIME] = present;
   words[GPU_FRONTIER_HEADER_PENDING_BOARDS] = pending;
   words[GPU_FRONTIER_HEADER_COMPLETE] = pending === 0 ? 1 : 0;
@@ -463,7 +535,7 @@ export function encodeFrontierRoot(snapshot: GpuSnapshot, maxBoards: number): En
     const base = boardOffset + index * GPU_FRONTIER_BOARD_STRIDE;
     const latest = latestBoard(timeline)?.time === board.time;
     const active = timelineActive(timeline, activeDistance);
-    const pendingBoard = latest && active && board.time === present && board.sideToMove === snapshot.turn;
+    const pendingBoard = latest && active && board.time === present && colorCode(board.sideToMove) === rootColor;
     words[base + GPU_FRONTIER_BOARD_TIMELINE_ID] = timeline.id;
     words[base + GPU_FRONTIER_BOARD_ROW] = timeline.row;
     words[base + GPU_FRONTIER_BOARD_OWNER] = ownerCode(timeline.owner);
@@ -541,19 +613,113 @@ function align4(value: number): number {
 }
 
 async function createFrontierPipelines(device: GPUDevice, tuning: FrontierTuning): Promise<FrontierPipelines> {
-  const [expand, hash, initializeOrder, bitonicSort, select, materialize, reduce] = await Promise.all([
-    createPipeline(device, "frontier_expand", GPU_FRONTIER_EXPAND_SHADER, "expand_frontier", { EXPAND_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }),
-    createPipeline(device, "frontier_hash", GPU_FRONTIER_SELECT_SHADER, "hash_candidates", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }),
-    createPipeline(device, "frontier_order", GPU_FRONTIER_SELECT_SHADER, "initialize_order", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }),
-    createPipeline(device, "frontier_sort", GPU_FRONTIER_SELECT_SHADER, "bitonic_sort", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }),
-    createPipeline(device, "frontier_select", GPU_FRONTIER_SELECT_SHADER, "select_top_k"),
-    createPipeline(device, "frontier_materialize", GPU_FRONTIER_STATE_SHADER, "materialize_selected", { MATERIALIZE_WORKGROUP_SIZE: tuning.mutationTileSize }),
-    createPipeline(device, "frontier_reduce", GPU_FRONTIER_STATE_SHADER, "minimax_reduce")
+  const layouts = frontierPipelineLayouts(device);
+  const [
+    expand,
+    hash,
+    bucketOrder,
+    bitonicSort,
+    markUnique,
+    markParentQuota,
+    compactSelected,
+    select,
+    materialize,
+    reduce,
+    copyReduced
+  ] = await Promise.all([
+    createPipeline(device, "frontier_expand", GPU_FRONTIER_EXPAND_SHADER, "expand_frontier", { EXPAND_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.expand),
+    createPipeline(device, "frontier_hash", GPU_FRONTIER_SELECT_SHADER, "hash_candidates", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_order", GPU_FRONTIER_SELECT_SHADER, "bucket_order", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_sort", GPU_FRONTIER_SELECT_SHADER, "bitonic_sort", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_unique", GPU_FRONTIER_SELECT_SHADER, "mark_unique", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_parent_quota", GPU_FRONTIER_SELECT_SHADER, "mark_parent_quota", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_compact", GPU_FRONTIER_SELECT_SHADER, "compact_selected", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_select", GPU_FRONTIER_SELECT_SHADER, "fill_selection_underflow", undefined, layouts.select),
+    createPipeline(device, "frontier_materialize", GPU_FRONTIER_STATE_SHADER, "materialize_selected", { MATERIALIZE_WORKGROUP_SIZE: tuning.mutationTileSize }, layouts.materialize),
+    createPipeline(device, "frontier_reduce", GPU_FRONTIER_STATE_SHADER, "minimax_reduce_stage", undefined, layouts.reduce),
+    createPipeline(device, "frontier_reduce_copy", GPU_FRONTIER_STATE_SHADER, "minimax_copy_scores", undefined, layouts.reduce)
   ]);
-  return { expand, hash, initializeOrder, bitonicSort, select, materialize, reduce };
+  return {
+    expand,
+    hash,
+    bucketOrder,
+    bitonicSort,
+    markUnique,
+    markParentQuota,
+    compactSelected,
+    select,
+    materialize,
+    reduce,
+    copyReduced
+  };
 }
 
-async function createPipeline(device: GPUDevice, label: string, code: string, entryPoint: string, constants?: Record<string, number>): Promise<GPUComputePipeline> {
+function frontierPipelineLayouts(device: GPUDevice): FrontierPipelineLayouts {
+  return {
+    expand: device.createBindGroupLayout({
+      label: "frontier_expand.layout",
+      entries: [
+        storageLayout(0, "read-only-storage"),
+        storageLayout(1, "storage"),
+        storageLayout(2, "storage"),
+        storageLayout(3, "storage"),
+        storageLayout(4, "uniform")
+      ]
+    }),
+    select: device.createBindGroupLayout({
+      label: "frontier_select.layout",
+      entries: [
+        storageLayout(0, "storage"),
+        storageLayout(1, "read-only-storage"),
+        storageLayout(2, "read-only-storage"),
+        storageLayout(3, "storage"),
+        storageLayout(4, "storage"),
+        storageLayout(5, "storage"),
+        storageLayout(6, "uniform"),
+        storageLayout(7, "uniform"),
+        storageLayout(8, "storage")
+      ]
+    }),
+    materialize: device.createBindGroupLayout({
+      label: "frontier_materialize.layout",
+      entries: [
+        storageLayout(0, "read-only-storage"),
+        storageLayout(1, "read-only-storage"),
+        storageLayout(2, "read-only-storage"),
+        storageLayout(3, "read-only-storage"),
+        storageLayout(4, "storage"),
+        storageLayout(5, "storage"),
+        storageLayout(6, "storage"),
+        storageLayout(7, "uniform")
+      ]
+    }),
+    reduce: device.createBindGroupLayout({
+      label: "frontier_reduce.layout",
+      entries: [
+        storageLayout(0, "storage"),
+        storageLayout(1, "storage"),
+        storageLayout(2, "uniform")
+      ]
+    })
+  };
+}
+
+function storageLayout(binding: number, type: GPUBufferBindingType): GPUBindGroupLayoutEntry {
+  return {
+    binding,
+    visibility: GPU_SHADER_STAGE_COMPUTE,
+    buffer: { type }
+  };
+}
+
+async function createPipeline(
+  device: GPUDevice,
+  label: string,
+  code: string,
+  entryPoint: string,
+  constants?: Record<string, number>,
+  bindGroupLayout?: GPUBindGroupLayout
+): Promise<GPUComputePipeline> {
   const module = device.createShaderModule({ label: `${label}.module`, code });
   if (module.getCompilationInfo) {
     const info = await module.getCompilationInfo();
@@ -563,7 +729,10 @@ async function createPipeline(device: GPUDevice, label: string, code: string, en
     }
   }
   const compute: GPUProgrammableStage = constants ? { module, entryPoint, constants } : { module, entryPoint };
-  return device.createComputePipeline({ label, layout: "auto", compute });
+  const layout = bindGroupLayout
+    ? device.createPipelineLayout({ label: `${label}.layout`, bindGroupLayouts: [bindGroupLayout] })
+    : "auto";
+  return device.createComputePipeline({ label, layout, compute });
 }
 
 async function tuneWorkgroups(device: GPUDevice, base: FrontierTuning): Promise<FrontierTuning> {
@@ -635,12 +804,27 @@ async function measureTunedPipeline(device: GPUDevice, pipeline: GPUComputePipel
   return performance.now() - started;
 }
 
-function encodePass(device: GPUDevice, encoder: GPUCommandEncoder, pipeline: GPUComputePipeline, buffers: GPUBuffer[], x: number, y = 1): void {
+function selectionPassBuffers(buffers: FrontierBufferSet, paramsBuffer: GPUBuffer, sortStageBuffer: GPUBuffer): GPUBuffer[] {
+  return [
+    buffers.candidates,
+    buffers.states,
+    buffers.deltas,
+    buffers.order,
+    buffers.selected,
+    buffers.counters,
+    paramsBuffer,
+    sortStageBuffer,
+    buffers.eligibility
+  ];
+}
+
+function encodePass(device: GPUDevice, encoder: GPUCommandEncoder, pipeline: GPUComputePipeline, buffers: GPUBuffer[], x: number, y = 1, label = pipeline.label): void {
   const bindGroup = device.createBindGroup({
+    label: `${label}.bindGroup`,
     layout: pipeline.getBindGroupLayout(0),
     entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } }))
   });
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass({ label });
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(Math.max(1, x), Math.max(1, y));
@@ -653,6 +837,10 @@ function u32Uniform(values: number[]): Uint32Array {
 
 function floorPowerOfTwo(value: number): number {
   return 2 ** Math.floor(Math.log2(Math.max(1, value)));
+}
+
+function nextPowerOfTwo(value: number): number {
+  return 2 ** Math.ceil(Math.log2(Math.max(1, value)));
 }
 
 export const frontierLayout = Object.freeze({

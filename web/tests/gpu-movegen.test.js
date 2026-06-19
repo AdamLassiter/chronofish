@@ -66,3 +66,24 @@ test("GPU reply sentinel is never used as an evaluation", async () => {
   assert.match(worker, /if \(reply\.move\) \{\s*score -= reply\.score/);
   assert.match(worker, /return bestMove \? \{ score: best, move: bestMove \} : \{ score: 0 \}/);
 });
+
+test("GPU pending-board filters use numeric color normalization", async () => {
+  const snapshot = await readFile(path.join(root, "src/ai-snapshot.ts"), "utf8");
+  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const frontier = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+
+  assert.match(snapshot, /export function colorCode\(color: Color \| string \| number \| null \| undefined\)/);
+  assert.match(snapshot, /typeof color === "number"/);
+  assert.match(worker, /colorCode\(board\.sideToMove\) === colorCode\(color\)/);
+  assert.match(frontier, /const rootColor = colorCode\(snapshot\.turn\)/);
+  assert.match(frontier, /colorCode\(board\.sideToMove\) === rootColor/);
+  assert.doesNotMatch(frontier, /board\.sideToMove === snapshot\.turn/);
+});
+
+test("hybrid GPU scoring batches dispatches under WebGPU limits", async () => {
+  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+
+  assert.match(worker, /const maxDispatchWorkgroups = 65_535/);
+  assert.match(worker, /const maxCandidatesPerDispatch = maxDispatchWorkgroups \* 64/);
+  assert.match(worker, /Math\.min\(\s*maxDispatchWorkgroups,\s*Math\.ceil\(batchCandidateCount \/ 64\)\s*\)/);
+});

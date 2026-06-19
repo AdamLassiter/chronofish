@@ -48,9 +48,7 @@ interface TrainingGpuProfileConfig {
 
 interface TrainingConfig {
   trainingSubject: string;
-  trainingTarget: string;
-  cpuTrainingTarget: string;
-  labelMode: string;
+  trainingModes: string[];
   samples: number;
   selfPlayWorkers: number;
   searchWorkers: number;
@@ -225,8 +223,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const trainingStatus = requireElement(elements.trainingStatus, "training-status");
   const trainingStatusView = requireElement(elements.trainingStatusView, "training-status-view");
   const trainingProgress = requireElement(elements.trainingProgress, "training-progress");
-  const trainingTargetSelect = requireElement(elements.trainingTargetSelect, "training-target");
-  const labelModeSelect = requireElement(elements.trainingLabelModeSelect, "training-label-mode");
+  const trainingModeSelect = requireElement(elements.trainingModeSelect, "training-mode");
   const samplesInput = requireElement(elements.trainingSamplesInput, "training-samples");
   const selfPlayWorkersInput = requireElement(elements.trainingSelfPlayWorkersInput, "training-self-play-workers");
   const searchWorkersInput = requireElement(elements.trainingSearchWorkersInput, "training-search-workers");
@@ -242,7 +239,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   const validationIntervalInput = requireElement(elements.trainingValidationIntervalInput, "training-validation-interval");
   const patienceInput = requireElement(elements.trainingPatienceInput, "training-patience");
   const decayInput = requireElement(elements.trainingDecayInput, "training-decay");
-  const cpuTargetSelect = requireElement(elements.trainingCpuTargetSelect, "training-cpu-target");
+  const cpuModeSelect = requireElement(elements.trainingCpuModeSelect, "training-cpu-mode");
   const cpuDepthInput = requireElement(elements.trainingCpuDepthInput, "training-cpu-depth");
   const cpuNodesInput = requireElement(elements.trainingCpuNodesInput, "training-cpu-nodes");
   const cpuTimeMsInput = requireElement(elements.trainingCpuTimeMsInput, "training-cpu-time-ms");
@@ -334,8 +331,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     return {
       trainingSubject: selectedTrainingTab === "cpu" ? "cpu" : "gpu",
       // GPU
-      trainingTarget: trainingTargetSelect.value,
-      labelMode: labelModeSelect.value,
+      trainingModes: selectedTrainingModes(selectedTrainingTab === "cpu" ? cpuModeSelect : trainingModeSelect, selectedTrainingTab === "cpu" ? ["vsCpu"] : ["vsGpu", "self"]),
       samples: clampNumber(samplesInput.value, 1, caps?.maxSamples ?? 512, caps?.samples ?? 64),
       selfPlayWorkers: clampNumber(selfPlayWorkersInput.value, 1, caps?.maxSelfPlayWorkers ?? 8, caps?.selfPlayWorkers ?? 2),
       searchWorkers: clampNumber(searchWorkersInput.value, 1, caps?.maxSearchWorkers ?? 16, caps?.searchWorkers ?? 2),
@@ -353,7 +349,6 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       weightDecay: clampNumber(decayInput.value, 0, 0.01, 0.00001),
       labelWorkers: autoTrainingWorkers(),
       // CPU
-      cpuTrainingTarget: cpuTargetSelect.value,
       cpuDepth: clampNumber(cpuDepthInput.value, 1, 16, 4),
       cpuNodes: clampNumber(cpuNodesInput.value, 1, 131072, 16384),
       cpuTrainingTimeMs: clampNumber(cpuTimeMsInput.value, 1, 600000, 10000),
@@ -387,6 +382,11 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     for (const panel of elements.trainingTabPanels) {
       panel.hidden = panel.dataset.trainingPanel !== selected;
     }
+  }
+
+  function selectedTrainingModes(select: HTMLSelectElement, fallback: string[]): string[] {
+    const values = Array.from(select.selectedOptions).map((option) => option.value);
+    return values.length > 0 ? values : fallback;
   }
 
   function autoTrainingWorkers(): number {
@@ -694,7 +694,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       tone: "active",
       metrics: filterMetrics([trainingMetric("Run", cycle)])
     });
-    if (config.trainingTarget === "trainCpu") {
+    if (config.trainingSubject === "cpu") {
       setTrainingStatus({
         title: "Training CPU",
         tone: "active",

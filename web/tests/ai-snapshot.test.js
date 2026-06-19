@@ -9,7 +9,7 @@ import * as esbuild from "esbuild";
 const root = path.resolve(import.meta.dirname, "..");
 const modules = await buildTestModules();
 const { GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK } = await import(modules.aiLayout);
-const { buildGpuCandidateInputs, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
+const { buildGpuCandidateInputs, colorCode, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
 
 test("initial position encodes GPU move candidates", () => {
   const inputs = buildGpuCandidateInputs(initialGame(), "white");
@@ -19,6 +19,22 @@ test("initial position encodes GPU move candidates", () => {
   assert.equal(inputs.boardCount, 1);
   assert.equal(inputs.sources.length, inputs.sourceCount * 10);
   assert.equal(inputs.targets.length, inputs.targetCount * 10);
+});
+
+test("GPU snapshot encoding normalizes numeric and cased colors", () => {
+  const game = initialGame();
+  game.turn = "WHITE";
+  game.timelines[0].boards[0].sideToMove = 0;
+  game.timelines[0].boards[0].board[0][0] = { color: "BLACK", type: "rook" };
+
+  const inputs = buildGpuCandidateInputs(game, "white");
+
+  assert.equal(colorCode("WHITE"), 0);
+  assert.equal(colorCode("BLACK"), 1);
+  assert.equal(colorCode(0), 0);
+  assert.equal(colorCode(1), 1);
+  assert.equal(inputs.targets[7], 0);
+  assert.equal(inputs.sources[1], 1);
 });
 
 test("historical GPU branch creates a new owned timeline", () => {

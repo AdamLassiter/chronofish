@@ -129,4 +129,5 @@ export interface ChronofishEngine {
   chronofish_submit_turn(): number;
   chronofish_ai_turn_json(maxDepth: number, maxNodes: number): number;
   chronofish_ai_turn_timed_json(maxDepth: number, maxNodes: number, millis: number): number;
+  chronofish_ai_turn_timed_min_depth_json(maxDepth: number, minDepth: number, maxNodes: number, millis: number): number;
 }

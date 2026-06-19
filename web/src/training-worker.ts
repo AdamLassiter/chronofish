@@ -22,11 +22,9 @@ let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
 const pipelineCache = new Map<string, GPUComputePipeline>();
 
-type TrainingLabelMode = "mixed" | "search" | "selfPlay" | "distill";
 type TrainingLabelKind = "search" | "outcome" | "distilled" | string;
 type TrainingSubject = "gpu" | "cpu";
-type TrainingTarget = "trainGpu" | "trainCpu" | "trainBoth";
-type CpuTrainingTarget = "vsCpu" | "vsGpu" | "vsBoth";
+type TrainingMode = "vsGpu" | "vsCpu" | "self" | "distill";
 
 interface WorkerScope {
   addEventListener(type: "message", listener: (event: MessageEvent<TrainingWorkerRequest>) => void | Promise<void>): void;
@@ -50,9 +48,7 @@ type ProgressCallback = (message: ProgressMessage) => void;
 
 interface NormalizedTrainingConfig extends GpuTrainingConfig {
   trainingSubject: TrainingSubject;
-  trainingTarget: TrainingTarget;
-  cpuTrainingTarget: CpuTrainingTarget;
-  labelMode: TrainingLabelMode;
+  trainingModes: TrainingMode[];
   runSeed: number;
   samples: number;
   selfPlayWorkers: number;
@@ -130,6 +126,12 @@ interface AiWorkerStatus {
   terminal?: boolean;
   winner?: Color;
   nextTurn?: Color;
+}
+
+interface AppliedWorkerTurn {
+  game: GameSnapshot;
+  status: AiWorkerStatus;
+  winner: Color | null;
 }
 
 interface AiWorkerResponse {
@@ -279,12 +281,11 @@ workerSelf.addEventListener("message", async (event) => {
 });
 
 function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {}): NormalizedTrainingConfig {
+  const trainingSubject = isTrainingSubject(config.trainingSubject) ? config.trainingSubject : legacyTrainingSubject(config);
   return {
     ...config,
-    trainingSubject: isTrainingSubject(config.trainingSubject) ? config.trainingSubject : "gpu",
-    trainingTarget: isTrainingTarget(config.trainingTarget) ? config.trainingTarget : "trainGpu",
-    cpuTrainingTarget: isCpuTrainingTarget(config.cpuTrainingTarget) ? config.cpuTrainingTarget : "vsCpu",
-    labelMode: isTrainingLabelMode(config.labelMode) ? config.labelMode : "mixed",
+    trainingSubject,
+    trainingModes: normalizeTrainingModes(config, trainingSubject),
     runSeed: randomRunSeed(),
     learningRate: clampNumber(config.learningRate, 0.0001, 0.1, 0.01),
     samples: clampInteger(config.samples, 1, 1024, 64),
@@ -332,20 +333,51 @@ function createTrainingMetrics(): TrainingRunMetrics {
   };
 }
 
-function isTrainingLabelMode(value: unknown): value is TrainingLabelMode {
-  return value === "mixed" || value === "search" || value === "selfPlay" || value === "distill";
-}
-
 function isTrainingSubject(value: unknown): value is TrainingSubject {
   return value === "gpu" || value === "cpu";
 }
 
-function isTrainingTarget(value: unknown): value is TrainingTarget {
-  return value === "trainGpu" || value === "trainCpu" || value === "trainBoth";
+function isTrainingMode(value: unknown): value is TrainingMode {
+  return value === "vsGpu" || value === "vsCpu" || value === "self" || value === "distill";
 }
 
-function isCpuTrainingTarget(value: unknown): value is CpuTrainingTarget {
-  return value === "vsCpu" || value === "vsGpu" || value === "vsBoth";
+function legacyTrainingSubject(config: Partial<NormalizedTrainingConfig>): TrainingSubject {
+  return (config as { trainingTarget?: unknown }).trainingTarget === "trainCpu" ? "cpu" : "gpu";
+}
+
+function normalizeTrainingModes(config: Partial<NormalizedTrainingConfig>, subject: TrainingSubject): TrainingMode[] {
+  const explicit = Array.isArray((config as { trainingModes?: unknown }).trainingModes)
+    ? (config as { trainingModes: unknown[] }).trainingModes.filter(isTrainingMode)
+    : [];
+  const legacy = explicit.length > 0 ? explicit : legacyTrainingModes(config, subject);
+  const filtered = subject === "cpu" ? legacy.filter((mode) => mode !== "distill") : legacy;
+  const deduped = Array.from(new Set(filtered));
+  return deduped.length > 0 ? deduped : subject === "cpu" ? ["vsCpu"] : ["vsGpu", "self"];
+}
+
+function legacyTrainingModes(config: Partial<NormalizedTrainingConfig>, subject: TrainingSubject): TrainingMode[] {
+  if (subject === "cpu") {
+    const target = (config as { cpuTrainingTarget?: unknown }).cpuTrainingTarget;
+    if (target === "vsGpu") return ["vsGpu"];
+    if (target === "vsBoth") return ["vsCpu", "vsGpu"];
+    return ["vsCpu"];
+  }
+  const target = (config as { trainingTarget?: unknown }).trainingTarget;
+  const labelMode = (config as { labelMode?: unknown }).labelMode;
+  const modes: TrainingMode[] = [];
+  if (target === "trainCpu" || target === "trainBoth") {
+    modes.push("vsCpu");
+  }
+  if (target !== "trainCpu" && (target === "trainBoth" || labelMode === "mixed" || labelMode === "search" || labelMode === undefined)) {
+    modes.push("vsGpu");
+  }
+  if (target !== "trainCpu" && (labelMode === "mixed" || labelMode === "selfPlay" || labelMode === undefined)) {
+    modes.push("self");
+  }
+  if (target !== "trainCpu" && (labelMode === "mixed" || labelMode === "distill" || labelMode === undefined)) {
+    modes.push("distill");
+  }
+  return modes;
 }
 
 async function timed<T>(metrics: TrainingRunMetrics | null | undefined, name: string, fn: () => Promise<T> | T): Promise<T> {
@@ -404,36 +436,38 @@ async function collectTrainingSamples(
     throw new Error("Training requires a game snapshot.");
   }
   const collectors: Array<() => Promise<TrainingSample[]>> = [];
-  if (config.trainingTarget === "trainCpu") {
+  const vsGpu = trainingModeEnabled(config, "vsGpu");
+  const vsCpu = trainingModeEnabled(config, "vsCpu");
+  const self = trainingModeEnabled(config, "self");
+  const distill = config.trainingSubject === "gpu" && trainingModeEnabled(config, "distill");
+  if (config.trainingSubject === "cpu") {
     collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
-  } else if (config.trainingTarget === "trainBoth") {
-    collectors.push(() => collectSearchSamples(game, config, progress));
-    collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
-  } else if (config.labelMode === "mixed" || config.labelMode === "search") {
-    collectors.push(() => collectSearchSamples(game, config, progress));
+  } else {
+    if (vsGpu) {
+      collectors.push(() => collectSearchSamples(game, config, progress));
+    }
+    if (vsCpu) {
+      collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
+    }
+    if (self) {
+      collectors.push(() => timed(metrics, "outcomeLabels", () => collectOutcomeSamples(game, config, progress)));
+    }
+    if (distill) {
+      collectors.push(() => timed(metrics, "distillLabels", () => collectDistilledSamples(game, config, activeModel, progress)));
+    }
   }
-  if (config.trainingTarget !== "trainCpu" && (config.labelMode === "mixed" || config.labelMode === "selfPlay")) {
-    collectors.push(() => timed(metrics, "outcomeLabels", () => collectOutcomeSamples(game, config, progress)));
-  }
-  if (config.trainingTarget !== "trainCpu" && (config.labelMode === "mixed" || config.labelMode === "distill")) {
-    collectors.push(() => timed(metrics, "distillLabels", () => collectDistilledSamples(game, config, activeModel, progress)));
+  if (config.trainingSubject === "gpu" && vsGpu && vsCpu) {
+    collectors.push(() => timed(metrics, "duelLabels", () => collectCpuGpuDuelSamples(game, config, progress)));
   }
 
   const collected = await Promise.allSettled(collectors.map((collector) => collector()));
   const results = collected
     .filter((result): result is PromiseFulfilledResult<TrainingSample[]> => result.status === "fulfilled")
     .flatMap((result) => result.value);
-  if (config.trainingTarget === "trainBoth") {
-    const duel = await timed(metrics, "duelLabels", () => collectCpuGpuDuelSamples(game, config, progress));
-    const combined = [...results, ...duel];
-    if (combined.length > 0) {
-      return combined;
-    }
-  }
   if (results.length > 0) {
     return results;
   }
-  if (activeModel?.outputWeights?.length && config.labelMode !== "distill") {
+  if (activeModel?.outputWeights?.length && !distill && config.trainingSubject === "gpu") {
     return collectDistilledSamples(game, config, activeModel, progress);
   }
   throw new Error("No training labels were collected.");
@@ -545,7 +579,7 @@ async function scoreCpuCandidate(
       parametersJson: candidateJson
     }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
     const candidateScore = candidateResult.result?.score ?? 0;
-    if (config.cpuTrainingTarget === "vsCpu" || config.cpuTrainingTarget === "vsBoth") {
+    if (cpuBaselineModeEnabled(config)) {
       const baselineResult = await requestWorker(baselineWorker, {
         type: "search",
         game,
@@ -562,7 +596,7 @@ async function scoreCpuCandidate(
       }
       score += moveAgreementBonus(candidateResult.result?.moves, baselineResult.result?.moves);
     }
-    if (config.cpuTrainingTarget === "vsGpu" || config.cpuTrainingTarget === "vsBoth") {
+    if (trainingModeEnabled(config, "vsGpu")) {
       const gpuResult = await requestWorker(gpuWorker, {
         type: "search",
         game,
@@ -587,7 +621,7 @@ function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
   const hallPairs = Math.max(0, config.cpuHallOfFameEntries);
   const requested = Math.max(config.cpuMinPairs, variantPairs + leaguePairs + hallPairs);
   const cappedPairs = Math.min(Math.max(config.cpuMinPairs, config.cpuMaxPairs), requested, config.cpuMaxMatchPlies);
-  return mixedLabelTarget(config, Math.max(1, cappedPairs));
+  return modeLabelTarget(config, Math.max(1, cappedPairs));
 }
 
 function cpuTrainingDeadlineAt(config: NormalizedTrainingConfig): number {
@@ -640,12 +674,12 @@ function mutateCpuParameters(base: CpuParameters, seed: number): CpuParameters {
 }
 
 async function collectSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
-  const target = mixedLabelTarget(config, 16);
+  const target = modeLabelTarget(config, 16);
   const positions = await timed(config.metrics, "searchPositions", () => collectGpuPositions(game, config, target, progress, "search"));
   if (config.metrics) {
     config.metrics.searchPositionCount = positions.length;
   }
-  const workerCount = Math.min(positions.length, config.searchWorkers ?? 1);
+  const workerCount = gpuTrainingWorkerCount(positions.length);
   const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
   let nextPosition = 0;
   let collected = 0;
@@ -709,7 +743,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
 }
 
 async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
-  const target = mixedLabelTarget(config, config.trainingTarget === "trainBoth" ? 16 : 1);
+  const target = modeLabelTarget(config, trainingModeCount(config) > 1 ? 16 : 1);
   const positions = await timed(config.metrics, "cpuPositions", () => collectGpuPositions(game, config, target, progress, "cpu"));
   const workerCount = Math.min(positions.length, Math.max(1, config.cpuWorkers ?? 1));
   const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
@@ -758,7 +792,7 @@ async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTra
         label: normalizeSearchScore(result.score ?? 0),
         policy: policyBucket(result.moves[0]),
         labelKind: "cpu",
-        labelWeight: config.trainingTarget === "trainBoth" ? 1.1 : 1.0,
+        labelWeight: trainingModeCount(config) > 1 ? 1.1 : 1.0,
         pseudo: false
       };
     } catch {
@@ -768,11 +802,11 @@ async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTra
 }
 
 async function collectCpuGpuDuelSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
-  const target = mixedLabelTarget(config, 8);
+  const target = modeLabelTarget(config, 8);
   if (target <= 0) {
     return [];
   }
-  const workerCount = Math.min(target, Math.max(1, Math.min(config.cpuWorkers, config.searchWorkers)));
+  const workerCount = gpuTrainingWorkerCount(target);
   const targets = splitWork(target, workerCount);
   let collected = 0;
   progress({ sampleCount: target, labelWorkers: workerCount, labelKind: "duel" });
@@ -816,49 +850,46 @@ async function collectCpuGpuDuelRollout(
         randomSeed: sampleSeed("duel", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0xd0e1_0001))
       }, workerRequestTimeout({ nodes: useCpu ? config.cpuNodes : config.nodes }));
       const result = response.result;
-      const move = result?.moves?.[0];
-      if (!move) {
+      const moves = result?.moves ?? [];
+      if (!moves.length) {
         break;
       }
       samples.push({
         ...encoded,
-        label: normalizeSearchScore(result.score ?? 0),
-        policy: policyBucket(move),
+        label: normalizeSearchScore(result?.score ?? 0),
+        policy: policyBucket(moves[0]),
         labelKind: "duel",
         labelWeight: 1.35,
         outcomeTurn: beforeTurn,
         ply: ply + workerIndex * MAX_PLAYOUT_PLIES
       });
       progress(1);
-      const previous = current;
-      const applied = await requestWorker(gpu, { type: "applyMove", game: current, move }, workerRequestTimeout(config));
-      if (!applied.game) {
+      const applied = await applyWorkerTurn(gpu, current, moves, config, beforeTurn);
+      if (!applied) {
         break;
       }
       current = applied.game;
-      const winner = royalCaptureWinner(previous, current, beforeTurn);
-      if (winner) {
-        return backfillOutcomeLabels(samples, winner).map((sample) => ({
+      if (applied.winner) {
+        return backfillOutcomeLabels(samples, applied.winner).map((sample) => ({
           ...sample,
           labelKind: "duel",
           labelWeight: 1.35
         }));
       }
-      const status = await requestWorker(gpu, { type: "submitTurn", game: current }, workerRequestTimeout(config));
-      if (status.status?.terminal && status.status.winner) {
-        return backfillOutcomeLabels(samples, status.status.winner).map((sample) => ({
+      if (applied.status.terminal && applied.status.winner) {
+        return backfillOutcomeLabels(samples, applied.status.winner).map((sample) => ({
           ...sample,
           labelKind: "duel",
           labelWeight: 1.35
         }));
       }
-      if (status.status?.complete && status.status.nextTurn) {
-        current = { ...current, turn: status.status.nextTurn };
+      if (applied.status.terminal) {
+        return backfillDrawLabels(samples, "duel", 1.1);
       }
     }
-    return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+    return samplesFromPartialOutcome(samples, "duel-search", 1.0);
   } catch {
-    return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+    return samplesFromPartialOutcome(samples, "duel-search", 1.0);
   } finally {
     gpu.terminate();
     cpu.terminate();
@@ -867,11 +898,11 @@ async function collectCpuGpuDuelRollout(
 }
 
 async function collectOutcomeSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
-  const target = mixedLabelTarget(config, 16);
+  const target = modeLabelTarget(config, 16);
   if (target <= 0) {
     return [];
   }
-  const workerCount = Math.min(target, config.selfPlayWorkers ?? 1);
+  const workerCount = gpuTrainingWorkerCount(target);
   const targets = splitWork(target, workerCount);
   let collected = 0;
   const report = (count: number): void => {
@@ -922,46 +953,36 @@ async function collectOutcomeRollout(
         randomSeed: sampleSeed("outcome", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0x0c70_0001))
       }, workerRequestTimeout(config));
       const result = response.result;
-      const move = result?.moves?.[0];
-      if (!move) {
+      const moves = result?.moves ?? [];
+      if (!moves.length) {
         break;
       }
       samples.push({
         ...encoded,
-        label: normalizeSearchScore(result.score ?? 0),
-        policy: policyBucket(move),
+        label: normalizeSearchScore(result?.score ?? 0),
+        policy: policyBucket(moves[0]),
         labelKind: "outcome",
         labelWeight: 1.25,
         outcomeTurn: beforeTurn,
         ply: ply + workerIndex * MAX_PLAYOUT_PLIES
       });
       progress(1);
-      const previous = current;
-      const applied = await requestWorker(ai, {
-        type: "applyMove",
-        game: current,
-        move
-      }, workerRequestTimeout(config));
-      if (!applied.game) {
+      const applied = await applyWorkerTurn(ai, current, moves, config, beforeTurn);
+      if (!applied) {
         break;
       }
       current = applied.game;
-      const winner = royalCaptureWinner(previous, current, beforeTurn);
-      if (winner) {
-        return backfillOutcomeLabels(samples, winner);
+      if (applied.winner) {
+        return backfillOutcomeLabels(samples, applied.winner);
       }
-      const status = await requestWorker(ai, {
-        type: "submitTurn",
-        game: current
-      }, workerRequestTimeout(config));
-      if (status.status?.terminal && status.status.winner) {
-        return backfillOutcomeLabels(samples, status.status.winner);
+      if (applied.status.terminal && applied.status.winner) {
+        return backfillOutcomeLabels(samples, applied.status.winner);
       }
-      if (status.status?.complete && status.status.nextTurn) {
-        current = { ...current, turn: status.status.nextTurn };
+      if (applied.status.terminal) {
+        return backfillDrawLabels(samples, "outcome", 1.0);
       }
     }
-    return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+    return samplesFromPartialOutcome(samples);
   } catch {
     return samplesFromPartialOutcome(samples);
   } finally {
@@ -974,6 +995,12 @@ function splitWork(total: number, workers: number): number[] {
   return Array.from({ length: workers }, (_, index) =>
     Math.floor(total / workers) + (index < total % workers ? 1 : 0)
   ).filter((count) => count > 0);
+}
+
+function gpuTrainingWorkerCount(total: number): number {
+  // WebGPU work is serialized through one worker/device queue. Extra GPU
+  // workers duplicate adapters and compete with the same hardware queue.
+  return Math.min(Math.max(0, total), 1);
 }
 
 async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: NormalizedTrainingConfig, workerIndex: number): Promise<GameSnapshot> {
@@ -993,28 +1020,17 @@ async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: No
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("warmup", ply, config.runSeed ^ workerIndex ^ 0x0aa5_0001)
       }, workerRequestTimeout({ ...config, nodes: 1024 }));
-      const move = response.result?.moves?.[0];
-      if (!move) {
+      const moves = response.result?.moves ?? [];
+      if (!moves.length) {
         break;
       }
-      const applied = await requestWorker(ai, {
-        type: "applyMove",
-        game: current,
-        move
-      }, workerRequestTimeout(config));
-      if (!applied.game) {
+      const applied = await applyWorkerTurn(ai, current, moves, config, current.turn);
+      if (!applied) {
         break;
       }
       current = applied.game;
-      const status = await requestWorker(ai, {
-        type: "submitTurn",
-        game: current
-      }, workerRequestTimeout(config));
-      if (status.status?.terminal) {
+      if (applied.status.terminal) {
         break;
-      }
-      if (status.status?.complete && status.status.nextTurn) {
-        current = { ...current, turn: status.status.nextTurn };
       }
     } catch {
       break;
@@ -1056,7 +1072,7 @@ async function collectGpuPositions(
   if (target <= 0) {
     return [];
   }
-  const workerCount = Math.min(target, Math.max(1, config.searchWorkers ?? 1));
+  const workerCount = gpuTrainingWorkerCount(target);
   const positions: Array<EncodedPosition | null> = new Array(target).fill(null);
   let nextJob = 0;
   let generated = 0;
@@ -1123,21 +1139,17 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("position", index * MAX_PLAYOUT_PLIES + ply, config.runSeed ^ workerIndex ^ 0x9051_0001)
       }, workerRequestTimeout(shallowConfig));
-      const move = response.result?.moves?.[0];
-      if (!move) {
+      const moves = response.result?.moves ?? [];
+      if (!moves.length) {
         break;
       }
-      const applied = await requestWorker(ai, { type: "applyMove", game: current, move }, workerRequestTimeout(config));
-      if (!applied.game) {
+      const applied = await applyWorkerTurn(ai, current, moves, config, current.turn);
+      if (!applied) {
         break;
       }
       current = applied.game;
-      const status = await requestWorker(ai, { type: "submitTurn", game: current }, workerRequestTimeout(config));
-      if (status.status?.terminal) {
+      if (applied.status.terminal) {
         break;
-      }
-      if (status.status?.complete && status.status.nextTurn) {
-        current = { ...current, turn: status.status.nextTurn };
       }
     } catch {
       break;
@@ -1146,15 +1158,81 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
   return current;
 }
 
-function samplesFromPartialOutcome(samples: LabelWorkerSample[]): TrainingSample[] {
-  return samples.map(({ outcomeTurn, ply, ...sample }) => sample);
+async function applyWorkerTurn(
+  worker: Worker,
+  game: GameSnapshot,
+  moves: Move[],
+  config: NormalizedTrainingConfig,
+  mover: Color
+): Promise<AppliedWorkerTurn | null> {
+  let current = game;
+  for (const move of moves) {
+    const beforeMove = current;
+    const applied = await requestWorker(worker, {
+      type: "applyMove",
+      game: current,
+      move
+    }, workerRequestTimeout(config));
+    if (!applied.game) {
+      return null;
+    }
+    current = applied.game;
+    const winner = royalCaptureWinner(beforeMove, current, mover);
+    if (winner) {
+      return {
+        game: current,
+        status: { terminal: true, winner },
+        winner
+      };
+    }
+  }
+
+  const submitted = await requestWorker(worker, {
+    type: "submitTurn",
+    game: current
+  }, workerRequestTimeout(config));
+  const status = submitted.status ?? {};
+  if (status.complete && status.nextTurn) {
+    current = { ...current, turn: status.nextTurn };
+  }
+  return {
+    game: current,
+    status,
+    winner: status.winner ?? null
+  };
 }
 
-function mixedLabelTarget(config: NormalizedTrainingConfig, divisor: number): number {
-  if (config.labelMode !== "mixed") {
+function samplesFromPartialOutcome(
+  samples: LabelWorkerSample[],
+  labelKind: TrainingLabelKind = "search-bootstrap",
+  labelWeight = 0.5
+): TrainingSample[] {
+  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
+    ...sample,
+    labelKind,
+    labelWeight
+  }));
+}
+
+function modeLabelTarget(config: NormalizedTrainingConfig, divisor: number): number {
+  if (trainingModeCount(config) <= 1) {
     return config.samples;
   }
   return Math.max(1, Math.ceil(config.samples / divisor));
+}
+
+function trainingModeEnabled(config: NormalizedTrainingConfig, mode: TrainingMode): boolean {
+  return config.trainingModes.includes(mode);
+}
+
+function cpuBaselineModeEnabled(config: NormalizedTrainingConfig): boolean {
+  return trainingModeEnabled(config, "vsCpu") || trainingModeEnabled(config, "self");
+}
+
+function trainingModeCount(config: NormalizedTrainingConfig): number {
+  return config.trainingSubject === "cpu"
+    ? config.trainingModes.filter((mode) => mode !== "distill").length
+    : config.trainingModes.length;
 }
 
 function backfillOutcomeLabels(samples: LabelWorkerSample[], winner: Color): TrainingSample[] {
@@ -1164,6 +1242,15 @@ function backfillOutcomeLabels(samples: LabelWorkerSample[], winner: Color): Tra
     label: (outcomeTurn === winner ? 1 : -1) * Math.pow(0.96, maxPly - (ply ?? 0)),
     labelKind: "outcome",
     labelWeight: 1.25
+  }));
+}
+
+function backfillDrawLabels(samples: LabelWorkerSample[], labelKind: TrainingLabelKind, labelWeight: number): TrainingSample[] {
+  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
+    ...sample,
+    label: 0,
+    labelKind,
+    labelWeight
   }));
 }
 
@@ -1441,7 +1528,19 @@ function searchSeed(value: unknown, salt: number): number {
 
 function appendReplaySamples(buffer: TrainingSample[], samples: TrainingSample[], maxBuffer: number): TrainingSample[] {
   const merged = buffer.concat(samples).filter((sample) => Array.isArray(sample.features));
-  return merged.slice(Math.max(0, merged.length - maxBuffer));
+  const deduplicated = new Map<string, TrainingSample>();
+  let legacyIndex = 0;
+  for (const sample of merged) {
+    const key = sample.positionKey
+      ? `${sample.positionKey}|${sample.labelKind ?? "unknown"}|${sample.policy ?? ""}`
+      : `legacy:${legacyIndex++}`;
+    if (deduplicated.has(key)) {
+      deduplicated.delete(key);
+    }
+    deduplicated.set(key, sample);
+  }
+  const values = Array.from(deduplicated.values());
+  return values.slice(Math.max(0, values.length - maxBuffer));
 }
 
 async function validateLossLogs(config: NormalizedTrainingConfig, progress?: ProgressCallback): Promise<LossLogValidation> {

@@ -6,6 +6,7 @@ interface CpuAiRequest {
   id: number | string;
   game?: GameSnapshot;
   depth?: number;
+  minDepth?: number;
   nodes?: number;
   timeMs?: number;
   partitionIndex?: number;
@@ -26,7 +27,7 @@ let enginePromise: Promise<ChronofishEngine> | null = null;
 let parametersPromise: Promise<void> | null = null;
 
 self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
-  const { id, game, depth = 1, nodes = 64, timeMs = 10_000, partitionIndex = 0, parametersJson } = event.data;
+  const { id, game, depth = 1, minDepth, nodes = 64, timeMs = 10_000, partitionIndex = 0, parametersJson } = event.data;
   try {
     if (!game) {
       throw new Error("CPU AI search requires a game snapshot.");
@@ -38,11 +39,18 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
       await loadCpuParameters(engine);
     }
     loadSnapshot(engine, game);
-    const ptr = engine.chronofish_ai_turn_timed_json(
-      Math.max(1, depth),
-      Math.max(1, nodes),
-      Math.max(1, Math.floor(timeMs))
-    );
+    const ptr = minDepth === undefined
+      ? engine.chronofish_ai_turn_timed_json(
+        Math.max(1, depth),
+        Math.max(1, nodes),
+        Math.max(1, Math.floor(timeMs))
+      )
+      : engine.chronofish_ai_turn_timed_min_depth_json(
+        Math.max(1, depth),
+        Math.max(1, Math.min(depth, minDepth)),
+        Math.max(1, nodes),
+        Math.max(1, Math.floor(timeMs))
+      );
     const result = JSON.parse(readWasmString(engine, ptr)) as CpuAiResult;
     result.principalVariation ??= result.moves.length ? [result.moves] : [];
     result.cpuSearch = "heuristic";

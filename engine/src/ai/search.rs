@@ -14,14 +14,42 @@ impl Game {
             .to_json()
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn ai_turn_timed_min_depth_json(
+        &self,
+        max_depth: i32,
+        min_depth: i32,
+        max_nodes: i32,
+        millis: i32,
+    ) -> String {
+        self.best_ai_turn_with_min_depth(max_depth, min_depth, max_nodes, search_deadline(millis))
+            .to_json()
+    }
+
     pub(crate) fn best_ai_turn(
         &self,
         max_depth: i32,
         max_nodes: i32,
         deadline: Option<SearchInstant>,
     ) -> AiSearchResult {
-        self.best_ai_turn_with_options(
+        self.best_ai_turn_with_min_depth(
             max_depth,
+            Self::DEFAULT_MIN_AI_SEARCH_DEPTH,
+            max_nodes,
+            deadline,
+        )
+    }
+
+    pub(crate) fn best_ai_turn_with_min_depth(
+        &self,
+        max_depth: i32,
+        min_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+    ) -> AiSearchResult {
+        self.best_ai_turn_with_options_min_depth(
+            max_depth,
+            min_depth,
             max_nodes,
             deadline,
             SearchOptions::optimized(),
@@ -30,6 +58,7 @@ impl Game {
         .0
     }
 
+    #[allow(dead_code)]
     pub(crate) fn best_ai_turn_with_options(
         &self,
         max_depth: i32,
@@ -38,8 +67,28 @@ impl Game {
         options: SearchOptions,
         label: Option<&'static str>,
     ) -> (AiSearchResult, Option<SearchPerfSample>) {
-        self.best_ai_turn_with_value_evaluator(
+        self.best_ai_turn_with_options_min_depth(
             max_depth,
+            Self::DEFAULT_MIN_AI_SEARCH_DEPTH,
+            max_nodes,
+            deadline,
+            options,
+            label,
+        )
+    }
+
+    pub(crate) fn best_ai_turn_with_options_min_depth(
+        &self,
+        max_depth: i32,
+        min_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        options: SearchOptions,
+        label: Option<&'static str>,
+    ) -> (AiSearchResult, Option<SearchPerfSample>) {
+        self.best_ai_turn_with_value_evaluator_min_depth(
+            max_depth,
+            min_depth,
             max_nodes,
             deadline,
             options,
@@ -48,6 +97,7 @@ impl Game {
         )
     }
 
+    #[allow(dead_code)]
     pub(crate) fn best_ai_turn_with_value_evaluator(
         &self,
         max_depth: i32,
@@ -57,9 +107,31 @@ impl Game {
         evaluator: ValueEvaluator,
         label: Option<&'static str>,
     ) -> (AiSearchResult, Option<SearchPerfSample>) {
+        self.best_ai_turn_with_value_evaluator_min_depth(
+            max_depth,
+            Self::DEFAULT_MIN_AI_SEARCH_DEPTH,
+            max_nodes,
+            deadline,
+            options,
+            evaluator,
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn best_ai_turn_with_value_evaluator_min_depth(
+        &self,
+        max_depth: i32,
+        min_depth: i32,
+        max_nodes: i32,
+        deadline: Option<SearchInstant>,
+        options: SearchOptions,
+        evaluator: ValueEvaluator,
+        label: Option<&'static str>,
+    ) -> (AiSearchResult, Option<SearchPerfSample>) {
         let started = SearchInstant::now();
         let depth = max_depth.max(1);
-        let min_completed_depth = depth.min(Self::DEFAULT_MIN_AI_SEARCH_DEPTH);
+        let min_completed_depth = depth.min(min_depth.max(1));
         let nodes = max_nodes.max(1) as usize;
         let weights = EvalWeights::active_tuned();
         let mut context = SearchContext::new(weights, self.turn, nodes, deadline);
@@ -79,7 +151,7 @@ impl Game {
                 principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
                 score,
-                depth: 1,
+                depth: min_completed_depth,
                 nodes: context.nodes,
                 status: "ok",
             };
