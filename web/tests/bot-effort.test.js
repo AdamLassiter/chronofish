@@ -111,9 +111,20 @@ test("post-match bot review opens principal variation suffixes from clicked boar
   const main = await readFile(path.join(webRoot, "src/main.ts"), "utf8");
 
   assert.match(main, /function botReviewPlanForBoard\(position: Position, snapshot: GameSnapshot\): BotReviewPlanMatch \| null/);
+  assert.match(main, /let bestMatch: BotReviewPlanMatch \| null = null/);
+  assert.match(main, /let bestReplayOffset = Number\.POSITIVE_INFINITY/);
+  assert.match(main, /let replayOffset = 0/);
+  assert.match(main, /for \(const decision of botController\.allDecisions\(\)\)/);
+  assert.doesNotMatch(main, /allDecisions\(\)\.slice\(\)\.reverse\(\)/);
   assert.match(main, /for \(let turnIndex = 0; turnIndex < decision\.principalVariation\.length; turnIndex \+= 1\)/);
   assert.match(main, /for \(let moveIndex = 0; moveIndex < turn\.length; moveIndex \+= 1\)/);
+  assert.match(main, /const decisionBoard = boardAt\(baseSnapshot, move\.from\.timelineId, move\.from\.time\)/);
+  assert.match(main, /move\.from\.timelineId === position\.timelineId/);
+  assert.match(main, /move\.from\.time === position\.time/);
   assert.match(main, /boardSnapshotKey\(decisionBoard\) === boardSnapshotKey\(clickedBoard\)/);
+  assert.match(main, /if \(replayOffset < bestReplayOffset\)/);
+  assert.match(main, /if \(bestReplayOffset === 0\)/);
+  assert.match(main, /replayOffset \+= 1/);
   assert.match(main, /skipTurns: turnIndex/);
   assert.match(main, /skipMovesInFirstTurn: moveIndex/);
   assert.match(main, /const reviewSnapshot = botReviewProjection\?\.finalGame \?\? game/);
@@ -121,4 +132,5 @@ test("post-match bot review opens principal variation suffixes from clicked boar
   assert.match(main, /buildBotReviewPlan\(match\.decision, baseSnapshot, match\.skipTurns, match\.skipMovesInFirstTurn\)/);
   assert.doesNotMatch(main, /selectedTurnClicked/);
   assert.doesNotMatch(main, /applyBotReviewTurn/);
+  assert.doesNotMatch(main, /botReviewProjection && snapshotHasBoard\(game, position\)/);
 });

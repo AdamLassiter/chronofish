@@ -1036,26 +1036,41 @@ function botReviewPlanForBoard(position: Position, snapshot: GameSnapshot): BotR
   if (!clickedBoard) {
     return null;
   }
-  for (const decision of botController.allDecisions().slice().reverse()) {
+  let bestMatch: BotReviewPlanMatch | null = null;
+  let bestReplayOffset = Number.POSITIVE_INFINITY;
+  for (const decision of botController.allDecisions()) {
     let baseSnapshot: GameSnapshot | null = cloneGame(decision.game);
+    let replayOffset = 0;
     for (let turnIndex = 0; turnIndex < decision.principalVariation.length; turnIndex += 1) {
       const turn = decision.principalVariation[turnIndex] ?? [];
       for (let moveIndex = 0; moveIndex < turn.length; moveIndex += 1) {
         if (!baseSnapshot) {
           break;
         }
-        const decisionBoard = boardAt(baseSnapshot, position.timelineId, position.time);
-        if (decisionBoard && boardSnapshotKey(decisionBoard) === boardSnapshotKey(clickedBoard)) {
-          return {
+        const move = turn[moveIndex];
+        if (!move) {
+          continue;
+        }
+        const decisionBoard = boardAt(baseSnapshot, move.from.timelineId, move.from.time);
+        if (
+          move.from.timelineId === position.timelineId
+          && move.from.time === position.time
+          && decisionBoard
+          && boardSnapshotKey(decisionBoard) === boardSnapshotKey(clickedBoard)
+        ) {
+          const match = {
             decision,
             baseSnapshot: cloneGame(baseSnapshot),
             skipTurns: turnIndex,
             skipMovesInFirstTurn: moveIndex
           };
-        }
-        const move = turn[moveIndex];
-        if (!move) {
-          continue;
+          if (replayOffset < bestReplayOffset) {
+            bestMatch = match;
+            bestReplayOffset = replayOffset;
+          }
+          if (bestReplayOffset === 0) {
+            return bestMatch;
+          }
         }
         const afterSnapshot = previewPlannedMove(baseSnapshot, move);
         if (!afterSnapshot) {
@@ -1063,22 +1078,19 @@ function botReviewPlanForBoard(position: Position, snapshot: GameSnapshot): BotR
           break;
         }
         baseSnapshot = afterSnapshot;
+        replayOffset += 1;
       }
       if (!baseSnapshot) {
         break;
       }
     }
   }
-  return null;
+  return bestMatch;
 }
 
 function showBotPlanForPosition(position: Position): boolean {
   if (phase !== "review") {
     return false;
-  }
-  if (botReviewProjection && snapshotHasBoard(game, position)) {
-    clearPlannedMoves();
-    return true;
   }
   const reviewSnapshot = botReviewProjection?.finalGame ?? game;
   const match = botReviewPlanForBoard(position, reviewSnapshot);

@@ -420,15 +420,7 @@ button {
   width: 100%;
 }
 
-.training-tabs {
-  display: inline-flex;
-  gap: 6px;
-  padding: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-}
-
+.training-tabs,
 .training-presets {
   display: inline-flex;
   gap: 6px;
@@ -438,14 +430,7 @@ button {
   background: rgba(77, 184, 255, 0.08);
 }
 
-.training-tab {
-  min-height: 32px;
-  padding: 0 12px;
-  border-color: transparent;
-  background: transparent;
-  color: #cbd7d0;
-}
-
+.training-tabs button,
 .training-presets button {
   min-height: 32px;
   padding: 0 12px;
@@ -454,11 +439,7 @@ button {
   color: #cbd7d0;
 }
 
-.training-tab[aria-pressed="true"] {
-  background: #72e58f;
-  color: #07180d;
-}
-
+.training-tabs button[aria-pressed="true"],
 .training-presets button[aria-pressed="true"] {
   background: #7db7ff;
   color: #071421;
