@@ -757,8 +757,8 @@ test("GPU replay deduplicates positions and keeps validation groups separate", a
   assert.match(replay, /deduplicated\.delete\(key\)/);
   assert.match(replay, /function replaySampleKey/);
   assert.match(replay, /function featureFingerprint/);
-  assert.match(replay, /\$\{sample\.positionKey\}\|\$\{labelKind\}`/);
-  assert.match(replay, /features:\$\{features\.length\}:\$\{hash\.toString\(16\)\}`/);
+  assert.match(replay, /\$\{sample\.positionKey\}\|\$\{labelKind\}/);
+  assert.match(replay, /features:\$\{features\.length\}:\$\{hash\.toString\(16\)\}/);
   assert.doesNotMatch(replay, /\$\{sample\.positionKey\}\|\$\{sample\.labelKind \?\? "unknown"\}\|\$\{sample\.policy/);
   assert.match(trainer, /sample\.positionKey/);
   assert.doesNotMatch(trainer, /boardCount \?\? 0\}\|\$\{index\}/);
