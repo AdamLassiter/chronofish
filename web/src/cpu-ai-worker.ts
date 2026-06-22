@@ -4,7 +4,9 @@ import type { ChronofishEngine, GameSnapshot, Move } from "./types.js";
 
 interface CpuAiRequest {
   id: number | string;
+  type?: "search" | "applyTurn";
   game?: GameSnapshot;
+  moves?: Move[];
   depth?: number;
   minDepth?: number;
   nodes?: number;
@@ -19,6 +21,8 @@ interface CpuAiResult {
   score?: number;
   depth?: number;
   nodes?: number;
+  terminal?: boolean;
+  resultReason?: "royal-capture" | "threefold-repetition" | "stalemate" | null;
   principalVariation?: Move[][];
   cpuSearch?: string;
 }
@@ -27,12 +31,44 @@ let enginePromise: Promise<ChronofishEngine> | null = null;
 let parametersPromise: Promise<void> | null = null;
 
 self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
-  const { id, game, depth = 1, minDepth, nodes = 64, timeMs = 10_000, partitionIndex = 0, parametersJson } = event.data;
+  const { id, type = "search", game, moves, depth = 1, minDepth, nodes = 64, timeMs = 10_000, partitionIndex = 0, parametersJson } = event.data;
   try {
     if (!game) {
       throw new Error("CPU AI search requires a game snapshot.");
     }
     const engine = await cpuEngine();
+    if (type === "applyTurn") {
+      loadSnapshot(engine, game);
+      for (const move of moves ?? []) {
+        if (!engine.chronofish_apply_move(
+          move.from.timelineId,
+          move.from.time,
+          move.from.x,
+          move.from.y,
+          move.to.timelineId,
+          move.to.time,
+          move.to.x,
+          move.to.y
+        )) {
+          throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+        }
+      }
+      const complete = Boolean(engine.chronofish_submit_turn());
+      const snapshot = snapshotJson(engine);
+      self.postMessage({
+        id,
+        ok: true,
+        game: snapshot,
+        status: {
+          complete,
+          terminal: Boolean(snapshot.result?.terminal),
+          winner: snapshot.result?.winner ?? undefined,
+          nextTurn: snapshot.turn
+        },
+        partitionIndex
+      });
+      return;
+    }
     if (parametersJson) {
       loadCpuParametersJson(engine, parametersJson);
     } else {
@@ -59,6 +95,10 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
     self.postMessage({ id, ok: false, error: errorMessage(error), partitionIndex });
   }
 });
+
+function snapshotJson(engine: ChronofishEngine): GameSnapshot {
+  return JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json())) as GameSnapshot;
+}
 
 async function cpuEngine(): Promise<ChronofishEngine> {
   if (!enginePromise) {

@@ -39,6 +39,30 @@ fn trainer_test_config() -> TrainerConfig {
 }
 
 #[test]
+fn cpu_weight_mutations_are_usually_sparse_and_preserve_royals() {
+    let baseline = EvalWeights::default_tuned();
+    let baseline_json = serde_json::to_value(baseline).expect("serialize baseline");
+    let mut sparse = 0;
+    for seed in 1..=64 {
+        let candidate = baseline.mutate(&mut Lcg::new(seed));
+        assert_eq!(candidate.king, baseline.king);
+        assert_eq!(candidate.royal_queen, baseline.royal_queen);
+        let candidate_json = serde_json::to_value(candidate).expect("serialize candidate");
+        let changed = baseline_json
+            .as_object()
+            .expect("baseline object")
+            .iter()
+            .filter(|(key, value)| candidate_json.get(*key) != Some(*value))
+            .count();
+        assert!(changed >= 1);
+        if changed <= 6 {
+            sparse += 1;
+        }
+    }
+    assert!(sparse >= 48);
+}
+
+#[test]
 fn trainer_loads_global_parameters_and_allows_cli_overrides() {
     let config = TrainerConfig::from_env(vec![
         "--effort".to_string(),
@@ -97,6 +121,108 @@ fn training_json_contains_the_global_training_config() {
     assert_eq!(training.rounds_per_variant, 1);
     assert_eq!(training.min_pairs, 2);
     assert_eq!(training.max_pairs, 8);
+}
+
+#[test]
+fn baseline_fitness_cache_key_tracks_scoring_inputs() {
+    let config = trainer_test_config();
+    let same = config.with_search(config.nodes, config.training_time_ms);
+    let deeper = config.with_search(config.nodes + 1, config.training_time_ms);
+    let slower = config.with_search(config.nodes, config.training_time_ms + 1);
+    let mut more_opponents = trainer_test_config();
+    more_opponents.opponent_variants += 1;
+    let mut shorter_matches = trainer_test_config();
+    shorter_matches.max_match_plies -= 1;
+    let mut timed_matches = trainer_test_config();
+    timed_matches.max_match_time_ms = 123;
+    let mut beam_search = trainer_test_config();
+    beam_search.search_strategy = TrainingSearchStrategy::Beam;
+    let mut different_hall = trainer_test_config();
+    different_hall.hall_of_fame.push_str(".other");
+
+    assert_eq!(baseline_fitness_key(&config), baseline_fitness_key(&same));
+    assert_ne!(baseline_fitness_key(&config), baseline_fitness_key(&deeper));
+    assert_ne!(baseline_fitness_key(&config), baseline_fitness_key(&slower));
+    assert_ne!(
+        baseline_fitness_key(&config),
+        baseline_fitness_key(&more_opponents)
+    );
+    assert_ne!(
+        baseline_fitness_key(&config),
+        baseline_fitness_key(&shorter_matches)
+    );
+    assert_ne!(
+        baseline_fitness_key(&config),
+        baseline_fitness_key(&timed_matches)
+    );
+    assert_ne!(
+        baseline_fitness_key(&config),
+        baseline_fitness_key(&beam_search)
+    );
+    assert_ne!(
+        baseline_fitness_key(&config),
+        baseline_fitness_key(&different_hall)
+    );
+}
+
+#[test]
+fn finalist_scoring_jobs_parallelize_uncached_baseline_without_duplicate_candidates() {
+    let committed = EvalWeights::default_tuned();
+    let mut rng = Lcg::new(42);
+    let candidate = committed.mutate(&mut rng);
+    let finalists = [committed, candidate, candidate];
+
+    let uncached = finalist_scoring_jobs(&finalists, committed, false);
+    assert_eq!(uncached.len(), 2);
+    assert!(uncached[0] == candidate);
+    assert!(uncached[1] == committed);
+
+    let cached = finalist_scoring_jobs(&finalists, committed, true);
+    assert_eq!(cached.len(), 1);
+    assert!(cached[0] == candidate);
+}
+
+#[test]
+fn candidate_population_deduplication_preserves_first_seen_order() {
+    let committed = EvalWeights::default_tuned();
+    let mut rng = Lcg::new(99);
+    let first = committed.mutate(&mut rng);
+    let second = committed.mutate(&mut rng);
+
+    let unique = unique_weights(&[committed, first, committed, second, first]);
+
+    assert_eq!(unique.len(), 3);
+    assert!(unique[0] == committed);
+    assert!(unique[1] == first);
+    assert!(unique[2] == second);
+}
+
+#[test]
+fn candidate_fitness_cache_separates_search_configs_and_opponent_limits() {
+    let config = trainer_test_config();
+    let key = baseline_fitness_key(&config);
+    let mut deeper = config.clone();
+    deeper.nodes += 1;
+    let deeper_key = baseline_fitness_key(&deeper);
+    let weights = EvalWeights::default_tuned();
+    let report = FitnessReport {
+        score: 123,
+        ..FitnessReport::default()
+    };
+    let mut cache = Vec::new();
+
+    cache_fitness_report(&mut cache, key.clone(), 2, weights, report);
+    cache_fitness_report(&mut cache, key.clone(), 2, weights, report);
+
+    assert_eq!(cache.len(), 1);
+    assert_eq!(
+        cached_fitness_report(&cache, &key, 2, weights)
+            .expect("matching fitness should be cached")
+            .score,
+        123
+    );
+    assert!(cached_fitness_report(&cache, &key, 3, weights).is_none());
+    assert!(cached_fitness_report(&cache, &deeper_key, 2, weights).is_none());
 }
 
 #[test]

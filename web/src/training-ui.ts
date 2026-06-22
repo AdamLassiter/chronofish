@@ -5,6 +5,7 @@ import type { ChronofishEngine, GameSnapshot } from "./types.js";
 type TrainingTone = "neutral" | "ready" | "warn" | "error" | "active";
 type LabelKind = "search" | "outcome" | "distilled" | string;
 type LabelPhase = "positions" | "labels" | string;
+type TrainingPresetName = "low" | "med" | "high";
 
 interface TrainingControllerOptions {
   getEngine(): ChronofishEngine | null;
@@ -87,6 +88,186 @@ interface TrainingConfig {
   cpuWorkers: number;
   cpuTrainSeconds: number;
 }
+
+interface TrainingPreset {
+  gpuModes: string[];
+  cpuModes: string[];
+  gpu: {
+    samples: number;
+    selfPlayWorkers: number;
+    searchWorkers: number;
+    temperature: number;
+    depth: number;
+    nodes: number;
+    rate: number;
+    epochs: number;
+    buffer: number;
+    batch: number;
+    validation: number;
+    lossLogReplay: number;
+    validationInterval: number;
+    patience: number;
+    decay: number;
+  };
+  cpu: {
+    depth: number;
+    nodes: number;
+    timeMs: number;
+    candidates: number;
+    finalists: number;
+    pairBatch: number;
+    opponentVariants: number;
+    screeningOpponentVariants: number;
+    roundsPerVariant: number;
+    hallOfFameEntries: number;
+    leagueContenders: number;
+    leagueHallOfFameEntries: number;
+    minPairs: number;
+    maxPairs: number;
+    drawWindow: number;
+    drawRateLimit: number;
+    maxMatchPlies: number;
+    maxMatchTimeMs: number;
+    maxGenerationsWithoutCandidate: number;
+    workers: number;
+    seconds: number;
+  };
+}
+
+const TRAINING_PRESETS: Record<TrainingPresetName, TrainingPreset> = {
+  low: {
+    gpuModes: ["vsGpu"],
+    cpuModes: ["vsCpu"],
+    gpu: {
+      samples: 512,
+      selfPlayWorkers: 2,
+      searchWorkers: 2,
+      temperature: 0.1,
+      depth: 2,
+      nodes: 1024,
+      rate: 0.005,
+      epochs: 1024,
+      buffer: 1024,
+      batch: 512,
+      validation: 0.1,
+      lossLogReplay: 0,
+      validationInterval: 512,
+      patience: 4,
+      decay: 0.00001
+    },
+    cpu: {
+      depth: 2,
+      nodes: 2048,
+      timeMs: 2000,
+      candidates: 2,
+      finalists: 1,
+      pairBatch: 1,
+      opponentVariants: 2,
+      screeningOpponentVariants: 1,
+      roundsPerVariant: 1,
+      hallOfFameEntries: 0,
+      leagueContenders: 1,
+      leagueHallOfFameEntries: 0,
+      minPairs: 1,
+      maxPairs: 2,
+      drawWindow: 2,
+      drawRateLimit: 0.8,
+      maxMatchPlies: 16,
+      maxMatchTimeMs: 0,
+      maxGenerationsWithoutCandidate: 1,
+      workers: 2,
+      seconds: 300
+    }
+  },
+  med: {
+    gpuModes: ["vsGpu", "self"],
+    cpuModes: ["vsCpu"],
+    gpu: {
+      samples: 2048,
+      selfPlayWorkers: 4,
+      searchWorkers: 4,
+      temperature: 0.25,
+      depth: 4,
+      nodes: 4096,
+      rate: 0.01,
+      epochs: 4096,
+      buffer: 4096,
+      batch: 2048,
+      validation: 0.1,
+      lossLogReplay: 4,
+      validationInterval: 2048,
+      patience: 12,
+      decay: 0.00001
+    },
+    cpu: {
+      depth: 4,
+      nodes: 8192,
+      timeMs: 10000,
+      candidates: 8,
+      finalists: 1,
+      pairBatch: 4,
+      opponentVariants: 8,
+      screeningOpponentVariants: 2,
+      roundsPerVariant: 1,
+      hallOfFameEntries: 1,
+      leagueContenders: 2,
+      leagueHallOfFameEntries: 2,
+      minPairs: 2,
+      maxPairs: 8,
+      drawWindow: 4,
+      drawRateLimit: 0.8,
+      maxMatchPlies: 40,
+      maxMatchTimeMs: 0,
+      maxGenerationsWithoutCandidate: 2,
+      workers: 8,
+      seconds: 3600
+    }
+  },
+  high: {
+    gpuModes: ["vsGpu", "vsCpu", "self", "distill"],
+    cpuModes: ["vsGpu", "vsCpu", "self"],
+    gpu: {
+      samples: 8192,
+      selfPlayWorkers: 16,
+      searchWorkers: 16,
+      temperature: 0.35,
+      depth: 6,
+      nodes: 16384,
+      rate: 0.005,
+      epochs: 16384,
+      buffer: 16384,
+      batch: 8192,
+      validation: 0.1,
+      lossLogReplay: 8,
+      validationInterval: 8192,
+      patience: 24,
+      decay: 0.00002
+    },
+    cpu: {
+      depth: 6,
+      nodes: 32768,
+      timeMs: 30000,
+      candidates: 32,
+      finalists: 4,
+      pairBatch: 8,
+      opponentVariants: 32,
+      screeningOpponentVariants: 8,
+      roundsPerVariant: 2,
+      hallOfFameEntries: 4,
+      leagueContenders: 8,
+      leagueHallOfFameEntries: 8,
+      minPairs: 8,
+      maxPairs: 64,
+      drawWindow: 8,
+      drawRateLimit: 0.75,
+      maxMatchPlies: 120,
+      maxMatchTimeMs: 0,
+      maxGenerationsWithoutCandidate: 8,
+      workers: 16,
+      seconds: 14400
+    }
+  }
+};
 
 interface CpuTrainingParameters {
   timeMs?: number;
@@ -178,10 +359,11 @@ interface TrainingWorkerMessage {
   ok?: boolean;
   type?: string;
   error?: string;
-  model?: ArrayBuffer;
+  model?: ArrayBuffer | Uint8Array;
   cpuParameters?: string;
   cpuScore?: number;
   loss?: number;
+  initialValidationLoss?: number;
   epoch?: number;
   collected?: number;
   sampleCount?: number;
@@ -196,8 +378,16 @@ interface TrainingWorkerMessage {
   batchesPerSubmit?: number;
   validationInterval?: number;
   replaySize?: number;
+  trainingSampleCount?: number;
+  policyTrainingSampleCount?: number;
   validationLoss?: number;
   bestValidationLoss?: number;
+  initialPolicyValidationLoss?: number;
+  policyValidationLoss?: number;
+  bestPolicyValidationLoss?: number;
+  valueCheckpointImproved?: boolean;
+  policyCheckpointImproved?: boolean;
+  modelChanged?: boolean;
   epochsWithoutImprovement?: number;
   earlyStopReason?: string;
   nonZeroWeights?: number;
@@ -212,6 +402,7 @@ interface TrainingWorkerRequest {
   type: "train" | "validateLossLogs";
   game?: GameSnapshot;
   config: TrainingConfig;
+  candidateModel?: ArrayBuffer;
 }
 
 export function createTrainingController({ getEngine, getGame, resetAiWorker }: TrainingControllerOptions): TrainingController {
@@ -270,12 +461,17 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   let trainingGpuProfile: TrainingGpuProfile | null = null;
   let trainingGpuProfileApplied = false;
   let cpuTrainingParametersApplied = false;
+  let defaultTrainingPresetApplied = false;
   let selectedTrainingTab = "gpu";
   const trainingProgressState = new Map<LabelKind, TrainingProgressEntry>();
 
   elements.trainingTabButtons.forEach((button) => {
     button.addEventListener("click", () => selectTrainingTab(button.dataset.trainingTab ?? "gpu"));
   });
+  elements.trainingPresetButtons.forEach((button) => {
+    button.addEventListener("click", () => applyTrainingPreset(button.dataset.trainingPreset));
+  });
+  applyDefaultTrainingPreset();
 
   function ensureTrainingWorker(): Worker {
     if (!trainingWorker) {
@@ -302,6 +498,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       trainingPanel.hidden = false;
       await applyTrainingGpuProfile();
       await applyCpuTrainingParameters();
+      applyDefaultTrainingPreset();
       setTrainingStatus({
         title: payload.modelPresent ? "Model Ready" : "No Model",
         tone: payload.modelPresent ? "ready" : "warn",
@@ -389,6 +586,94 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     return values.length > 0 ? values : fallback;
   }
 
+  function applyDefaultTrainingPreset(): void {
+    if (defaultTrainingPresetApplied) {
+      return;
+    }
+    defaultTrainingPresetApplied = true;
+    applyTrainingPreset("med", { announce: false });
+  }
+
+  function applyTrainingPreset(name: string | undefined, { announce = true }: { announce?: boolean } = {}): void {
+    if (name !== "low" && name !== "med" && name !== "high") {
+      return;
+    }
+    setActiveTrainingPreset(name);
+    const preset = TRAINING_PRESETS[name];
+    const caps = trainingGpuProfile?.config;
+    const cpuWorkerMax = Math.max(1, Math.min(navigator.hardwareConcurrency ?? 4, 32));
+
+    selectTrainingModes(trainingModeSelect, preset.gpuModes);
+    setPresetInput(samplesInput, preset.gpu.samples, 1, caps?.maxSamples ?? 65536);
+    setPresetInput(selfPlayWorkersInput, preset.gpu.selfPlayWorkers, 1, caps?.maxSelfPlayWorkers ?? 64);
+    setPresetInput(searchWorkersInput, preset.gpu.searchWorkers, 1, caps?.maxSearchWorkers ?? 64);
+    setPresetInput(temperatureInput, preset.gpu.temperature, 0, 2);
+    setPresetInput(depthInput, preset.gpu.depth, 1, 16);
+    setPresetInput(nodesInput, preset.gpu.nodes, 1, caps?.maxNodes ?? 65536);
+    setPresetInput(rateInput, preset.gpu.rate, 0.0001, 0.1);
+    setPresetInput(epochsInput, preset.gpu.epochs, 1, caps?.maxEpochs ?? 65536);
+    setPresetInput(bufferInput, preset.gpu.buffer, 16, caps?.maxBuffer ?? 65536);
+    setPresetInput(batchInput, preset.gpu.batch, 16, caps?.maxBatch ?? 65536);
+    setPresetInput(validationInput, preset.gpu.validation, 0, 0.3);
+    setPresetInput(lossLogReplayInput, preset.gpu.lossLogReplay, 0, 32);
+    setPresetInput(validationIntervalInput, preset.gpu.validationInterval, 16, caps?.maxValidationInterval ?? 65536);
+    setPresetInput(patienceInput, preset.gpu.patience, 1, 64);
+    setPresetInput(decayInput, preset.gpu.decay, 0, 0.01);
+
+    selectTrainingModes(cpuModeSelect, preset.cpuModes);
+    setPresetInput(cpuDepthInput, preset.cpu.depth, 1, 16);
+    setPresetInput(cpuNodesInput, preset.cpu.nodes, 1, 131072);
+    setPresetInput(cpuTimeMsInput, preset.cpu.timeMs, 1, 600000);
+    setPresetInput(cpuCandidatesInput, preset.cpu.candidates, 1, 256);
+    setPresetInput(cpuFinalistsInput, preset.cpu.finalists, 1, 64);
+    setPresetInput(cpuPairBatchInput, preset.cpu.pairBatch, 1, 64);
+    setPresetInput(cpuOpponentVariantsInput, preset.cpu.opponentVariants, 1, 128);
+    setPresetInput(cpuScreeningOpponentVariantsInput, preset.cpu.screeningOpponentVariants, 1, 128);
+    setPresetInput(cpuRoundsPerVariantInput, preset.cpu.roundsPerVariant, 1, 64);
+    setPresetInput(cpuHallOfFameEntriesInput, preset.cpu.hallOfFameEntries, 0, 64);
+    setPresetInput(cpuLeagueContendersInput, preset.cpu.leagueContenders, 1, 64);
+    setPresetInput(cpuLeagueHallOfFameEntriesInput, preset.cpu.leagueHallOfFameEntries, 0, 64);
+    setPresetInput(cpuMinPairsInput, preset.cpu.minPairs, 1, 256);
+    setPresetInput(cpuMaxPairsInput, preset.cpu.maxPairs, 1, 512);
+    setPresetInput(cpuDrawWindowInput, preset.cpu.drawWindow, 1, 128);
+    setPresetInput(cpuDrawRateLimitInput, preset.cpu.drawRateLimit, 0, 1);
+    setPresetInput(cpuMaxMatchPliesInput, preset.cpu.maxMatchPlies, 1, 512);
+    setPresetInput(cpuMaxMatchTimeMsInput, preset.cpu.maxMatchTimeMs, 0, 3600000);
+    setPresetInput(cpuMaxGenerationsWithoutCandidateInput, preset.cpu.maxGenerationsWithoutCandidate, 1, 256);
+    setPresetInput(cpuWorkersInput, preset.cpu.workers, 1, cpuWorkerMax);
+    setPresetInput(cpuSecondsInput, preset.cpu.seconds, 1, 86400);
+
+    if (announce) {
+      setTrainingStatus({
+        title: `Applied ${capitalize(name)} Preset`,
+        tone: "ready",
+        metrics: filterMetrics([
+          trainingMetric("GPU Labels", samplesInput.value),
+          trainingMetric("GPU Depth", depthInput.value),
+          trainingMetric("CPU Candidates", cpuCandidatesInput.value),
+          trainingMetric("CPU Depth", cpuDepthInput.value)
+        ])
+      });
+    }
+  }
+
+  function setActiveTrainingPreset(name: TrainingPresetName): void {
+    for (const button of elements.trainingPresetButtons) {
+      button.setAttribute("aria-pressed", button.dataset.trainingPreset === name ? "true" : "false");
+    }
+  }
+
+  function selectTrainingModes(select: HTMLSelectElement, values: string[]): void {
+    const selected = new Set(values);
+    for (const option of Array.from(select.options)) {
+      option.selected = selected.has(option.value);
+    }
+  }
+
+  function setPresetInput(input: HTMLInputElement, value: number, min: number, max: number): void {
+    input.value = String(Math.min(max, Math.max(min, value)));
+  }
+
   function autoTrainingWorkers(): number {
     const cores = navigator.hardwareConcurrency ?? 4;
     return Math.max(1, Math.min(cores - 1, 4));
@@ -431,7 +716,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       const maxBatchByActivation = clampPowerOfTwo(Math.floor(maxStorageBinding / (1024 * Float32Array.BYTES_PER_ELEMENT)), 512, 16384);
       const highMemory = maxStorageBinding >= 512 * 1024 * 1024 || maxBufferSize >= 1024 * 1024 * 1024;
       const mediumMemory = maxStorageBinding >= 256 * 1024 * 1024 || maxBufferSize >= 512 * 1024 * 1024;
-      const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 32 : 8, hardwareThreads - 1));
+      const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 16 : 8, hardwareThreads - 1));
       const config: TrainingGpuProfileConfig = {
         maxSamples: highMemory ? 16384 : 8192,
         samples: highMemory ? 8192 : mediumMemory ? 4096 : 1024,
@@ -634,7 +919,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   }
 
   function trainingProgressOrder(labelKind: LabelKind): number {
-    return { search: 0, cpu: 1, duel: 2, "cpu-train": 3, outcome: 4, distilled: 5 }[labelKind] ?? 6;
+    return { search: 0, cpu: 1, duel: 2, "cpu-positions": 3, "cpu-reference": 4, "cpu-screen": 5, "cpu-train": 6, outcome: 7, distilled: 8 }[labelKind] ?? 9;
   }
 
   function trainingProgressLabel(labelKind: LabelKind): string {
@@ -642,6 +927,9 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       search: "GPU Search",
       cpu: "CPU Heuristic",
       duel: "CPU vs GPU",
+      "cpu-positions": "CPU Positions",
+      "cpu-reference": "CPU References",
+      "cpu-screen": "CPU Screening",
       "cpu-train": "CPU Training",
       outcome: "Self-play",
       distilled: "Distill"
@@ -654,6 +942,9 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     }
     if (entry.labelKind === "search" || entry.labelKind === "cpu") {
       return "labels";
+    }
+    if (entry.labelKind === "cpu-reference") {
+      return "references";
     }
     return "samples";
   }
@@ -791,6 +1082,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       cpuParameters,
       cpuScore,
       loss,
+      initialValidationLoss,
       epoch,
       collected,
       sampleCount,
@@ -805,8 +1097,16 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       batchesPerSubmit,
       validationInterval,
       replaySize,
+      trainingSampleCount,
+      policyTrainingSampleCount,
       validationLoss,
       bestValidationLoss,
+      initialPolicyValidationLoss,
+      policyValidationLoss,
+      bestPolicyValidationLoss,
+      valueCheckpointImproved,
+      policyCheckpointImproved,
+      modelChanged,
       epochsWithoutImprovement,
       earlyStopReason,
       nonZeroWeights,
@@ -870,21 +1170,61 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     }
     if (model) {
       trainingCycle += 1;
+      if (modelChanged === false) {
+        setTrainingStatus({
+          title: "Model Unchanged",
+          tone: "warn",
+          metrics: filterMetrics([
+            trainingMetric("Run", trainingCycle),
+            trainingMetric("Initial Val", formatLoss(initialValidationLoss)),
+            trainingMetric("Best Val", formatLoss(bestValidationLoss)),
+            trainingMetric("Value", valueCheckpointImproved ? "improved" : "unchanged"),
+            trainingMetric("Policy", policyCheckpointImproved ? "improved" : "unchanged")
+          ])
+        });
+        setTimeout(runFrontendTrainingCycle, 0);
+        return;
+      }
       setTrainingStatus({
         title: "Replacing Model",
         tone: "active",
         metrics: filterMetrics([
           trainingMetric("Run", trainingCycle),
           trainingMetric("Loss", formatLoss(loss)),
+          trainingMetric("Initial Val", formatLoss(initialValidationLoss)),
           trainingMetric("Best Val", formatLoss(bestValidationLoss)),
+          trainingMetric("Value", valueCheckpointImproved ? "improved" : "unchanged"),
+          trainingMetric("Policy Initial", formatLoss(initialPolicyValidationLoss)),
+          trainingMetric("Policy Best", formatLoss(bestPolicyValidationLoss)),
+          trainingMetric("Policy", policyCheckpointImproved ? "improved" : "unchanged"),
+          trainingMetric("Train", trainingSampleCount),
+          trainingMetric("Policy N", policyTrainingSampleCount),
           trainingMetric("Replay", replayStatusText(metrics?.lossLogValidation)),
           trainingMetric("Stop", earlyStopReason)
         ])
       });
       logTrainingMetrics(trainingCycle, metrics);
+      const modelBytes = exactArrayBuffer(model);
+      const logValidation = await validateTrainingLossLogs(trainingConfig(), modelBytes);
+      if (metrics && logValidation) {
+        metrics.lossLogValidation = logValidation;
+      }
+      if (logValidation?.failed) {
+        setTrainingStatus({
+          title: "Model Rejected",
+          tone: "warn",
+          metrics: filterMetrics([
+            trainingMetric("Run", trainingCycle),
+            trainingMetric("Loss Logs", `${logValidation.changed}/${logValidation.checked} changed`),
+            trainingMetric("Best Val", formatLoss(bestValidationLoss))
+          ])
+        });
+        setTimeout(runFrontendTrainingCycle, 0);
+        return;
+      }
       let replacement: TrainingReplacementPayload | null = null;
       try {
-        replacement = await replaceActiveModel(model);
+        replacement = await replaceActiveModel(modelBytes);
       } catch (replaceError) {
         trainingRunning = false;
         setTrainingStatus({
@@ -900,10 +1240,6 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
         renderTrainingButtons();
         return;
       }
-      const logValidation = await validateTrainingLossLogs(trainingConfig());
-      if (metrics && logValidation) {
-        metrics.lossLogValidation = logValidation;
-      }
       if (!trainingRunning) {
         renderTrainingButtons();
         return;
@@ -918,6 +1254,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
             trainingMetric("Run", trainingCycle),
             trainingMetric("Hash", compactHash(hash), hash),
             trainingMetric("Path", compactPath(path), path),
+            trainingMetric("Train", trainingSampleCount),
+            trainingMetric("Policy N", policyTrainingSampleCount),
             trainingMetric("Replay", replayStatusText(logValidation))
           ])
         });
@@ -930,6 +1268,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
         metrics: filterMetrics([
           trainingMetric("Run", trainingCycle),
           trainingMetric("Weights", nonZeroWeights ?? 0),
+          trainingMetric("Train", trainingSampleCount),
+          trainingMetric("Policy N", policyTrainingSampleCount),
           trainingMetric("Hash", compactHash(replacement.newHash), replacement.newHash),
           trainingMetric("Replay", replayStatusText(logValidation))
         ])
@@ -977,10 +1317,13 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
         metrics: filterMetrics([
           trainingMetric("Epoch", epoch),
           trainingMetric("Train", formatLoss(loss)),
+          trainingMetric("Initial", formatLoss(initialValidationLoss)),
           trainingMetric("Validation", formatLoss(validationLoss)),
           trainingMetric("Best", formatLoss(bestValidationLoss)),
           trainingMetric("Stale", epochsWithoutImprovement),
           trainingMetric("Replay", replaySize ?? "?"),
+          trainingMetric("Train", trainingSampleCount),
+          trainingMetric("Policy N", policyTrainingSampleCount),
           trainingMetric("Batch", batchSize ?? "?"),
           trainingMetric("Submit", batchesPerSubmit),
           trainingMetric("Val every", validationInterval)
@@ -989,7 +1332,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
     }
   }
 
-  function validateTrainingLossLogs(config: TrainingConfig): Promise<LossLogValidation | null> {
+  function validateTrainingLossLogs(config: TrainingConfig, candidateModel?: ArrayBuffer): Promise<LossLogValidation | null> {
     if (!trainingRunning || (config.lossLogReplay ?? 0) <= 0) {
       return Promise.resolve(null);
     }
@@ -1036,7 +1379,8 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       const request: TrainingWorkerRequest = {
         id,
         type: "validateLossLogs",
-        config
+        config,
+        ...(candidateModel ? { candidateModel } : {})
       };
       worker.postMessage(request);
     });
@@ -1073,6 +1417,13 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
 
   function formatLoss(loss: number | undefined): string {
     return Number.isFinite(loss) ? (loss as number).toFixed(2) : "pending";
+  }
+
+  function exactArrayBuffer(bytes: ArrayBuffer | Uint8Array): ArrayBuffer {
+    if (bytes instanceof ArrayBuffer) {
+      return bytes;
+    }
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   }
 
   function formatTemperature(value: number): string {

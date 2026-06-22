@@ -6,6 +6,27 @@ import test from "node:test";
 const root = path.resolve(import.meta.dirname, "..");
 const packageJson = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
 
+test("package exposes the browser training benchmark", () => {
+  assert.equal(
+    packageJson.scripts["training:benchmark"],
+    "node scripts/gpu-frontier-smoke.mjs --training-benchmark gpu"
+  );
+  assert.equal(
+    packageJson.scripts["training:benchmark:cpu"],
+    "node scripts/gpu-frontier-smoke.mjs --training-benchmark cpu"
+  );
+});
+
+test("CPU worker supports authoritative whole-turn application", async () => {
+  const worker = await readFile(path.join(root, "src/cpu-ai-worker.ts"), "utf8");
+
+  assert.match(worker, /type\?: "search" \| "applyTurn"/);
+  assert.match(worker, /if \(type === "applyTurn"\)/);
+  assert.match(worker, /engine\.chronofish_apply_move/);
+  assert.match(worker, /engine\.chronofish_submit_turn\(\)/);
+  assert.match(worker, /const snapshot = snapshotJson\(engine\)/);
+});
+
 test("build output declares package version on the main page", async () => {
   const html = await readFile(path.join(root, "dist/index.html"), "utf8");
   const appVersion = await readFile(path.join(root, "dist/app-version.js"), "utf8");

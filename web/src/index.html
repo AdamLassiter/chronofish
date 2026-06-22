@@ -186,6 +186,11 @@
               <button class="training-tab" id="training-tab-gpu" type="button" data-training-tab="gpu" aria-pressed="true">GPU Model</button>
               <button class="training-tab" id="training-tab-cpu" type="button" data-training-tab="cpu" aria-pressed="false">CPU Heuristic</button>
             </nav>
+            <div class="training-presets" aria-label="Training setting presets">
+              <button type="button" data-training-preset="low" aria-pressed="false" title="Set all training controls to low-cost values.">Low</button>
+              <button type="button" data-training-preset="med" aria-pressed="true" title="Set all training controls to balanced values.">Med</button>
+              <button type="button" data-training-preset="high" aria-pressed="false" title="Set all training controls to high-cost values.">High</button>
+            </div>
             <button id="close-training" type="button" aria-label="Close training controls">Close</button>
           </div>
         </header>

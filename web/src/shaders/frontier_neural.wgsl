@@ -65,10 +65,11 @@ fn has_royal(state: u32, board: u32) -> bool {
 
 fn category(state: u32, board: u32) -> i32 {
   let base = board_base(state, board);
-  if (states[base + BOARD_LATEST] != 0) { return 0; }
-  if (has_royal(state, board)) { return 1; }
-  if (states[base + BOARD_ORIGIN] != 0) { return 2; }
-  return 3;
+  if (states[base + BOARD_LATEST] != 0 && states[base + BOARD_ACTIVE] != 0) { return 0; }
+  if (states[base + BOARD_LATEST] != 0) { return 1; }
+  if (has_royal(state, board)) { return 2; }
+  if (states[base + BOARD_ORIGIN] != 0) { return 3; }
+  return 4;
 }
 
 fn board_before(state: u32, left: u32, right: u32) -> bool {
@@ -98,10 +99,10 @@ fn select_neural_boards(@builtin(global_invocation_id) id: vec3<u32>) {
   let board_count = min(params.max_boards, u32(max(0, states[state_base(state) + HEADER_BOARD_COUNT])));
   var chosen = -1;
   for (var board = 0u; board < board_count; board = board + 1u) {
-    if (category(state, board) >= 3) { continue; }
+    if (category(state, board) >= 4) { continue; }
     var rank = 0u;
     for (var other = 0u; other < board_count; other = other + 1u) {
-      if (category(state, other) < 3 && board_before(state, other, board)) { rank = rank + 1u; }
+      if (category(state, other) < 4 && board_before(state, other, board)) { rank = rank + 1u; }
     }
     if (rank == slot) { chosen = i32(board); break; }
   }
@@ -211,8 +212,8 @@ fn apply_neural_values(@builtin(global_invocation_id) id: vec3<u32>) {
   let base = (apply_params.state_offset + state) * params.state_stride;
   if (active_states[state] == 0u) { return; }
   let perspective = select(-1.0, 1.0, states[base + HEADER_TURN] == apply_params.root_color);
-  let neural = (predictions[state] * apply_params.value_scale + apply_params.value_bias) * perspective;
-  let neural_score = i32(round(neural * 100.0));
+  let neural = clamp(predictions[state] * apply_params.value_scale + apply_params.value_bias, -1.0, 1.0) * perspective;
+  let neural_score = i32(round(neural * 20000.0));
   let score = states[base + HEADER_SCORE] - states[base + HEADER_LAST_NEURAL] + neural_score;
   states[base + HEADER_SCORE] = score;
   states[base + HEADER_LAST_NEURAL] = neural_score;

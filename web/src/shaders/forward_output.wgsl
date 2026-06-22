@@ -22,5 +22,5 @@ fn forward_output(@builtin(global_invocation_id) id: vec3<u32>) {
   for (var input_index = 0u; input_index < params.input_size; input_index = input_index + 1u) {
     sum = sum + input_values[input_base + input_index] * weights[input_index];
   }
-  predictions[sample] = sum;
+  predictions[sample] = tanh(sum);
 }

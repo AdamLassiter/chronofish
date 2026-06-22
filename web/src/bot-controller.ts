@@ -38,6 +38,9 @@ interface AiSearchResult {
   score?: number | null;
   depth?: number | null;
   nodes?: number | null;
+  terminal?: boolean | null;
+  resultReason?: string | null;
+  gpuTerminal?: boolean | null;
   choices?: AiChoice[];
   principalVariation?: PrincipalVariation;
   gpuSearch?: string | null;
@@ -333,10 +336,10 @@ export function createBotController({
       return;
     }
     const timeMs = Math.max(1, effort.timeMs ?? 10_000);
-    const targetDepth = evenSearchDepthAtMost(effort.depth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH);
+    const targetDepth = searchDepthAtLeastOne(effort.depth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH);
     const minDepth = Math.min(
       targetDepth,
-      evenSearchDepthAtLeast(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH)
+      searchDepthAtLeastOne(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH)
     );
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
@@ -374,10 +377,10 @@ export function createBotController({
     if (!bot.thinking || !pending || pending.id !== id) {
       return;
     }
-    const nextDepth = nextBotSearchDepth(pending.currentDepth);
+    const nextDepth = nextBotSearchDepth(pending.currentDepth, pending.targetDepth);
     const completedDepth = deepestStoredDepth(pending);
     if (
-      nextDepth > pending.targetDepth
+      nextDepth <= pending.currentDepth
       || (Date.now() >= pending.deadlineAt && completedDepth >= pending.minDepth)
     ) {
       finishBotSearch(pending, Date.now() >= pending.deadlineAt ? "timeout" : "complete");
@@ -432,26 +435,31 @@ export function createBotController({
     return Math.max(1, timeMs - margin);
   }
 
-  function nextBotSearchDepth(currentDepth: number): number {
-    return currentDepth <= 0 ? 2 : currentDepth + 2;
+  function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
+    return currentDepth <= 0 ? Math.min(2, targetDepth) : Math.min(targetDepth, currentDepth + 2);
   }
 
-  function evenSearchDepthAtMost(depth: number): number {
-    const value = Math.max(2, Math.floor(depth));
-    return value % 2 === 0 ? value : Math.max(2, value - 1);
+  function searchDepthAtLeastOne(depth: number): number {
+    return Math.max(1, Math.floor(depth));
   }
 
-  function evenSearchDepthAtLeast(depth: number): number {
-    const value = Math.max(2, Math.floor(depth));
-    return value % 2 === 0 ? value : value + 1;
-  }
-
-  function completedEvenSearchDepth(depth: number | null | undefined, requestedDepth: number): number | null {
+  function completedSearchDepth(result: AiSearchResult, requestedDepth: number): number | null {
+    const depth = result.depth ?? requestedDepth;
     if (!Number.isFinite(depth)) {
       return null;
     }
     const completedDepth = Math.min(requestedDepth, Math.floor(depth ?? 0));
-    return completedDepth === requestedDepth && completedDepth >= 2 && completedDepth % 2 === 0 ? completedDepth : null;
+    if (completedDepth !== requestedDepth) {
+      return null;
+    }
+    if (completedDepth >= 2 && completedDepth % 2 === 0) {
+      return completedDepth;
+    }
+    return completedDepth >= 1 && resultEndsInRoyalCapture(result) ? completedDepth : null;
+  }
+
+  function resultEndsInRoyalCapture(result: AiSearchResult): boolean {
+    return result.resultReason === "royal-capture" || result.gpuTerminal === true || result.terminal === true && result.resultReason === "royal-capture";
   }
 
   function botGpuMode(): "full" | "hybrid" {
@@ -540,10 +548,10 @@ export function createBotController({
 
     pending.depthReceived += 1;
     if (ok && result) {
-      const receivedDepth = completedEvenSearchDepth(result.depth ?? pending.currentDepth, pending.currentDepth);
+      const receivedDepth = completedSearchDepth(result, pending.currentDepth);
       if (receivedDepth === null) {
         pending.incompleteDepthAttempt = true;
-        pending.errors.push(`AI worker returned odd or incomplete depth ${result.depth ?? "unknown"} for requested depth ${pending.currentDepth}.`);
+        pending.errors.push(`AI worker returned incomplete or non-terminal odd depth ${result.depth ?? "unknown"} for requested depth ${pending.currentDepth}.`);
       } else {
         const depthResult = { ...result, depth: receivedDepth };
         const entry = { result: depthResult, partitionIndex: partitionIndex ?? null, depth: receivedDepth };
@@ -581,13 +589,13 @@ export function createBotController({
         startMinimumDepthCpuFallback(pending);
         return;
       }
-      if (Date.now() < pending.deadlineAt && nextBotSearchDepth(pending.currentDepth) <= pending.targetDepth) {
+      if (Date.now() < pending.deadlineAt && nextBotSearchDepth(pending.currentDepth, pending.targetDepth) > pending.currentDepth) {
         launchNextBotDepth(pending.id);
         return;
       }
     }
 
-    if (!bestResult && nextBotSearchDepth(pending.currentDepth) > pending.targetDepth) {
+    if (!bestResult && nextBotSearchDepth(pending.currentDepth, pending.targetDepth) <= pending.currentDepth) {
       if (pending.backend === "gpu" && !pending.minimumFallbackStarted) {
         startMinimumDepthCpuFallback(pending);
         return;

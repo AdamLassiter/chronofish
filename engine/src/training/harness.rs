@@ -149,9 +149,7 @@ pub(crate) fn train_weights_until(
     let mut rng = Lcg::new(config.seed);
     let committed = EvalWeights::default_tuned();
     let mut population = vec![committed];
-    while population.len() < config.population {
-        population.push(committed.mutate(&mut rng));
-    }
+    refill_unique_population(&mut population, config.population, &mut rng, || committed);
 
     let mut previous_best: Option<i32> = None;
     let training_started = SearchInstant::now();
@@ -160,27 +158,53 @@ pub(crate) fn train_weights_until(
     let mut mutation_scale = 1.0_f32;
     let hall_of_fame = load_hall_of_fame(&config.hall_of_fame, config.hall_of_fame_entries);
     let mut generations_without_candidate = 0;
+    let mut baseline_cache: Option<BaselineFitnessCache> = None;
+    let mut fitness_cache: Vec<FitnessCacheEntry> = Vec::new();
     for generation in 0..config.generations {
         if training_expired(deadline) {
             break;
         }
-        // Each generation is fully rescored against this config seed so best,
-        // average, and improvement logs are comparable within the run.
+        // Reports are deterministic for a scoring key, so surviving elites can
+        // reuse prior work while new mutations remain directly comparable.
         let started = SearchInstant::now();
         let elapsed = training_started.elapsed().as_secs();
         let node_boost = (elapsed / 600).min(2) as usize + 1;
         let search_nodes = config.nodes * node_boost;
         let scoring_config = config.with_search(search_nodes, config.training_time_ms);
         let screening_config = scoring_config.screening_search();
-        let baseline_report = fitness_until_named(
-            EvalWeights::default_tuned(),
-            &format!("generation {generation} committed baseline"),
-            &scoring_config,
-            deadline,
-        );
         let finished_candidates = AtomicUsize::new(0);
-        let population_len = population.len();
-        let mut screened: Vec<(FitnessReport, EvalWeights)> = population
+        let unique_population = unique_weights(&population);
+        let screening_key = baseline_fitness_key(&screening_config);
+        let screening_opponent_limit = screening_config.screening_opponent_variants;
+        let mut screened: Vec<(FitnessReport, EvalWeights)> = unique_population
+            .iter()
+            .copied()
+            .filter_map(|weights| {
+                cached_fitness_report(
+                    &fitness_cache,
+                    &screening_key,
+                    screening_opponent_limit,
+                    weights,
+                )
+                .map(|report| (report, weights))
+            })
+            .collect();
+        let screening_cache_hits = screened.len();
+        let screening_jobs: Vec<EvalWeights> = unique_population
+            .iter()
+            .copied()
+            .filter(|weights| {
+                cached_fitness_report(
+                    &fitness_cache,
+                    &screening_key,
+                    screening_opponent_limit,
+                    *weights,
+                )
+                .is_none()
+            })
+            .collect();
+        let screening_job_count = screening_jobs.len();
+        let screened_misses: Vec<(FitnessReport, EvalWeights)> = screening_jobs
             .par_iter()
             .copied()
             .enumerate()
@@ -197,13 +221,13 @@ pub(crate) fn train_weights_until(
                     &format!("generation {generation} screening candidate {}", index + 1),
                     &screening_config,
                     deadline,
-                    screening_config.screening_opponent_variants,
+                    screening_opponent_limit,
                 );
                 let done = finished_candidates.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
                     &format!("generation {generation} screening"),
                     done,
-                    population_len,
+                    screening_job_count,
                     format!(
                         "turn_ms={} nodes={} remaining={}",
                         screening_config.training_time_ms,
@@ -214,18 +238,64 @@ pub(crate) fn train_weights_until(
                 Some((report, weights))
             })
             .collect();
+        if !training_expired(deadline) {
+            for (report, weights) in &screened_misses {
+                cache_fitness_report(
+                    &mut fitness_cache,
+                    screening_key.clone(),
+                    screening_opponent_limit,
+                    *weights,
+                    *report,
+                );
+            }
+        }
+        screened.extend(screened_misses);
         if screened.is_empty() {
             break;
         }
         screened.sort_by_key(|entry| std::cmp::Reverse(entry.0.score));
-        let finalist_count = config.finalist_count.min(screened.len()).max(2);
+        let finalist_count = config.finalist_count.max(2).min(screened.len());
         let finalists: Vec<EvalWeights> = screened
             .iter()
             .take(finalist_count)
             .map(|entry| entry.1)
             .collect();
+        let baseline_key = baseline_fitness_key(&scoring_config);
+        let cached_baseline = baseline_cache
+            .as_ref()
+            .filter(|cached| cached.key == baseline_key)
+            .map(|cached| cached.report);
+        let scoring_jobs: Vec<EvalWeights> =
+            finalist_scoring_jobs(&finalists, committed, cached_baseline.is_some())
+                .into_iter()
+                .filter(|weights| {
+                    *weights == committed
+                        || cached_fitness_report(
+                            &fitness_cache,
+                            &baseline_key,
+                            scoring_config.opponent_variants,
+                            *weights,
+                        )
+                        .is_none()
+                })
+                .collect();
+        let finalist_cache_hits = finalists
+            .iter()
+            .filter(|weights| {
+                **weights == committed && cached_baseline.is_some()
+                    || **weights != committed
+                        && cached_fitness_report(
+                            &fitness_cache,
+                            &baseline_key,
+                            scoring_config.opponent_variants,
+                            **weights,
+                        )
+                        .is_some()
+            })
+            .count();
         let finalist_finished = AtomicUsize::new(0);
-        let mut scored: Vec<(FitnessReport, EvalWeights)> = finalists
+        let scoring_job_count = scoring_jobs.len();
+        let scored_jobs: Vec<(FitnessReport, EvalWeights)> = scoring_jobs
             .par_iter()
             .copied()
             .enumerate()
@@ -233,21 +303,18 @@ pub(crate) fn train_weights_until(
                 if training_expired(deadline) {
                     return None;
                 }
-                transient(format!(
-                    "generation {generation} finalist {} start",
-                    index + 1
-                ));
-                let report = fitness_until_named(
-                    weights,
-                    &format!("generation {generation} finalist {}", index + 1),
-                    &scoring_config,
-                    deadline,
-                );
+                let label = if weights == committed {
+                    format!("generation {generation} committed baseline")
+                } else {
+                    format!("generation {generation} finalist {}", index + 1)
+                };
+                transient(format!("{label} start"));
+                let report = fitness_until_named(weights, &label, &scoring_config, deadline);
                 let done = finalist_finished.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
                     &format!("generation {generation} finalists"),
                     done,
-                    finalist_count,
+                    scoring_job_count,
                     format!(
                         "turn_ms={} nodes={} remaining={}",
                         scoring_config.training_time_ms,
@@ -256,6 +323,52 @@ pub(crate) fn train_weights_until(
                     ),
                 );
                 Some((report, weights))
+            })
+            .collect();
+        if !training_expired(deadline) {
+            for (report, weights) in &scored_jobs {
+                cache_fitness_report(
+                    &mut fitness_cache,
+                    baseline_key.clone(),
+                    scoring_config.opponent_variants,
+                    *weights,
+                    *report,
+                );
+            }
+        }
+        let Some(baseline_report) = cached_baseline.or_else(|| {
+            scored_jobs
+                .iter()
+                .find(|entry| entry.1 == committed)
+                .map(|entry| entry.0)
+        }) else {
+            break;
+        };
+        if cached_baseline.is_none() && !training_expired(deadline) {
+            baseline_cache = Some(BaselineFitnessCache {
+                key: baseline_key.clone(),
+                report: baseline_report,
+            });
+        }
+        let mut scored: Vec<(FitnessReport, EvalWeights)> = finalists
+            .iter()
+            .filter_map(|weights| {
+                if *weights == committed {
+                    return Some((baseline_report, *weights));
+                }
+                cached_fitness_report(
+                    &fitness_cache,
+                    &baseline_key,
+                    scoring_config.opponent_variants,
+                    *weights,
+                )
+                .or_else(|| {
+                    scored_jobs
+                        .iter()
+                        .find(|entry| entry.1 == *weights)
+                        .map(|entry| entry.0)
+                })
+                .map(|report| (report, *weights))
             })
             .collect();
         let mut generation_match_stats = MatchStats::default();
@@ -282,7 +395,7 @@ pub(crate) fn train_weights_until(
         previous_best = Some(best);
         let remaining = remaining_seconds(deadline);
         training_note(format!(
-            "generation {generation}: screen_turn_ms={} screen_nodes={} turn_ms={} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} finalists={} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}",
+            "generation {generation}: screen_turn_ms={} screen_nodes={} turn_ms={} nodes={search_nodes} best={best} avg={average:.1} worst={worst} improvement={improvement:+} screened={} screen_cached={screening_cache_hits} finalists={} finalist_cached={finalist_cache_hits} matches=({}) better/equal/worse={}/{}/{} baseline={} mutation_scale={mutation_scale:.2} gen_elapsed={:.2}s remaining={}",
             screening_config.training_time_ms,
             screening_config.nodes,
             scoring_config.training_time_ms,
@@ -322,13 +435,22 @@ pub(crate) fn train_weights_until(
 
         let elite = 4.min(scored.len());
         let mut next: Vec<EvalWeights> = scored.iter().take(elite).map(|entry| entry.1).collect();
-        while next.len() < config.population {
+        let target_population = config.population;
+        let mut attempts = 0usize;
+        let max_attempts = target_population.saturating_mul(64).max(64);
+        while next.len() < target_population && attempts < max_attempts {
+            attempts += 1;
             let left = tournament(&scored, &mut rng);
             let right = tournament(&scored, &mut rng);
-            next.push(
-                EvalWeights::crossover(left, right, &mut rng)
-                    .mutate_with_scale(&mut rng, mutation_scale),
-            );
+            let candidate = EvalWeights::crossover(left, right, &mut rng)
+                .mutate_with_scale(&mut rng, mutation_scale);
+            push_unique_weight(&mut next, candidate);
+        }
+        if next.len() < target_population {
+            pretty_log::warn(format!(
+                "generation {generation}: produced {} distinct candidates after {attempts} attempts (target {target_population})",
+                next.len()
+            ));
         }
         population = next;
         if generations_without_candidate >= config.max_generations_without_candidate {
@@ -344,6 +466,127 @@ pub(crate) fn train_weights_until(
         committed.mutate_with_scale(&mut rng, mutation_scale.min(0.5))
     } else {
         best_seen
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct BaselineFitnessCache {
+    key: BaselineFitnessKey,
+    report: FitnessReport,
+}
+
+#[derive(Clone)]
+pub(crate) struct FitnessCacheEntry {
+    key: BaselineFitnessKey,
+    opponent_limit: usize,
+    weights: EvalWeights,
+    report: FitnessReport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BaselineFitnessKey {
+    seed: u64,
+    nodes: usize,
+    training_time_ms: u64,
+    opponent_variants: usize,
+    rounds_per_variant: usize,
+    hall_of_fame_entries: usize,
+    hall_of_fame: String,
+    max_match_plies: i32,
+    max_match_time_ms: u64,
+    search_strategy: TrainingSearchStrategy,
+}
+
+pub(crate) fn baseline_fitness_key(config: &TrainerConfig) -> BaselineFitnessKey {
+    BaselineFitnessKey {
+        seed: config.seed,
+        nodes: config.nodes,
+        training_time_ms: config.training_time_ms,
+        opponent_variants: config.opponent_variants,
+        rounds_per_variant: config.rounds_per_variant,
+        hall_of_fame_entries: config.hall_of_fame_entries,
+        hall_of_fame: config.hall_of_fame.clone(),
+        max_match_plies: config.max_match_plies,
+        max_match_time_ms: config.max_match_time_ms,
+        search_strategy: config.search_strategy,
+    }
+}
+
+pub(crate) fn finalist_scoring_jobs(
+    finalists: &[EvalWeights],
+    committed: EvalWeights,
+    baseline_cached: bool,
+) -> Vec<EvalWeights> {
+    let mut jobs = Vec::new();
+    for weights in finalists.iter().copied() {
+        if weights != committed && !jobs.contains(&weights) {
+            jobs.push(weights);
+        }
+    }
+    if !baseline_cached {
+        jobs.push(committed);
+    }
+    jobs
+}
+
+pub(crate) fn cached_fitness_report(
+    cache: &[FitnessCacheEntry],
+    key: &BaselineFitnessKey,
+    opponent_limit: usize,
+    weights: EvalWeights,
+) -> Option<FitnessReport> {
+    cache
+        .iter()
+        .find(|entry| {
+            entry.key == *key && entry.opponent_limit == opponent_limit && entry.weights == weights
+        })
+        .map(|entry| entry.report)
+}
+
+pub(crate) fn cache_fitness_report(
+    cache: &mut Vec<FitnessCacheEntry>,
+    key: BaselineFitnessKey,
+    opponent_limit: usize,
+    weights: EvalWeights,
+    report: FitnessReport,
+) {
+    if cached_fitness_report(cache, &key, opponent_limit, weights).is_none() {
+        cache.push(FitnessCacheEntry {
+            key,
+            opponent_limit,
+            weights,
+            report,
+        });
+    }
+}
+
+pub(crate) fn unique_weights(weights: &[EvalWeights]) -> Vec<EvalWeights> {
+    let mut unique = Vec::with_capacity(weights.len());
+    for weights in weights.iter().copied() {
+        push_unique_weight(&mut unique, weights);
+    }
+    unique
+}
+
+fn push_unique_weight(weights: &mut Vec<EvalWeights>, candidate: EvalWeights) -> bool {
+    if weights.contains(&candidate) {
+        return false;
+    }
+    weights.push(candidate);
+    true
+}
+
+fn refill_unique_population(
+    population: &mut Vec<EvalWeights>,
+    target: usize,
+    rng: &mut Lcg,
+    parent: impl Fn() -> EvalWeights,
+) {
+    let mut attempts = 0usize;
+    let max_attempts = target.saturating_mul(64).max(64);
+    while population.len() < target && attempts < max_attempts {
+        attempts += 1;
+        push_unique_weight(population, parent().mutate(rng));
     }
 }
 
@@ -533,20 +776,10 @@ pub(crate) fn play_match_until(
                     "turn-timeout"
                 },
             );
-            let result = if game.turn == color {
-                MatchResult::Loss
-            } else {
-                MatchResult::Win
-            };
             return MatchReport {
-                score: score
-                    + if result == MatchResult::Win {
-                        20_000 - plies_played * 10
-                    } else {
-                        -20_000 + plies_played * 10
-                    },
-                result,
-                blunder: result == MatchResult::Loss,
+                score,
+                result: MatchResult::Draw,
+                blunder: false,
             };
         };
         let elapsed_ms = SearchInstant::now()
@@ -1250,6 +1483,20 @@ pub(crate) fn tournament(scored: &[(FitnessReport, EvalWeights)], rng: &mut Lcg)
 pub(crate) fn mutate_weight(value: i32, rng: &mut Lcg, spread: i32, min: i32, max: i32) -> i32 {
     let delta = rng.next_usize((spread * 2 + 1) as usize) as i32 - spread;
     (value + delta).clamp(min, max)
+}
+
+pub(crate) fn mutate_weight_if(
+    value: i32,
+    rng: &mut Lcg,
+    mutation_divisor: usize,
+    spread: i32,
+    min: i32,
+    max: i32,
+) -> i32 {
+    if rng.next_usize(mutation_divisor) != 0 {
+        return value;
+    }
+    mutate_weight(value, rng, spread, min, max)
 }
 
 pub(crate) fn training_deadline(config: &TrainerConfig) -> Option<SearchInstant> {

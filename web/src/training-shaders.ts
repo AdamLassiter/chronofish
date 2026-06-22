@@ -9,6 +9,9 @@ import apply_layer from "./shaders/apply_layer.wgsl";
 import apply_indexed_layer from "./shaders/apply_indexed_layer.wgsl";
 import apply_output from "./shaders/apply_output.wgsl";
 import policy from "./shaders/policy.wgsl";
+import policy_loss from "./shaders/policy_loss.wgsl";
+import reduce_loss from "./shaders/reduce_loss.wgsl";
+import frontier_policy from "./shaders/frontier_policy.wgsl";
 import frontier_neural from "./shaders/frontier_neural.wgsl";
 
 export const PROJECT_FEATURES_SHADER = project_features;
@@ -32,4 +35,11 @@ export const APPLY_INDEXED_LAYER_SHADER = apply_indexed_layer;
 export const APPLY_OUTPUT_SHADER = apply_output;
 
 export const POLICY_SHADER = policy;
+
+export const POLICY_LOSS_SHADER = policy_loss;
+
+export const REDUCE_LOSS_SHADER = reduce_loss;
+
+export const FRONTIER_POLICY_SHADER = frontier_policy;
+
 export const FRONTIER_NEURAL_SHADER = frontier_neural;

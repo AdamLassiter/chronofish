@@ -57,6 +57,7 @@ export const elements = {
   shareLink: queryElement<HTMLAnchorElement>("#share-link"),
   trainingPanel: queryElement<HTMLElement>("#training-panel"),
   trainingModeSelect: queryElement<HTMLSelectElement>("#training-mode"),
+  trainingPresetButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-training-preset]")),
   trainingTabButtons: Array.from(document.querySelectorAll<HTMLButtonElement>("[data-training-tab]")),
   trainingTabPanels: Array.from(document.querySelectorAll<HTMLElement>("[data-training-panel]")),
   trainingSamplesInput: queryElement<HTMLInputElement>("#training-samples"),

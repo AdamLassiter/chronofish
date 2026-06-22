@@ -103,6 +103,16 @@ to <http://localhost:5174> and persists trained models in the
 `chronofish-models` volume. Both services persist match logs in the
 `chronofish-logs` volume.
 
+With the training service running, benchmark one bounded end-to-end cycle:
+
+```sh
+CHRONOFISH_BROWSER=/path/to/chromium npm --prefix web run training:benchmark -- --url http://127.0.0.1:5174
+CHRONOFISH_BROWSER=/path/to/chromium npm --prefix web run training:benchmark:cpu -- --url http://127.0.0.1:5174
+```
+
+The benchmark prints JSON with adapter information, total time, phase timings,
+sample rates, validation losses, checkpoint decisions, and replay sizes.
+
 Useful checks before committing:
 
 ```sh
@@ -209,6 +219,29 @@ Open <http://localhost:5173> and use the Training control. The browser UI can:
 Browser GPU search and value-model training require WebGPU. The normal `./run`
 server does not expose writable training endpoints.
 
+GPU model optimization is staged by replay diversity. Replays with at most 32
+unique positions train the value and policy heads on CPU over cached hidden
+features. Larger replays use WebGPU, and hidden-layer backpropagation starts at
+256 unique positions. This avoids overfitting and full-network GPU work before
+the replay can support it. Both backends use normalized momentum to smooth noisy
+minibatch gradients without changing the configured long-run learning-rate
+scale. Value targets use `[-1, 1]` for the engine's `[-20000, 20000]` score
+range, and inference restores that scale before frontier minimax.
+CFNN v4 records the bounded `tanh` output activation explicitly; older v1-v3
+models retain their linear-output interpretation.
+Replay and device-sized working-set truncation reserve at least 25% of capacity
+for policy-labelled positions when enough are available, and the UI reports the
+resulting policy sample count.
+Worker-side caps match the detected GPU profile, allowing up to 16,384 fresh
+labels, batch entries, and validation steps plus 16 parallel label workers.
+
+To replace a corrupt or intentionally reset compact model with the deterministic
+finite initializer:
+
+```sh
+npm --prefix web run model:initialize
+```
+
 ### Native CPU Training
 
 Run native heuristic tuning with:
@@ -221,6 +254,10 @@ The CPU trainer is native-only and lives under `engine/src/training/`. It mutate
 the evaluation weights, scores candidates in short self-play matches, verifies a
 candidate against the committed baseline, and only promotes it when paired match
 evidence clears the configured confidence thresholds.
+
+CPU evolution uses mostly sparse mutations so match outcomes can identify useful
+parameter directions, with occasional broad mutations to retain global
+exploration. The browser CPU trainer uses the same search policy.
 
 Candidate scoring and seed comparisons use Rayon parallel iterators, so training
 uses available CPU cores without launching extra trainer processes. Fitness uses

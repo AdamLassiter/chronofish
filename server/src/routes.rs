@@ -550,17 +550,91 @@ fn training_loss_log_dir(state: &AppState) -> PathBuf {
 
 #[cfg(feature = "frontend-training")]
 fn validate_training_model(model: &[u8]) -> Result<(), String> {
-    if model.len() < 40 || &model[0..4] != b"CFNN" {
+    if model.len() < 36 || &model[0..4] != b"CFNN" {
         return Err("Model must use the compact CFNN binary format.".to_string());
     }
     let version = u32::from_le_bytes(model[4..8].try_into().expect("slice length checked"));
-    if version != 1 {
+    if !(1..=4).contains(&version) {
         return Err("Unsupported compact model version.".to_string());
     }
     if model.len() > 64 * 1024 * 1024 {
         return Err("Model is too large.".to_string());
     }
+    let mut cursor = 8;
+    let _projection_size = read_model_u32(model, &mut cursor)?;
+    let _projection_seed = read_model_u32(model, &mut cursor)?;
+    let layer_count = read_model_u32(model, &mut cursor)? as usize;
+    let output_size = read_model_u32(model, &mut cursor)? as usize;
+    let policy_size = if version >= 2 {
+        read_model_u32(model, &mut cursor)? as usize
+    } else {
+        0
+    };
+    let scalar_end = cursor
+        .checked_add(8)
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    let scalar_bytes = model
+        .get(cursor..scalar_end)
+        .ok_or_else(|| "Compact model header is truncated.".to_string())?;
+    for value in scalar_bytes.chunks_exact(4) {
+        if !f32::from_le_bytes(value.try_into().expect("chunk size checked")).is_finite() {
+            return Err("Compact model contains non-finite values.".to_string());
+        }
+    }
+    cursor = scalar_end;
+    let layer_bytes = layer_count
+        .checked_mul(4)
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    let layers_end = cursor
+        .checked_add(layer_bytes)
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    if model.get(cursor..layers_end).is_none() {
+        return Err("Compact model layer metadata is truncated.".to_string());
+    }
+    cursor = layers_end;
+    let hidden_count_bytes = model
+        .get(cursor..cursor + 4)
+        .ok_or_else(|| "Compact model header is truncated.".to_string())?;
+    let hidden_count =
+        u32::from_le_bytes(hidden_count_bytes.try_into().expect("slice length checked")) as usize;
+    cursor += 4;
+    let float_count = hidden_count
+        .checked_add(output_size)
+        .and_then(|count| count.checked_add(policy_size))
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    let data_end = cursor
+        .checked_add(
+            float_count
+                .checked_mul(4)
+                .ok_or_else(|| "Compact model size overflow.".to_string())?,
+        )
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    let data = model
+        .get(cursor..data_end)
+        .ok_or_else(|| "Compact model weight data is truncated.".to_string())?;
+    if data_end != model.len() {
+        return Err("Compact model has trailing data.".to_string());
+    }
+    if data.chunks_exact(4).any(|value| {
+        !f32::from_le_bytes(value.try_into().expect("chunk size checked")).is_finite()
+    }) {
+        return Err("Compact model contains non-finite values.".to_string());
+    }
     Ok(())
+}
+
+#[cfg(feature = "frontend-training")]
+fn read_model_u32(model: &[u8], cursor: &mut usize) -> Result<u32, String> {
+    let end = cursor
+        .checked_add(4)
+        .ok_or_else(|| "Compact model size overflow.".to_string())?;
+    let bytes = model
+        .get(*cursor..end)
+        .ok_or_else(|| "Compact model header is truncated.".to_string())?;
+    *cursor = end;
+    Ok(u32::from_le_bytes(
+        bytes.try_into().expect("slice length checked"),
+    ))
 }
 
 #[cfg(feature = "frontend-training")]
@@ -606,4 +680,52 @@ fn write_atomic(tmp: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         file.sync_all()?;
     }
     std::fs::rename(tmp, path)
+}
+
+#[cfg(all(test, feature = "frontend-training"))]
+mod training_model_tests {
+    use super::validate_training_model;
+
+    #[test]
+    fn compact_model_validation_accepts_v3_and_rejects_non_finite_weights() {
+        let mut model = compact_model(4);
+        assert_eq!(validate_training_model(&model), Ok(()));
+
+        let last = model.len() - 4;
+        model[last..].copy_from_slice(&f32::NAN.to_le_bytes());
+        assert_eq!(
+            validate_training_model(&model),
+            Err("Compact model contains non-finite values.".to_string())
+        );
+    }
+
+    #[test]
+    fn compact_model_validation_rejects_trailing_data() {
+        let mut model = compact_model(1);
+        model.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            validate_training_model(&model),
+            Err("Compact model has trailing data.".to_string())
+        );
+    }
+
+    fn compact_model(version: u32) -> Vec<u8> {
+        let policy_size: u32 = if version >= 2 { 6 } else { 0 };
+        let mut model = Vec::new();
+        model.extend_from_slice(b"CFNN");
+        for value in [version, 4, 9, 1, 3] {
+            model.extend_from_slice(&value.to_le_bytes());
+        }
+        if version >= 2 {
+            model.extend_from_slice(&policy_size.to_le_bytes());
+        }
+        model.extend_from_slice(&1.0_f32.to_le_bytes());
+        model.extend_from_slice(&0.0_f32.to_le_bytes());
+        model.extend_from_slice(&2_u32.to_le_bytes());
+        model.extend_from_slice(&10_u32.to_le_bytes());
+        for _ in 0..(10 + 3 + policy_size as usize) {
+            model.extend_from_slice(&0.0_f32.to_le_bytes());
+        }
+        model
+    }
 }

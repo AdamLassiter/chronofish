@@ -61,6 +61,7 @@ const CANDIDATE_DELTA_COUNT: u32 = 16u;
 const CANDIDATE_TERMINAL: u32 = 18u;
 const CANDIDATE_CARRY: u32 = 19u;
 const CANDIDATE_NODE_ID: u32 = 20u;
+const CANDIDATE_POLICY_PRIOR: u32 = 21u;
 
 fn abs_i32(value: i32) -> i32 { return select(value, -value, value < 0); }
 fn sign_i32(value: i32) -> i32 { return select(select(0, 1, value > 0), -1, value < 0); }
@@ -224,6 +225,7 @@ fn write_carry(state: u32) {
   candidates[base + CANDIDATE_TERMINAL] = states[parent + HEADER_TERMINAL];
   candidates[base + CANDIDATE_CARRY] = 1;
   candidates[base + CANDIDATE_NODE_ID] = 0;
+  candidates[base + CANDIDATE_POLICY_PRIOR] = 0;
 }
 
 fn write_candidate(state: u32, source_board: u32, target_board: u32, from_x: i32, from_y: i32, to_x: i32, to_y: i32, piece: i32, color: i32, captured: i32, heuristic: i32) {
@@ -256,6 +258,7 @@ fn write_candidate(state: u32, source_board: u32, target_board: u32, from_x: i32
   candidates[candidate + CANDIDATE_TERMINAL] = select(0, 1, terminal);
   candidates[candidate + CANDIDATE_CARRY] = 0;
   candidates[candidate + CANDIDATE_NODE_ID] = i32(params.cycle_index * params.candidate_capacity + slot + 1u);
+  candidates[candidate + CANDIDATE_POLICY_PRIOR] = 0;
 
   copy_board(source, delta);
   let source_square = BOARD_SQUARES + u32(from_y * 8 + from_x); let target_square = BOARD_SQUARES + u32(to_y * 8 + to_x);

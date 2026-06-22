@@ -1,7 +1,10 @@
-import { train, predictValues, decodeCompactModel } from "./training-gpu.js";
+import { train, predictValues, decodeCompactModel, normalizedSearchScore } from "./training-gpu.js";
+import { policyBucket } from "./training-policy.js";
+import { breedCpuPopulation, cpuParametersKey, cpuReferenceWorkerCount, uniqueCpuParameters } from "./training-cpu.js";
+import type { CpuParameters } from "./training-cpu.js";
+import { appendReplaySamples, dedupeTrainingSamples } from "./training-replay.js";
 import type { Color, GameSnapshot, Move, BoardSnapshot, Timeline } from "./types.js";
 import type { CompactValueModel, EncodedCompactModel, TrainingConfig as GpuTrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu.js";
-const POLICY_BUCKETS = 257;
 const BUFFER_KEY = "value-policy-buffer";
 const PROJECTION_SIZE = 2048;
 const PROJECTION_SEED = 2166136261;
@@ -13,11 +16,15 @@ const DEFAULT_BATCH_SIZE = 1024;
 const DEFAULT_VALIDATION_SPLIT = 0.1;
 const DEFAULT_PATIENCE = 12;
 const DEFAULT_WEIGHT_DECAY = 0.00001;
+const MAX_GPU_TRAINING_SAMPLES = 16384;
+const MAX_GPU_TRAINING_BATCH = 16384;
+const MAX_GPU_VALIDATION_INTERVAL = 16384;
 const PROJECTION_CHUNK_SIZE = 256;
 const LABEL_REQUEST_MIN_TIMEOUT_MS = 30000;
 const LABEL_REQUEST_MAX_TIMEOUT_MS = 120000;
 const LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS = 3;
 const TRAINING_IO_TIMEOUT_MS = 15000;
+const MAX_PARALLEL_GPU_TRAINING_WORKERS = 16;
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
 const pipelineCache = new Map<string, GPUComputePipeline>();
@@ -36,6 +43,7 @@ interface TrainingWorkerRequest {
   type?: "train" | "validateLossLogs";
   game?: GameSnapshot;
   config?: Partial<NormalizedTrainingConfig>;
+  candidateModel?: ArrayBuffer;
 }
 
 type TrainingWorkerResponse = Record<string, unknown> & {
@@ -102,6 +110,13 @@ interface MetricsSummary {
 interface CpuTrainingResult {
   parametersJson: string;
   score: number;
+}
+
+interface CpuReferenceScore {
+  baselineScore?: number;
+  baselineMoves?: Move[];
+  gpuScore?: number;
+  gpuMoves?: Move[];
 }
 
 interface EncodedPosition {
@@ -183,8 +198,6 @@ interface LabelJob {
   plies: number;
 }
 
-type CpuParameters = Record<string, number>;
-
 interface WorkerRequestPayload extends Record<string, unknown> {
   type?: string;
   game?: GameSnapshot;
@@ -201,7 +214,7 @@ interface ReplayDb extends IDBDatabase {}
 const workerSelf = self as unknown as WorkerScope;
 
 workerSelf.addEventListener("message", async (event) => {
-  const { id, type = "train", game, config } = event.data;
+  const { id, type = "train", game, config, candidateModel } = event.data;
   try {
     const metrics = createTrainingMetrics();
     const normalizedConfig = normalizeTrainingConfig(config);
@@ -210,7 +223,7 @@ workerSelf.addEventListener("message", async (event) => {
       const validation = await timed(metrics, "lossLogValidation", () =>
         validateLossLogs(normalizedConfig, (message) => {
           workerSelf.postMessage({ id, ok: true, ...message });
-        })
+        }, candidateModel)
       );
       metrics.lossLogValidation = validation;
       workerSelf.postMessage({
@@ -240,9 +253,10 @@ workerSelf.addEventListener("message", async (event) => {
       loadReplayBuffer()
     ]));
     let buffer = loadedBuffer;
-    const samples = await timed(metrics, "collect", () => collectTrainingSamples(game, normalizedConfig, activeModel, (message) => {
+    const collectedSamples = await timed(metrics, "collect", () => collectTrainingSamples(game, normalizedConfig, activeModel, (message) => {
       workerSelf.postMessage({ id, ok: true, ...message });
     }, metrics));
+    const samples = dedupeTrainingSamples(collectedSamples);
     metrics.sampleCounts = labelSourceCounts(samples);
     buffer = appendReplaySamples(buffer, samples, normalizedConfig.maxBuffer);
     await timed(metrics, "saveReplay", () => saveReplayBuffer(buffer));
@@ -267,11 +281,20 @@ workerSelf.addEventListener("message", async (event) => {
       ok: true,
       model,
       loss: model.trainingLoss,
+      initialValidationLoss: model.initialValidationLoss,
       validationLoss: model.validationLoss,
       bestValidationLoss: model.bestValidationLoss,
+      initialPolicyValidationLoss: model.initialPolicyValidationLoss,
+      policyValidationLoss: model.policyValidationLoss,
+      bestPolicyValidationLoss: model.bestPolicyValidationLoss,
+      valueCheckpointImproved: model.valueCheckpointImproved,
+      policyCheckpointImproved: model.policyCheckpointImproved,
+      modelChanged: model.modelChanged,
       earlyStopReason: model.earlyStopReason,
       labelCounts: model.labelCounts,
       replaySize: model.replayBufferSize,
+      trainingSampleCount: model.trainingSampleCount,
+      policyTrainingSampleCount: model.policyTrainingSampleCount,
       nonZeroWeights: model.nonZeroWeights,
       metrics: model.metrics
     });
@@ -288,7 +311,7 @@ function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {})
     trainingModes: normalizeTrainingModes(config, trainingSubject),
     runSeed: randomRunSeed(),
     learningRate: clampNumber(config.learningRate, 0.0001, 0.1, 0.01),
-    samples: clampInteger(config.samples, 1, 1024, 64),
+    samples: clampInteger(config.samples, 1, MAX_GPU_TRAINING_SAMPLES, 64),
     selfPlayWorkers: clampInteger(config.selfPlayWorkers, 1, 16, 2),
     searchWorkers: clampInteger(config.searchWorkers, 1, 16, 2),
     explorationTemperature: clampNumber(config.explorationTemperature, 0, 2, 0.25),
@@ -296,9 +319,9 @@ function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {})
     nodes: clampInteger(config.nodes, 1, 131072, 16384),
     epochs: clampInteger(config.epochs, 1, 65536, 8192),
     maxBuffer: clampInteger(config.maxBuffer, 16, 16384, 4096),
-    batchSize: clampInteger(config.batchSize, 16, 8192, DEFAULT_BATCH_SIZE),
+    batchSize: clampInteger(config.batchSize, 16, MAX_GPU_TRAINING_BATCH, DEFAULT_BATCH_SIZE),
     validationSplit: clampNumber(config.validationSplit, 0, 0.3, DEFAULT_VALIDATION_SPLIT),
-    validationInterval: clampInteger(config.validationInterval, 16, 4096, 256),
+    validationInterval: clampInteger(config.validationInterval, 16, MAX_GPU_VALIDATION_INTERVAL, 256),
     patience: clampInteger(config.patience, 1, 64, DEFAULT_PATIENCE),
     weightDecay: clampNumber(config.weightDecay, 0, 0.01, DEFAULT_WEIGHT_DECAY),
     lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4),
@@ -483,64 +506,302 @@ async function trainCpuParameters(
   }
   const baseline = await fetchCpuParameters();
   const target = cpuTrainingPositionTarget(config);
-  const positions = await collectGpuPositions(game, config, target, progress, "cpu");
-  const sampleGames = positions.map((position) => position.game);
+  const sampleGames = await timed(config.metrics, "cpuPositions", () =>
+    collectCpuTrainingGames(game, baseline, config, target, progress)
+  );
   if (!sampleGames.length) {
     throw new Error("CPU training could not sample positions.");
   }
-  const candidateCount = Math.max(1, Math.min(256, config.cpuCandidates + Math.max(0, config.cpuMaxGenerationsWithoutCandidate - 1)));
-  const candidates = [baseline];
-  for (let index = 1; index < candidateCount; index += 1) {
-    candidates.push(mutateCpuParameters(baseline, config.runSeed ^ index));
-  }
-  const workerCount = Math.min(candidates.length, Math.max(1, config.cpuWorkers), Math.max(1, config.cpuPairBatch));
-  let nextCandidate = 0;
-  let collected = 0;
-  let bestParameters = baseline;
-  let bestScore = Number.NEGATIVE_INFINITY;
-  const finalists: Array<{ parameters: CpuParameters; score: number }> = [];
+  const candidateCount = Math.max(1, Math.min(256, config.cpuCandidates));
   const deadlineAt = cpuTrainingDeadlineAt(config);
-  progress({ sampleCount: candidates.length, labelWorkers: workerCount, labelKind: "cpu-train" });
-  await Promise.all(Array.from({ length: workerCount }, () => runCandidateWorker()));
-  finalists.sort((left, right) => right.score - left.score);
-  const winner = finalists.slice(0, config.cpuFinalists).sort((left, right) => right.score - left.score)[0];
-  if (winner) {
-    bestParameters = winner.parameters;
-    bestScore = winner.score;
+  const screeningGames = sampleGames.slice(0, Math.max(1, Math.min(sampleGames.length, config.cpuScreeningOpponentVariants)));
+  const screeningConfig = cpuScreeningTrainingConfig(config);
+  const screeningReferences = await timed(config.metrics, "cpuScreeningReferences", () =>
+    precomputeCpuReferenceScores(baseline, screeningGames, screeningConfig, deadlineAt, progress)
+  );
+  const screeningFitness = new Map<string, number>();
+  const finalistFitness = new Map<string, number>();
+  let population = breedCpuPopulation(baseline, [], candidateCount, config.runSeed, 0, 0);
+  let bestCandidate: { parameters: CpuParameters; score: number } | null = null;
+  let baselineScore = Number.NEGATIVE_INFINITY;
+  let generationsWithoutCandidate = 0;
+  let generation = 0;
+  while (
+    performance.now() < deadlineAt &&
+    generationsWithoutCandidate < config.cpuMaxGenerationsWithoutCandidate
+  ) {
+    const screened = await timed(config.metrics, "cpuScreening", () =>
+      scoreCpuCandidates(
+        population,
+        screeningGames,
+        screeningConfig,
+        deadlineAt,
+        `cpu-screen-${generation + 1}`,
+        screeningReferences,
+        screeningFitness,
+        false
+      )
+    );
+    const finalistTarget = Math.min(
+      population.length,
+      Math.max(config.cpuFinalists, Math.min(config.cpuPairBatch, screened.length || population.length))
+    );
+    const finalistCandidates = uniqueCpuParameters([
+      baseline,
+      ...screened.slice(0, finalistTarget).map((entry) => entry.parameters)
+    ]);
+    const finalists = await timed(config.metrics, "cpuFinalists", () =>
+      scoreCpuCandidates(
+        finalistCandidates,
+        sampleGames,
+        config,
+        deadlineAt,
+        `cpu-train-${generation + 1}`,
+        [],
+        finalistFitness,
+        true
+      )
+    );
+    const baselineResult = finalists.find((entry) => cpuParametersKey(entry.parameters) === cpuParametersKey(baseline));
+    baselineScore = baselineResult?.score ?? baselineScore;
+    const winner = finalists.find((entry) => cpuParametersKey(entry.parameters) !== cpuParametersKey(baseline));
+    const improved = Boolean(
+      winner &&
+      winner.score > baselineScore &&
+      (!bestCandidate || winner.score > bestCandidate.score)
+    );
+    if (improved && winner) {
+      bestCandidate = winner;
+      generationsWithoutCandidate = 0;
+    } else {
+      generationsWithoutCandidate += 1;
+    }
+    progress({
+      labelKind: "cpu-generation",
+      generation: generation + 1,
+      generationsWithoutCandidate,
+      candidateScore: winner?.score ?? null,
+      baselineScore,
+      screeningCacheSize: screeningFitness.size,
+      finalistCacheSize: finalistFitness.size
+    });
+    generation += 1;
+    const elites = finalists
+      .filter((entry) => cpuParametersKey(entry.parameters) !== cpuParametersKey(baseline))
+      .slice(0, Math.max(1, Math.min(4, config.cpuFinalists)))
+      .map((entry) => entry.parameters);
+    population = breedCpuPopulation(
+      baseline,
+      bestCandidate ? [bestCandidate.parameters, ...elites] : elites,
+      candidateCount,
+      config.runSeed,
+      generation,
+      generationsWithoutCandidate
+    );
+  }
+  if (bestCandidate) {
+    return {
+      parametersJson: JSON.stringify(bestCandidate.parameters, null, 2),
+      score: bestCandidate.score
+    };
   }
   return {
-    parametersJson: JSON.stringify(bestParameters, null, 2),
-    score: bestScore
+    parametersJson: JSON.stringify(baseline, null, 2),
+    score: baselineScore
   };
 
-  async function runCandidateWorker(): Promise<void> {
-    const candidateWorker = new Worker("./cpu-ai-worker.js", { type: "module" });
+  async function scoreCpuCandidates(
+    stageCandidates: CpuParameters[],
+    stageGames: GameSnapshot[],
+    stageConfig: NormalizedTrainingConfig,
+    stageDeadlineAt: number,
+    labelKind: string,
+    references: CpuReferenceScore[],
+    fitnessCache: Map<string, number>,
+    pairedMatches: boolean
+  ): Promise<Array<{ parameters: CpuParameters; score: number }>> {
+    const uniqueCandidates = uniqueCpuParameters(stageCandidates);
+    const workerCount = Math.min(uniqueCandidates.length, Math.max(1, stageConfig.cpuWorkers), Math.max(1, stageConfig.cpuPairBatch));
+    let nextCandidate = 0;
+    let collected = 0;
+    const scored: Array<{ parameters: CpuParameters; score: number }> = uniqueCandidates
+      .filter((candidate) => fitnessCache.has(cpuParametersKey(candidate)))
+      .map((parameters) => ({ parameters, score: fitnessCache.get(cpuParametersKey(parameters))! }));
+    const uncachedCandidates = uniqueCandidates.filter((candidate) => !fitnessCache.has(cpuParametersKey(candidate)));
+    const cacheHits = scored.length;
+    progress({ sampleCount: uniqueCandidates.length, labelWorkers: workerCount, labelKind });
+    await Promise.all(Array.from({ length: workerCount }, () => runCandidateWorker()));
+    progress({ collected: scored.length, sampleCount: uniqueCandidates.length, labelWorkers: workerCount, labelKind, cacheHits });
+    return scored.sort((left, right) => right.score - left.score);
+
+    async function runCandidateWorker(): Promise<void> {
+      const candidateWorker = new Worker("./cpu-ai-worker.js", { type: "module" });
+      const baselineWorker = pairedMatches ? new Worker("./cpu-ai-worker.js", { type: "module" }) : null;
+      try {
+        while (nextCandidate < uncachedCandidates.length) {
+          if (performance.now() >= stageDeadlineAt) {
+            break;
+          }
+          const index = nextCandidate;
+          nextCandidate += 1;
+          const candidate = uncachedCandidates[index];
+          if (!candidate) {
+            continue;
+          }
+          const score = pairedMatches && baselineWorker
+            ? await scoreCpuCandidateByPairedMatches(
+              candidate,
+              baseline,
+              stageGames,
+              stageConfig,
+              candidateWorker,
+              baselineWorker,
+              stageDeadlineAt
+            )
+            : await scoreCpuCandidate(candidate, stageGames, references, stageConfig, candidateWorker, stageDeadlineAt);
+          if (score === null) {
+            continue;
+          }
+          fitnessCache.set(cpuParametersKey(candidate), score);
+          scored.push({ parameters: candidate, score });
+          collected += 1;
+          progress({ collected: cacheHits + collected, sampleCount: uniqueCandidates.length, labelWorkers: workerCount, labelKind, cacheHits });
+        }
+      } finally {
+        candidateWorker.terminate();
+        baselineWorker?.terminate();
+      }
+    }
+  }
+}
+
+async function collectCpuTrainingGames(
+  game: GameSnapshot,
+  baseline: CpuParameters,
+  config: NormalizedTrainingConfig,
+  target: number,
+  progress: ProgressCallback
+): Promise<GameSnapshot[]> {
+  const games: Array<GameSnapshot | null> = new Array(target).fill(null);
+  const workerCount = Math.min(target, Math.max(1, config.cpuWorkers));
+  const parametersJson = JSON.stringify(baseline);
+  let nextIndex = 0;
+  let collected = 0;
+  progress({ collected, sampleCount: target, labelWorkers: workerCount, labelKind: "cpu-positions" });
+  await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runWorker(workerIndex)));
+  return games.filter((entry): entry is GameSnapshot => Boolean(entry));
+
+  async function runWorker(workerIndex: number): Promise<void> {
+    const cpu = new Worker("./cpu-ai-worker.js", { type: "module" });
+    try {
+      while (nextIndex < target) {
+        const index = nextIndex;
+        nextIndex += 1;
+        let current = cloneGame(game);
+        for (let ply = 0; ply < samplePlies(index, false); ply += 1) {
+          const response = await requestWorker(cpu, {
+            type: "search",
+            game: current,
+            depth: Math.max(1, Math.min(2, config.cpuDepth)),
+            nodes: Math.max(1, Math.min(512, config.cpuNodes)),
+            timeMs: config.cpuTrainingTimeMs,
+            parametersJson
+          }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
+          const moves = response.result?.moves ?? [];
+          if (!moves.length) {
+            break;
+          }
+          const applied = await applyCpuWorkerTurn(cpu, current, moves, config);
+          if (!applied) {
+            break;
+          }
+          current = applied.game;
+          if (applied.status.terminal) {
+            break;
+          }
+        }
+        games[index] = current;
+        collected += 1;
+        progress({ collected, sampleCount: target, labelWorkers: workerCount, labelKind: "cpu-positions", workerIndex });
+      }
+    } finally {
+      cpu.terminate();
+    }
+  }
+}
+
+function cpuScreeningTrainingConfig(config: NormalizedTrainingConfig): NormalizedTrainingConfig {
+  return {
+    ...config,
+    cpuDepth: Math.max(1, Math.min(config.cpuDepth, 2)),
+    depth: Math.max(1, Math.min(config.depth, 2)),
+    cpuNodes: Math.max(1, Math.min(config.cpuNodes, Math.ceil(config.cpuNodes / 4))),
+    nodes: Math.max(1, Math.min(config.nodes, Math.ceil(config.nodes / 4))),
+    cpuTrainingTimeMs: Math.max(1, Math.min(config.cpuTrainingTimeMs, Math.ceil(config.cpuTrainingTimeMs / 4)))
+  };
+}
+
+async function precomputeCpuReferenceScores(
+  baseline: CpuParameters,
+  games: GameSnapshot[],
+  config: NormalizedTrainingConfig,
+  deadlineAt: number,
+  progress: ProgressCallback
+): Promise<CpuReferenceScore[]> {
+  const references: CpuReferenceScore[] = Array.from({ length: games.length }, () => ({}));
+  const baselineJson = JSON.stringify(baseline);
+  const workerCount = cpuReferenceWorkerCount(games.length, config.cpuWorkers, config.cpuPairBatch);
+  let nextGame = 0;
+  let collected = 0;
+  progress({ collected: 0, sampleCount: games.length, labelWorkers: workerCount, labelKind: "cpu-reference" });
+  await Promise.all(Array.from({ length: workerCount }, () => runReferenceWorker()));
+  return references;
+
+  async function runReferenceWorker(): Promise<void> {
     const baselineWorker = new Worker("./cpu-ai-worker.js", { type: "module" });
     const gpuWorker = new Worker("./ai-worker.js", { type: "module" });
     try {
-      while (nextCandidate < candidates.length) {
-        if (performance.now() >= deadlineAt) {
-          break;
-        }
-        const index = nextCandidate;
-        nextCandidate += 1;
-        const candidate = candidates[index];
-        if (!candidate) {
+      while (nextGame < games.length && performance.now() < deadlineAt) {
+        const index = nextGame;
+        nextGame += 1;
+        const game = games[index];
+        if (!game) {
           continue;
         }
-        const score = await scoreCpuCandidate(candidate, baseline, sampleGames, config, candidateWorker, baselineWorker, gpuWorker, deadlineAt);
-        finalists.push({ parameters: candidate, score });
-        finalists.sort((left, right) => right.score - left.score);
-        finalists.length = Math.min(finalists.length, config.cpuFinalists);
-        if (score > bestScore) {
-          bestScore = score;
-          bestParameters = candidate;
+        const reference: CpuReferenceScore = {};
+        if (cpuBaselineModeEnabled(config)) {
+          const baselineResult = await requestWorker(baselineWorker, {
+            type: "search",
+            game,
+            depth: config.cpuDepth,
+            nodes: config.cpuNodes,
+            timeMs: config.cpuTrainingTimeMs,
+            parametersJson: baselineJson
+          }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
+          reference.baselineScore = baselineResult.result?.score ?? 0;
+          if (baselineResult.result?.moves) {
+            reference.baselineMoves = baselineResult.result.moves;
+          }
         }
+        if (trainingModeEnabled(config, "vsGpu")) {
+          const gpuResult = await requestWorker(gpuWorker, {
+            type: "search",
+            game,
+            depth: config.depth,
+            nodes: config.nodes,
+            timeMs: workerSearchTimeMs(config),
+            gpuMode: "full"
+          }, workerRequestTimeout(config));
+          reference.gpuScore = gpuResult.result?.score ?? 0;
+          if (gpuResult.result?.moves) {
+            reference.gpuMoves = gpuResult.result.moves;
+          }
+        }
+        references[index] = reference;
         collected += 1;
-        progress({ collected, sampleCount: candidates.length, labelWorkers: workerCount, labelKind: "cpu-train" });
+        progress({ collected, sampleCount: games.length, labelWorkers: workerCount, labelKind: "cpu-reference" });
       }
     } finally {
-      candidateWorker.terminate();
       baselineWorker.terminate();
       gpuWorker.terminate();
     }
@@ -549,20 +810,18 @@ async function trainCpuParameters(
 
 async function scoreCpuCandidate(
   candidate: CpuParameters,
-  baseline: CpuParameters,
   games: GameSnapshot[],
+  references: CpuReferenceScore[],
   config: NormalizedTrainingConfig,
   candidateWorker: Worker,
-  baselineWorker: Worker,
-  gpuWorker: Worker,
   deadlineAt: number
 ): Promise<number> {
   let score = 0;
   let compared = 0;
   let nearDraws = 0;
   const candidateJson = JSON.stringify(candidate);
-  const baselineJson = JSON.stringify(baseline);
-  for (let index = 0; index < games.length; index += 1) {
+  const comparisonCount = Math.min(games.length, references.length || games.length);
+  for (let index = 0; index < comparisonCount; index += 1) {
     if (performance.now() >= deadlineAt || compared >= config.cpuMaxMatchPlies) {
       break;
     }
@@ -579,40 +838,147 @@ async function scoreCpuCandidate(
       parametersJson: candidateJson
     }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
     const candidateScore = candidateResult.result?.score ?? 0;
-    if (cpuBaselineModeEnabled(config)) {
-      const baselineResult = await requestWorker(baselineWorker, {
-        type: "search",
-        game,
-        depth: config.cpuDepth,
-        nodes: config.cpuNodes,
-        timeMs: config.cpuTrainingTimeMs,
-        parametersJson: baselineJson
-      }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
-      const baselineScore = baselineResult.result?.score ?? 0;
-      const delta = candidateScore - baselineScore;
+    const reference = references[index] ?? {};
+    if (cpuBaselineModeEnabled(config) && reference.baselineScore !== undefined) {
+      const delta = candidateScore - reference.baselineScore;
       score += delta;
       if (Math.abs(delta) <= config.cpuDrawWindow) {
         nearDraws += 1;
       }
-      score += moveAgreementBonus(candidateResult.result?.moves, baselineResult.result?.moves);
+      score += moveAgreementBonus(candidateResult.result?.moves, reference.baselineMoves);
     }
-    if (trainingModeEnabled(config, "vsGpu")) {
-      const gpuResult = await requestWorker(gpuWorker, {
-        type: "search",
-        game,
-        depth: config.depth,
-        nodes: config.nodes,
-        timeMs: workerSearchTimeMs(config),
-        gpuMode: "full"
-      }, workerRequestTimeout(config));
-      score += candidateScore - (gpuResult.result?.score ?? 0);
-      score += moveAgreementBonus(candidateResult.result?.moves, gpuResult.result?.moves);
+    if (trainingModeEnabled(config, "vsGpu") && reference.gpuScore !== undefined) {
+      score += candidateScore - reference.gpuScore;
+      score += moveAgreementBonus(candidateResult.result?.moves, reference.gpuMoves);
     }
     compared += 1;
   }
   const average = score / Math.max(1, compared);
   const nearDrawRate = nearDraws / Math.max(1, compared);
   return nearDrawRate > config.cpuDrawRateLimit ? average * 0.5 : average;
+}
+
+async function scoreCpuCandidateByPairedMatches(
+  candidate: CpuParameters,
+  baseline: CpuParameters,
+  games: GameSnapshot[],
+  config: NormalizedTrainingConfig,
+  candidateWorker: Worker,
+  baselineWorker: Worker,
+  deadlineAt: number
+): Promise<number | null> {
+  const candidateJson = JSON.stringify(candidate);
+  const baselineJson = JSON.stringify(baseline);
+  let score = 0;
+  let completed = 0;
+  const totalMatches = games.length * 2;
+  for (let gameIndex = 0; gameIndex < games.length; gameIndex += 1) {
+    const game = games[gameIndex]!;
+    for (const candidateColor of [game.turn, oppositeColor(game.turn)]) {
+      if (performance.now() >= deadlineAt) {
+        return null;
+      }
+      const remainingMatches = Math.max(1, totalMatches - completed);
+      const matchDeadlineAt = Math.min(
+        deadlineAt,
+        performance.now() + Math.max(1, (deadlineAt - performance.now()) / remainingMatches)
+      );
+      const result = await playCpuTrainingMatch(
+        game,
+        candidateColor,
+        candidateJson,
+        baselineJson,
+        config,
+        candidateWorker,
+        baselineWorker,
+        matchDeadlineAt
+      );
+      if (result === null) {
+        return null;
+      }
+      score += result;
+      completed += 1;
+    }
+  }
+  return completed > 0 ? score / completed : null;
+}
+
+async function playCpuTrainingMatch(
+  start: GameSnapshot,
+  candidateColor: Color,
+  candidateJson: string,
+  baselineJson: string,
+  config: NormalizedTrainingConfig,
+  candidateWorker: Worker,
+  baselineWorker: Worker,
+  matchDeadlineAt: number
+): Promise<number | null> {
+  let current = cloneGame(start);
+  for (let ply = 0; ply < config.cpuMaxMatchPlies; ply += 1) {
+    if (performance.now() >= matchDeadlineAt) {
+      return null;
+    }
+    const turnTimeMs = cpuMatchTurnTimeMs(config, matchDeadlineAt, config.cpuMaxMatchPlies - ply + 1);
+    const candidateTurn = current.turn === candidateColor;
+    const response = await requestWorker(candidateTurn ? candidateWorker : baselineWorker, {
+      type: "search",
+      game: current,
+      depth: config.cpuDepth,
+      nodes: config.cpuNodes,
+      timeMs: turnTimeMs,
+      parametersJson: candidateTurn ? candidateJson : baselineJson
+    }, workerRequestTimeout({
+      nodes: config.cpuNodes,
+      timeMs: turnTimeMs
+    }));
+    const moves = response.result?.moves ?? [];
+    if (!moves.length) {
+      return candidateTurn ? -100_000 : 100_000;
+    }
+    const applied = await applyCpuWorkerTurn(baselineWorker, current, moves, config);
+    if (!applied) {
+      return null;
+    }
+    current = applied.game;
+    if (applied.winner) {
+      return applied.winner === candidateColor ? 100_000 : -100_000;
+    }
+    if (applied.status.terminal) {
+      return applied.status.winner === candidateColor
+        ? 100_000
+        : applied.status.winner
+          ? -100_000
+          : 0;
+    }
+  }
+
+  if (performance.now() >= matchDeadlineAt) {
+    return null;
+  }
+  const adjudicationTimeMs = cpuMatchTurnTimeMs(config, matchDeadlineAt, 1);
+  const adjudication = await requestWorker(baselineWorker, {
+    type: "search",
+    game: current,
+    depth: config.cpuDepth,
+    nodes: config.cpuNodes,
+    timeMs: adjudicationTimeMs,
+    parametersJson: baselineJson
+  }, workerRequestTimeout({
+    nodes: config.cpuNodes,
+    timeMs: adjudicationTimeMs
+  }));
+  const baselineScore = adjudication.result?.score ?? 0;
+  return current.turn === candidateColor ? baselineScore : -baselineScore;
+}
+
+function cpuMatchTurnTimeMs(config: NormalizedTrainingConfig, deadlineAt: number, remainingSearches: number): number {
+  return Math.max(
+    1,
+    Math.min(
+      config.cpuTrainingTimeMs,
+      Math.floor((deadlineAt - performance.now()) / Math.max(1, remainingSearches))
+    )
+  );
 }
 
 function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
@@ -652,34 +1018,13 @@ function botTrainingMovesKey(moves: Move[]): string {
   ].join(",")).join("|");
 }
 
-function mutateCpuParameters(base: CpuParameters, seed: number): CpuParameters {
-  let state = seed >>> 0 || 1;
-  const nextRandom = (): number => {
-    state = Math.imul(state, 1664525) + 1013904223 >>> 0;
-    return state / 0xffffffff;
-  };
-  const next = { ...base };
-  for (const [key, value] of Object.entries(base)) {
-    if (!Number.isFinite(value) || key === "king" || key === "royal_queen") {
-      continue;
-    }
-    if (nextRandom() > 0.28) {
-      continue;
-    }
-    const spread = Math.max(1, Math.round(Math.abs(value) * 0.08));
-    const delta = Math.round((nextRandom() * 2 - 1) * spread);
-    next[key] = Math.max(-10_000, Math.min(10_000, Math.round(value + delta)));
-  }
-  return next;
-}
-
 async function collectSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
   const target = modeLabelTarget(config, 16);
-  const positions = await timed(config.metrics, "searchPositions", () => collectGpuPositions(game, config, target, progress, "search"));
+  const positions = await timed(config.metrics, "searchPositions", () => collectGpuPositions(game, config, target, progress, "search", config.searchWorkers));
   if (config.metrics) {
     config.metrics.searchPositionCount = positions.length;
   }
-  const workerCount = gpuTrainingWorkerCount(positions.length);
+  const workerCount = gpuTrainingWorkerCount(positions.length, config.searchWorkers);
   const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
   let nextPosition = 0;
   let collected = 0;
@@ -744,7 +1089,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
 
 async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
   const target = modeLabelTarget(config, trainingModeCount(config) > 1 ? 16 : 1);
-  const positions = await timed(config.metrics, "cpuPositions", () => collectGpuPositions(game, config, target, progress, "cpu"));
+  const positions = await timed(config.metrics, "cpuPositions", () => collectGpuPositions(game, config, target, progress, "cpu", config.searchWorkers));
   const workerCount = Math.min(positions.length, Math.max(1, config.cpuWorkers ?? 1));
   const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
   let nextPosition = 0;
@@ -806,7 +1151,7 @@ async function collectCpuGpuDuelSamples(game: GameSnapshot, config: NormalizedTr
   if (target <= 0) {
     return [];
   }
-  const workerCount = gpuTrainingWorkerCount(target);
+  const workerCount = gpuTrainingWorkerCount(target, Math.min(config.searchWorkers, config.selfPlayWorkers));
   const targets = splitWork(target, workerCount);
   let collected = 0;
   progress({ sampleCount: target, labelWorkers: workerCount, labelKind: "duel" });
@@ -902,7 +1247,7 @@ async function collectOutcomeSamples(game: GameSnapshot, config: NormalizedTrain
   if (target <= 0) {
     return [];
   }
-  const workerCount = gpuTrainingWorkerCount(target);
+  const workerCount = gpuTrainingWorkerCount(target, config.selfPlayWorkers);
   const targets = splitWork(target, workerCount);
   let collected = 0;
   const report = (count: number): void => {
@@ -997,10 +1342,11 @@ function splitWork(total: number, workers: number): number[] {
   ).filter((count) => count > 0);
 }
 
-function gpuTrainingWorkerCount(total: number): number {
-  // WebGPU work is serialized through one worker/device queue. Extra GPU
-  // workers duplicate adapters and compete with the same hardware queue.
-  return Math.min(Math.max(0, total), 1);
+function gpuTrainingWorkerCount(total: number, requestedWorkers: number): number {
+  return Math.min(
+    Math.max(0, total),
+    Math.max(1, Math.min(MAX_PARALLEL_GPU_TRAINING_WORKERS, Math.floor(requestedWorkers) || 1))
+  );
 }
 
 async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: NormalizedTrainingConfig, workerIndex: number): Promise<GameSnapshot> {
@@ -1048,11 +1394,17 @@ async function collectDistilledSamples(
   if (!activeModel?.outputWeights?.length) {
     return [];
   }
-  const positions = await collectSamples(game, config, true, (collected, sampleCount, labelWorkers) => {
-    progress({ collected, sampleCount, labelWorkers, labelKind: "distilled" });
-  });
-  const labels = await predictValues(positions, activeModel);
-  return positions.map((sample, index) => ({
+  const positions = await collectGpuPositions(
+    game,
+    config,
+    modeLabelTarget(config, 1),
+    progress,
+    "distilled",
+    config.searchWorkers
+  );
+  const samples = positions.map((position) => position.sample);
+  const labels = await predictValues(samples, activeModel);
+  return samples.map((sample, index) => ({
     ...sample,
     label: labels[index] ?? 0,
     policy: null,
@@ -1067,12 +1419,13 @@ async function collectGpuPositions(
   config: NormalizedTrainingConfig,
   target: number,
   progress: ProgressCallback,
-  labelKind: TrainingLabelKind
+  labelKind: TrainingLabelKind,
+  requestedWorkers: number = config.searchWorkers
 ): Promise<EncodedPosition[]> {
   if (target <= 0) {
     return [];
   }
-  const workerCount = gpuTrainingWorkerCount(target);
+  const workerCount = gpuTrainingWorkerCount(target, requestedWorkers);
   const positions: Array<EncodedPosition | null> = new Array(target).fill(null);
   let nextJob = 0;
   let generated = 0;
@@ -1197,6 +1550,28 @@ async function applyWorkerTurn(
   }
   return {
     game: current,
+    status,
+    winner: status.winner ?? null
+  };
+}
+
+async function applyCpuWorkerTurn(
+  worker: Worker,
+  game: GameSnapshot,
+  moves: Move[],
+  config: NormalizedTrainingConfig
+): Promise<AppliedWorkerTurn | null> {
+  const response = await requestWorker(worker, {
+    type: "applyTurn",
+    game,
+    moves
+  }, workerRequestTimeout(config));
+  if (!response.game) {
+    return null;
+  }
+  const status = response.status ?? {};
+  return {
+    game: response.game,
     status,
     winner: status.winner ?? null
   };
@@ -1371,7 +1746,12 @@ function labelSample(worker: Worker, job: LabelJob, config: NormalizedTrainingCo
   });
 }
 
-function requestWorker(worker: Worker, payload: WorkerRequestPayload, timeoutMs = workerRequestTimeout(payload)): Promise<AiWorkerResponse> {
+function requestWorker(
+  worker: Worker,
+  payload: WorkerRequestPayload,
+  timeoutMs = workerRequestTimeout(payload),
+  transfer: Transferable[] = []
+): Promise<AiWorkerResponse> {
   return new Promise((resolve, reject) => {
     const messageId = crypto.randomUUID();
     const timeout = setTimeout(() => {
@@ -1406,34 +1786,12 @@ function requestWorker(worker: Worker, payload: WorkerRequestPayload, timeoutMs 
     worker.postMessage({
       id: messageId,
       ...payload
-    });
+    }, transfer);
   });
 }
 
 function normalizeSearchScore(score: number): number {
-  return Math.max(-1, Math.min(1, score / 20000));
-}
-
-function policyBucket(move: Move | null | undefined): number | null {
-  if (!move) {
-    return null;
-  }
-  const values = [
-    move.from?.timelineId ?? 0,
-    move.from?.time ?? 0,
-    move.from?.x ?? 0,
-    move.from?.y ?? 0,
-    move.to?.timelineId ?? 0,
-    move.to?.time ?? 0,
-    move.to?.x ?? 0,
-    move.to?.y ?? 0
-  ];
-  let hash = 2166136261;
-  for (const value of values) {
-    hash ^= value & 0xff;
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return hash % POLICY_BUCKETS;
+  return normalizedSearchScore(score);
 }
 
 function cloneGame(game: GameSnapshot): GameSnapshot {
@@ -1526,24 +1884,11 @@ function searchSeed(value: unknown, salt: number): number {
   return hash >>> 0;
 }
 
-function appendReplaySamples(buffer: TrainingSample[], samples: TrainingSample[], maxBuffer: number): TrainingSample[] {
-  const merged = buffer.concat(samples).filter((sample) => Array.isArray(sample.features));
-  const deduplicated = new Map<string, TrainingSample>();
-  let legacyIndex = 0;
-  for (const sample of merged) {
-    const key = sample.positionKey
-      ? `${sample.positionKey}|${sample.labelKind ?? "unknown"}|${sample.policy ?? ""}`
-      : `legacy:${legacyIndex++}`;
-    if (deduplicated.has(key)) {
-      deduplicated.delete(key);
-    }
-    deduplicated.set(key, sample);
-  }
-  const values = Array.from(deduplicated.values());
-  return values.slice(Math.max(0, values.length - maxBuffer));
-}
-
-async function validateLossLogs(config: NormalizedTrainingConfig, progress?: ProgressCallback): Promise<LossLogValidation> {
+async function validateLossLogs(
+  config: NormalizedTrainingConfig,
+  progress?: ProgressCallback,
+  candidateModel?: ArrayBuffer
+): Promise<LossLogValidation> {
   const logs = await fetchLossLogs(config.lossLogReplay);
   const validation: LossLogValidation = {
     checked: 0,
@@ -1559,6 +1904,12 @@ async function validateLossLogs(config: NormalizedTrainingConfig, progress?: Pro
 
   const ai = new Worker("./ai-worker.js", { type: "module" });
   try {
+    if (candidateModel) {
+      await requestWorker(ai, {
+        type: "setModel",
+        modelBytes: candidateModel
+      }, TRAINING_IO_TIMEOUT_MS, [candidateModel]);
+    }
     for (const log of logs) {
       const decisions = Array.isArray(log.decisions) ? log.decisions : [];
       let logChanged = false;
@@ -1568,7 +1919,6 @@ async function validateLossLogs(config: NormalizedTrainingConfig, progress?: Pro
           validation.skipped += 1;
           continue;
         }
-        validation.checked += 1;
         progress?.({
           lossLogValidation: {
             checked: validation.checked,
@@ -1584,7 +1934,7 @@ async function validateLossLogs(config: NormalizedTrainingConfig, progress?: Pro
             nodes: config.nodes,
             timeMs: workerSearchTimeMs(config),
             gpuMode: "full",
-            temperature: config.explorationTemperature,
+            temperature: 0,
             randomSeed: sampleSeed("loss-log", validation.checked, config.runSeed ^ 0x1055_1000)
           }, workerRequestTimeout(config));
           const currentMoves = response.result?.moves ?? [];
@@ -1593,6 +1943,7 @@ async function validateLossLogs(config: NormalizedTrainingConfig, progress?: Pro
             validation.skipped += 1;
             continue;
           }
+          validation.checked += 1;
           if (currentKey !== previousKey) {
             validation.changed += 1;
             logChanged = true;
@@ -1696,20 +2047,26 @@ async function fetchCpuParameters(): Promise<CpuParameters> {
 }
 
 async function loadReplayBuffer(): Promise<TrainingSample[]> {
+  let db: ReplayDb | null = null;
   try {
-    const db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
+    db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
     return (await withTimeout(idbGet(db, BUFFER_KEY), TRAINING_IO_TIMEOUT_MS, "Timed out reading replay buffer.")) ?? [];
   } catch {
     return [];
+  } finally {
+    db?.close();
   }
 }
 
 async function saveReplayBuffer(samples: TrainingSample[]): Promise<void> {
+  let db: ReplayDb | null = null;
   try {
-    const db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
+    db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
     await withTimeout(idbPut(db, BUFFER_KEY, samples), TRAINING_IO_TIMEOUT_MS, "Timed out saving replay buffer.");
   } catch {
     // IndexedDB is an optimization; an in-memory run still works without it.
+  } finally {
+    db?.close();
   }
 }
 

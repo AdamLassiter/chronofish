@@ -507,6 +507,41 @@ fn ai_timed_json_has_expected_shape() {
 }
 
 #[test]
+fn ai_json_marks_odd_depth_royal_capture_as_terminal() {
+    let mut game = Game::new();
+    let mut board = [[None; 8]; 8];
+    board[0][0] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::King,
+    });
+    board[6][7] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Queen,
+    });
+    board[7][7] = Some(Piece {
+        color: Color::Black,
+        piece_type: PieceType::King,
+    });
+    game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+    game.position_hash = game.recompute_position_hash();
+
+    let json = game.ai_turn_timed_json(3, 20_000, 500);
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
+
+    assert_eq!(
+        value["depth"].as_i64(),
+        Some(1),
+        "mate may end at odd depth: {json}"
+    );
+    assert_eq!(
+        value["terminal"].as_bool(),
+        Some(true),
+        "terminal mate should be marked: {json}"
+    );
+    assert_eq!(value["resultReason"].as_str(), Some("royal-capture"));
+}
+
+#[test]
 fn ai_timed_json_reports_principal_variation_beyond_selected_turn() {
     let mut game = Game::new();
     game.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];

@@ -149,6 +149,9 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.match(shader, /apply_neural_values/);
   assert.match(shader, /MAX_NEURAL_BOARDS: u32 = 16u/);
   assert.match(shader, /perspective/);
+  assert.match(shader, /BOARD_LATEST\] != 0 && states\[base \+ BOARD_ACTIVE\] != 0/);
+  assert.match(shader, /if \(states\[base \+ BOARD_ORIGIN\] != 0\) \{ return 3; \}/);
+  assert.match(shader, /category\(state, board\) >= 4/);
   assert.doesNotMatch(source, /PROJECT_FEATURES_SHADER/);
   assert.doesNotMatch(source, /rawFeatures/);
   assert.match(source, /activeStates/);
@@ -177,7 +180,51 @@ test("GPU frontier loads CFNN once and evaluates without prediction readback", a
   assert.match(source, /fetch\("\/ai\/value-model\.cfnn"/);
   assert.match(source, /modelArchitectureMatches/);
   assert.match(source, /FrontierNeuralEvaluator/);
+  assert.match(source, /modelBuffersFromBytes/);
   assert.doesNotMatch(source, /mapAsync/);
+});
+
+test("GPU workers validate an in-memory candidate model before promotion", async () => {
+  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const trainer = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
+
+  assert.match(worker, /type === "setModel"/);
+  assert.match(worker, /frontierModelOverride = modelBytes/);
+  assert.match(worker, /new FrontierNeuralEvaluator\(device, frontierModelOverride\)/);
+  assert.match(trainer, /type: "setModel"/);
+  assert.match(trainer, /modelBytes: candidateModel/);
+  assert.match(trainer, /temperature: 0/);
+  assert.match(trainer, /sampleSeed\("loss-log"/);
+  assert.match(ui, /const modelBytes = exactArrayBuffer\(model\)/);
+  assert.match(ui, /validateTrainingLossLogs\(trainingConfig\(\), modelBytes\)/);
+  assert.match(ui, /if \(logValidation\?\.failed\)/);
+  assert.match(ui, /title: "Model Rejected"/);
+});
+
+test("GPU frontier applies serialized policy priors before candidate pruning", async () => {
+  const frontier = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const neural = await readFile(path.join(root, "src/ai-frontier-neural.ts"), "utf8");
+  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const shader = await readFile(path.join(root, "src/shaders/frontier_policy.wgsl"), "utf8");
+  const stateShader = await readFile(path.join(root, "src/shaders/frontier_state.wgsl"), "utf8");
+
+  assert.match(frontier, /await scoreCandidates\?\.\(encoder, buffers, candidateCapacity\)/);
+  assert.match(neural, /async encodePolicyPrior/);
+  assert.match(neural, /model\.policyWeights\?\.length === expected/);
+  assert.match(neural, /policyWeightsForModel/);
+  assert.match(neural, /#currentPolicyFeatures/);
+  assert.match(neural, /advancePolicyFeatures/);
+  assert.match(neural, /FRONTIER_POLICY_SHADER/);
+  assert.match(worker, /runtime\.neural\.encodePolicyPrior/);
+  assert.match(worker, /"gpu-v1-cfnn-v3-policy-head"/);
+  assert.match(shader, /fn policy_bucket/);
+  assert.match(shader, /CANDIDATE_CARRY/);
+  assert.match(shader, /hidden_features\[parent \* params\.input_size \+ input\]/);
+  assert.match(shader, /policy_weights\[row \+ input\]/);
+  assert.match(shader, /CANDIDATE_POLICY_PRIOR/);
+  assert.match(shader, /CANDIDATE_SCORE.*\+ prior/s);
+  assert.match(stateShader, /CANDIDATE_SCORE\] - candidates\[candidate_base \+ CANDIDATE_POLICY_PRIOR\]/);
 });
 
 test("GPU frontier result labels neural mode only when the neural pass ran", async () => {
@@ -295,13 +342,15 @@ test("GPU bot search uses one worker and one device queue", async () => {
   assert.doesNotMatch(controller, /Math\.min\(2, hardwareThreads - 1\)/);
 });
 
-test("GPU training harness uses one WebGPU worker queue", async () => {
+test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
 
   assert.match(worker, /function gpuTrainingWorkerCount/);
-  assert.match(worker, /WebGPU work is serialized through one worker\/device queue/);
-  assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(positions\.length\)/);
-  assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(target\)/);
+  assert.match(worker, /const MAX_PARALLEL_GPU_TRAINING_WORKERS = 16/);
+  assert.match(worker, /Math\.min\(MAX_PARALLEL_GPU_TRAINING_WORKERS, Math\.floor\(requestedWorkers\) \|\| 1\)/);
+  assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(positions\.length, config\.searchWorkers\)/);
+  assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(target, config\.selfPlayWorkers\)/);
+  assert.match(worker, /collectGpuPositions\(game, config, target, progress, "search", config\.searchWorkers\)/);
 });
 
 test("GPU training rollouts apply complete returned turns", async () => {
@@ -410,11 +459,21 @@ test("GPU frontier fills from unsorted candidates when shortlist pruning underfi
 test("GPU policy training applies label weights to move priors", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const shader = await readFile(path.join(root, "src/shaders/policy.wgsl"), "utf8");
+  const lossShader = await readFile(path.join(root, "src/shaders/policy_loss.wgsl"), "utf8");
 
-  assert.match(trainer, /const labelWeights = new Float32Array/);
-  assert.match(trainer, /labelWeightBuffer/);
-  assert.match(shader, /label_weights/);
-  assert.match(shader, /target_weight \/ total_weight/);
+  assert.match(trainer, /const policyIndices: number\[\] = \[\]/);
+  assert.match(trainer, /labelWeights\[index\] = Math\.max\(0, sample\.labelWeight \?\? 1\)/);
+  assert.match(trainer, /fillGroupedTrainingBatchIndices\(/);
+  assert.match(trainer, /policyTrainingSteps\(config\.epochs\)/);
+  assert.match(trainer, /forwardHiddenFeaturesOnProjectedGpu/);
+  assert.match(trainer, /splitPolicyTrainingIndices/);
+  assert.match(trainer, /policyLossOnGpu/);
+  assert.match(trainer, /bestPolicyWeightBuffer/);
+  assert.match(shader, /sample_weights\[dataset_sample\] \/ max\(params\.total_weight/);
+  assert.match(shader, /features\[dataset_sample \* params\.input_size \+ input\]/);
+  assert.match(shader, /policy_weights\[weight\] = policy_weights\[weight\] - params\.learning_rate/);
+  assert.match(lossShader, /fn reduce_policy_loss/);
+  assert.match(lossShader, /max_logit \+ log\(max\(denominator, 0\.000001\)\) - target_logit/);
 });
 
 test("GPU training distinguishes completed outcomes from search bootstraps", async () => {
@@ -428,19 +487,299 @@ test("GPU training distinguishes completed outcomes from search bootstraps", asy
   assert.match(worker, /label: 0/);
   assert.match(trainer, /const weight = Math\.max\(0, samples\[index\]!\.labelWeight \?\? 1\)/);
   assert.match(trainer, /totalWeight > 0 \? total \/ totalWeight : 0/);
-  assert.match(trainer, /batchWeight \+= Math\.max\(0, labelWeights\[batch\[index\]!\] \?\? 1\)/);
+  assert.match(trainer, /const batchIndices = new Uint32Array\(batchSize\)/);
+  assert.match(trainer, /const batchWeight = fillGroupedTrainingBatchIndices\(batchIndices, trainGroups, epoch, split\.seed, labelWeights\)/);
   assert.match(trainer, /outputDeltaParamsData\(batchSize, batchWeight\)/);
   assert.match(delta, /f32\(params\.batch_count\) \/ max\(params\.total_weight, 0\.000001\)/);
+  assert.match(delta, /\* label_weights\[dataset_sample\]/);
+});
+
+test("GPU distillation labels searched positions instead of duplicating the root snapshot", async () => {
+  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+
+  assert.match(worker, /const positions = await collectGpuPositions\([\s\S]*"distilled"/);
+  assert.match(worker, /const samples = positions\.map\(\(position\) => position\.sample\)/);
+  assert.match(worker, /const labels = await predictValues\(samples, activeModel\)/);
+  assert.doesNotMatch(worker, /const positions = await collectSamples\(game, config, true/);
+});
+
+test("GPU training samples uniform minibatches and applies label weights once", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+
+  assert.match(trainer, /export function fillGroupedTrainingBatchIndices/);
+  assert.match(trainer, /export function groupTrainingIndicesByPosition/);
+  assert.match(trainer, /state = xorshift32\(state \|\| 1\)/);
+  assert.match(trainer, /const group = trainGroups\[state % trainGroups\.length\]!/);
+  assert.match(trainer, /const selected = group\[state % group\.length\]!/);
+  assert.match(trainer, /batch\[index\] = selected/);
+  assert.match(trainer, /batchWeight \+= Math\.max\(0, labelWeights\[selected\] \?\? 1\)/);
+  assert.doesNotMatch(trainer, /trainingWeightCdf/);
+  assert.doesNotMatch(trainer, /weightedTrainingIndex/);
+  assert.doesNotMatch(trainer, /const epochOrder = shuffledIndices\(trainIndices, epoch, split\.seed\)/);
+});
+
+test("GPU training validation split falls back to a high-signal holdout", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+
+  assert.match(trainer, /validationSplit > 0 && !validationIndices\.length && trainIndices\.length > 1/);
+  assert.match(trainer, /movePositionGroupToValidation\(samples, trainIndices, validationIndices, seed\)/);
+  assert.match(trainer, /groupTrainingIndicesByPosition\(samples, trainIndices\)/);
+  assert.match(trainer, /function validationSamplePriority/);
+  assert.match(trainer, /trainingLabelPriority\(sample\.labelKind, sample\.pseudo\)/);
+  assert.match(trainer, /Math\.max\(0, sample\.labelWeight \?\? 1\)/);
+});
+
+test("GPU training selects a device-sized high-signal working set", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const replay = await readFile(path.join(root, "src/training-replay.ts"), "utf8");
+
+  assert.match(trainer, /const trainingSamples = selectTrainingWorkingSet\(samples, device\)/);
+  assert.match(trainer, /trainValue\(device, trainingSamples, config, activeModel, progress\)/);
+  assert.match(trainer, /value\.policyFeatureBuffer/);
+  assert.match(trainer, /model\.replayBufferSize = samples\.length/);
+  assert.match(trainer, /model\.trainingSampleCount = trainingSamples\.length/);
+  assert.match(trainer, /export function selectTrainingWorkingSet/);
+  assert.match(trainer, /device\.limits\?\.maxStorageBufferBindingSize/);
+  assert.match(trainer, /maxProjectedSamples = Math\.max\(1, Math\.floor\(maxBindingSize \/ \(PROJECTION_SIZE \* Float32Array\.BYTES_PER_ELEMENT\)\)\)/);
+  assert.match(trainer, /trainingSamplePriority\(sample, index, samples\.length\)/);
+  assert.match(trainer, /const MIN_POLICY_WORKING_SET_FRACTION = 0\.25/);
+  assert.match(trainer, /const requiredPolicyCount = Math\.min/);
+  assert.match(trainer, /for \(let index = selected\.length - 1; index >= 0; index -= 1\)/);
+  assert.match(trainer, /import \{ trainingLabelPriority \} from "\.\/training-replay\.js"/);
+  assert.match(replay, /export function trainingLabelPriority/);
+});
+
+test("GPU training checkpoint loss reuses projected replay buffers", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const lossShader = await readFile(path.join(root, "src/shaders/reduce_loss.wgsl"), "utf8");
+
+  assert.match(trainer, /predictionLossOnProjectedGpu\(/);
+  assert.match(trainer, /featureBuffer,/);
+  assert.match(trainer, /weightBuffers,/);
+  assert.match(trainer, /outputWeightBuffer,/);
+  assert.match(trainer, /forwardIndexedLayerPipeline,/);
+  assert.match(trainer, /export async function predictionLossOnProjectedGpu/);
+  assert.match(trainer, /const batchIndexBuffer = storageBuffer/);
+  assert.match(trainer, /layerIndex === 0 \? forwardIndexedLayerPipeline : forwardLayerPipeline/);
+  assert.match(trainer, /const partials = await readFloats/);
+  assert.match(trainer, /lossReductionWorkgroupCount\(sampleCount\)/);
+  assert.match(lossShader, /var<workgroup> reductions: array<vec2<f32>, 64>/);
+  assert.match(lossShader, /weight \* error \* error/);
+  assert.doesNotMatch(trainer, /predictionLossOnGpu\(device, indexSamples/);
+  assert.doesNotMatch(trainer, /function indexSamples/);
+});
+
+test("GPU training records internal phase timings for hardware benchmarks", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const benchmark = await readFile(path.join(root, "scripts/gpu-frontier-smoke.mjs"), "utf8");
+
+  assert.match(trainer, /metrics\.phases\[phase\] = \(metrics\.phases\[phase\] \?\? 0\) \+ performance\.now\(\) - startedAt/);
+  assert.match(trainer, /timed\(config\.metrics, "valueTrain"/);
+  assert.match(trainer, /timed\(config\.metrics, "policyTrain"/);
+  assert.match(trainer, /timed\(config\.metrics, "projection"/);
+  assert.match(trainer, /timed\(config\.metrics, "initialValidationLoss"/);
+  assert.match(benchmark, /phasePercentages/);
+  assert.match(benchmark, /trainingSamplesPerSecond/);
+});
+
+test("GPU dense training kernels use workgroup-tiled matrix operations", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const shaders = await Promise.all([
+    "forward_layer.wgsl",
+    "forward_indexed_layer.wgsl",
+    "apply_layer.wgsl",
+    "apply_indexed_layer.wgsl",
+    "hidden_delta.wgsl",
+    "policy.wgsl"
+  ].map((name) => readFile(path.join(root, "src/shaders", name), "utf8")));
+
+  for (const shader of shaders) {
+    assert.match(shader, /var<workgroup>/);
+    assert.match(shader, /workgroupBarrier\(\)/);
+    assert.match(shader, /base = base \+ 16u/);
+  }
+  assert.match(shaders[0], /input_tile\[local\.x \* 16u \+ offset\]/);
+  assert.match(shaders[2], /feature_tile\[offset \* 16u \+ local\.x\]/);
+  assert.match(shaders[4], /delta_tile\[local\.x \* 16u \+ offset\]/);
+  assert.match(shaders[5], /policy_feature_tile/);
+  for (const shader of shaders.slice(0, 5)) {
+    assert.match(shader, /fn \w+_naive\(/);
+  }
+  assert.match(shaders[5], /fn forward_policy_naive\(/);
+  assert.match(shaders[5], /fn apply_policy_naive\(/);
+  assert.match(trainer, /const TILED_TRAINING_MIN_BATCH = 16/);
+  assert.match(trainer, /sampleCount >= TILED_TRAINING_MIN_BATCH \? entryPoint : `\$\{entryPoint\}_naive`/);
+  assert.match(trainer, /denseKernelEntryPoint\("forward_layer", batchSize\)/);
+  assert.match(trainer, /denseKernelEntryPoint\("apply_layer", batchSize\)/);
+  assert.match(trainer, /denseKernelEntryPoint\("hidden_delta", batchSize\)/);
+  assert.match(trainer, /denseKernelEntryPoint\("forward_policy", batchSize\)/);
+  assert.match(trainer, /denseKernelEntryPoint\("apply_policy", batchSize\)/);
+});
+
+test("GPU training unlocks hidden-layer backpropagation only with enough unique positions", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+
+  assert.match(trainer, /const MIN_HIDDEN_TRAINING_POSITIONS = 256/);
+  assert.match(trainer, /const hiddenLayersTrained = uniqueTrainingPositionCount\(samples, trainIndices\) >= MIN_HIDDEN_TRAINING_POSITIONS/);
+  assert.match(trainer, /const deltaBuffers = hiddenLayersTrained/);
+  assert.match(trainer, /const hiddenDeltaPipeline = hiddenLayersTrained/);
+  assert.match(trainer, /const applyLayerPipeline = hiddenLayersTrained/);
+  assert.match(trainer, /if \(hiddenLayersTrained\) \{\s*const lastLayerIndex/);
+  assert.match(trainer, /model\.hiddenLayersTrained = value\.hiddenLayersTrained/);
+});
+
+test("GPU and CPU-head optimizers retain momentum without checkpoint readbacks", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const shaders = await Promise.all([
+    "apply_output.wgsl",
+    "apply_layer.wgsl",
+    "apply_indexed_layer.wgsl",
+    "policy.wgsl"
+  ].map((name) => readFile(path.join(root, "src/shaders", name), "utf8")));
+
+  assert.match(trainer, /const OPTIMIZER_MOMENTUM = 0\.9/);
+  assert.match(trainer, /const velocityBuffers = hiddenLayersTrained/);
+  assert.match(trainer, /const outputVelocityBuffer = zeroStorageBuffer/);
+  assert.match(trainer, /const policyVelocityBuffer = zeroStorageBuffer/);
+  assert.match(trainer, /encodePipelineBindings\(device, encoder, forwardPipeline/);
+  assert.match(trainer, /\[8, policyVelocityBuffer\]/);
+  assert.match(trainer, /optimizerVelocity\(velocity\[input\] \?\? 0, update\)/);
+  assert.match(trainer, /optimizerVelocity\(velocity\[index\] \?\? 0, update\)/);
+  for (const shader of shaders) {
+    assert.match(shader, /momentum: f32/);
+    assert.match(shader, /var<storage, read_write> velocity: array<f32>/);
+    assert.match(shader, /params\.momentum \* velocity/);
+  }
+});
+
+test("GPU value inference restores the normalized training score scale", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const shader = await readFile(path.join(root, "src/shaders/frontier_neural.wgsl"), "utf8");
+  const forward = await readFile(path.join(root, "src/shaders/forward_output.wgsl"), "utf8");
+  const frontierForward = await readFile(path.join(root, "src/shaders/frontier_forward.wgsl"), "utf8");
+  const delta = await readFile(path.join(root, "src/shaders/output_delta.wgsl"), "utf8");
+
+  assert.match(trainer, /export const VALUE_SCORE_SCALE = 20_000/);
+  assert.match(worker, /return normalizedSearchScore\(score\)/);
+  assert.match(shader, /clamp\(predictions\[state\] \* apply_params\.value_scale \+ apply_params\.value_bias, -1\.0, 1\.0\)/);
+  assert.match(shader, /neural \* 20000\.0/);
+  assert.doesNotMatch(shader, /neural \* 100\.0/);
+  assert.match(forward, /predictions\[sample\] = tanh\(sum\)/);
+  assert.match(frontierForward, /output_values\[sample\] = tanh\(sum\)/);
+  assert.match(delta, /\* \(1\.0 - prediction \* prediction\)/);
+  assert.match(trainer, /outputWeights\[outputSize\] = inverseTanh/);
+});
+
+test("GPU training keeps best checkpoints on GPU until final export", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+
+  assert.match(trainer, /const bestWeightBuffers = layerWeights\.map/);
+  assert.match(trainer, /const bestOutputWeightBuffer = storageBuffer/);
+  assert.match(trainer, /"initialValidationLoss"/);
+  assert.match(trainer, /let bestValidationLoss = initialValidationLoss/);
+  assert.match(trainer, /let checkpointImproved = false/);
+  assert.match(trainer, /checkpointImproved = true/);
+  assert.match(trainer, /"bestCheckpointCopy"/);
+  assert.match(trainer, /copyTrainingWeights\(device, outputWeightBuffer, weightBuffers, bestOutputWeightBuffer, bestWeightBuffers, layerWeights, outputWeights\.byteLength\)/);
+  assert.match(trainer, /function copyTrainingWeights/);
+  assert.match(trainer, /encoder\.copyBufferToBuffer\(outputWeightBuffer, 0, bestOutputWeightBuffer, 0, outputByteLength\)/);
+  assert.match(trainer, /"bestWeightReadback"/);
+  assert.doesNotMatch(trainer, /"finalWeightReadback"/);
+  assert.doesNotMatch(trainer, /exported final changed checkpoint/);
+  assert.match(trainer, /async function readTrainingWeights/);
+  assert.match(trainer, /const readBuffer = device\.createBuffer/);
+  assert.match(trainer, /layerOffsets\[layerIndex\]!/);
+  assert.equal(trainer.match(/onSubmittedWorkDone/g)?.length, 1);
+  assert.doesNotMatch(trainer, /"weightReadback"/);
+});
+
+test("GPU training destroys per-run and validation buffers after export", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+
+  assert.match(trainer, /finally \{\s*destroyBuffers\(value\.resources\)/);
+  assert.match(trainer, /resources: \[\s*featureBuffer,/);
+  assert.match(trainer, /destroyBuffers\(\[\s*targetBuffer,/);
+  assert.match(trainer, /destroyBuffers\(\[indexBuffer, partialBuffer, paramsBuffer\]\)/);
+  assert.match(trainer, /destroyBuffers\(\[\s*batchIndexBuffer,/);
+  assert.match(trainer, /readBuffer\.destroy\(\)/);
+  assert.match(trainer, /function destroyBuffers/);
+  assert.match(trainer, /destroyed\.has\(buffer\)/);
+});
+
+test("GPU training batches feature projection directly into the final buffer", async () => {
+  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const shader = await readFile(path.join(root, "src/shaders/project_features.wgsl"), "utf8");
+
+  assert.match(trainer, /packSparseProjectionFeatures\(chunkSamples, inputSize\)/);
+  assert.match(trainer, /temporaryBytes \+ sparseFeatures\.byteLength > temporaryBudget/);
+  assert.match(trainer, /\[offsetBuffer, indexBuffer, valueBuffer, projectedBuffer, paramsBuffer\]/);
+  assert.match(trainer, /temporaryBuffers\.push\(offsetBuffer, indexBuffer, valueBuffer, paramsBuffer\)/);
+  assert.match(trainer, /await device\.queue\.onSubmittedWorkDone\(\)/);
+  assert.match(trainer, /buffer\.destroy\(\)/);
+  assert.doesNotMatch(trainer, /chunkProjectedBuffer/);
+  assert.doesNotMatch(shader, /raw_features/);
+  assert.match(shader, /feature_offsets: array<u32>/);
+  assert.match(shader, /feature_indices: array<u32>/);
+  assert.match(shader, /feature_values: array<f32>/);
+  assert.match(shader, /sparse_start = feature_offsets\[sample\]/);
+  assert.match(shader, /sparse_end = feature_offsets\[sample \+ 1u\]/);
+  assert.match(shader, /output_offset: u32/);
+  assert.match(shader, /\(params\.output_offset \+ sample\) \* params\.projection_size/);
+});
+
+test("training label workers encode positions on CPU and transfer typed feature buffers", async () => {
+  const worker = await readFile(path.join(root, "src/training-label-worker.ts"), "utf8");
+  const encoding = await readFile(path.join(root, "src/training-encoding.ts"), "utf8");
+
+  assert.match(worker, /encodeNeuralPositionFeatures\(game, game\.turn\)/);
+  assert.match(worker, /samples\.map\(\(sample\) => sample\.features\.buffer\)/);
+  assert.match(worker, /\[sample\.features\.buffer\]/);
+  assert.doesNotMatch(worker, /navigator\.gpu/);
+  assert.doesNotMatch(worker, /onSubmittedWorkDone/);
+  assert.doesNotMatch(worker, /readFloats/);
+  assert.match(encoding, /new Float32Array\(NEURAL_INPUT_SIZE\)/);
+  assert.match(encoding, /values\.fill/);
+  assert.match(encoding, /neuralBoardSelection/);
 });
 
 test("GPU replay deduplicates positions and keeps validation groups separate", async () => {
   const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const replay = await readFile(path.join(root, "src/training-replay.ts"), "utf8");
   const labels = await readFile(path.join(root, "src/training-label-worker.ts"), "utf8");
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
 
   assert.match(labels, /positionKey: positionKey\(game\)/);
-  assert.match(worker, /sample\.positionKey/);
-  assert.match(worker, /deduplicated\.delete\(key\)/);
+  assert.match(worker, /import \{ appendReplaySamples, dedupeTrainingSamples \} from "\.\/training-replay\.js"/);
+  assert.match(worker, /const collectedSamples = await timed\(metrics, "collect"/);
+  assert.match(worker, /const samples = dedupeTrainingSamples\(collectedSamples\)/);
+  assert.match(replay, /sample\.positionKey/);
+  assert.match(replay, /deduplicated\.delete\(key\)/);
+  assert.match(replay, /function replaySampleKey/);
+  assert.match(replay, /function featureFingerprint/);
+  assert.match(replay, /\`\$\{sample\.positionKey\}\|\$\{labelKind\}\`/);
+  assert.match(replay, /\`features:\$\{features\.length\}:\$\{hash\.toString\(16\)\}\`/);
+  assert.doesNotMatch(replay, /\`\$\{sample\.positionKey\}\|\$\{sample\.labelKind \?\? "unknown"\}\|\$\{sample\.policy/);
   assert.match(trainer, /sample\.positionKey/);
   assert.doesNotMatch(trainer, /boardCount \?\? 0\}\|\$\{index\}/);
+});
+
+test("GPU replay retention prioritizes stronger label sources", async () => {
+  const replay = await readFile(path.join(root, "src/training-replay.ts"), "utf8");
+
+  assert.match(replay, /const MIN_POLICY_REPLAY_FRACTION = 0\.25/);
+  assert.match(replay, /const requiredPolicyCount = Math\.min/);
+  assert.match(replay, /replayHasPolicyTarget/);
+  assert.match(replay, /replaySamplePriority\(sample, index, values\.length\)/);
+  assert.match(replay, /trainingLabelPriority\(sample\.labelKind, sample\.pseudo\)/);
+  assert.match(replay, /labelKind === "outcome" \|\| labelKind === "duel"/);
+  assert.match(replay, /labelKind === "search" \|\| labelKind === "cpu"/);
+  assert.match(replay, /labelKind === "distilled" \|\| pseudo/);
+  assert.match(replay, /const existing = deduplicated\.get\(key\)/);
+  assert.match(replay, /mergeCompatibleSamples\(existing\.sample, sample\)/);
+  assert.match(replay, /label: totalMass > 0/);
+  assert.match(replay, /labelWeight: strongestWeight \* confidence/);
+  assert.match(replay, /observationCount: Math\.min\(observationCount, 64\)/);
+  assert.match(replay, /\.sort\(\(left, right\) => right\.priority - left\.priority \|\| right\.index - left\.index\)/);
+  assert.match(replay, /\.sort\(\(left, right\) => left\.index - right\.index\)/);
 });

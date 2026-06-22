@@ -139,6 +139,13 @@ interface BotReviewProjection {
   decision: BotDecisionRecord;
 }
 
+interface BotReviewPlanMatch {
+  decision: BotDecisionRecord;
+  baseSnapshot: GameSnapshot;
+  skipTurns: number;
+  skipMovesInFirstTurn: number;
+}
+
 interface RenderOptions {
   preserveScroll?: boolean;
   focusPosition?: Position;
@@ -1006,12 +1013,14 @@ function collectPlannedRenderData(): { plannedArrows: PlannedArrow[]; ghostBoard
   return { plannedArrows, ghostBoards };
 }
 
-function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnapshot, skipTurns = 0): void {
+function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnapshot, skipTurns = 0, skipMovesInFirstTurn = 0): void {
   clearPlannedMoveTree();
   let parentId: string | null = null;
   let snapshot = cloneGame(baseSnapshot);
-  for (const turn of decision.principalVariation.slice(skipTurns)) {
-    for (const move of turn) {
+  for (let turnIndex = skipTurns; turnIndex < decision.principalVariation.length; turnIndex += 1) {
+    const turn = decision.principalVariation[turnIndex] ?? [];
+    const moves = turnIndex === skipTurns ? turn.slice(skipMovesInFirstTurn) : turn;
+    for (const move of moves) {
       const node = addPlannedMove(parentId, move, snapshot, "bot-review");
       if (!node) {
         return;
@@ -1022,18 +1031,45 @@ function buildBotReviewPlan(decision: BotDecisionRecord, baseSnapshot: GameSnaps
   }
 }
 
-function botReviewDecisionForBoard(position: Position, snapshot: GameSnapshot): BotDecisionRecord | null {
+function botReviewPlanForBoard(position: Position, snapshot: GameSnapshot): BotReviewPlanMatch | null {
   const clickedBoard = boardAt(snapshot, position.timelineId, position.time);
   if (!clickedBoard) {
     return null;
   }
-  return botController.allDecisions().slice().reverse().find((decision) => {
-    if (decision.botColor !== clickedBoard.sideToMove) {
-      return false;
+  for (const decision of botController.allDecisions().slice().reverse()) {
+    let baseSnapshot: GameSnapshot | null = cloneGame(decision.game);
+    for (let turnIndex = 0; turnIndex < decision.principalVariation.length; turnIndex += 1) {
+      const turn = decision.principalVariation[turnIndex] ?? [];
+      for (let moveIndex = 0; moveIndex < turn.length; moveIndex += 1) {
+        if (!baseSnapshot) {
+          break;
+        }
+        const decisionBoard = boardAt(baseSnapshot, position.timelineId, position.time);
+        if (decisionBoard && boardSnapshotKey(decisionBoard) === boardSnapshotKey(clickedBoard)) {
+          return {
+            decision,
+            baseSnapshot: cloneGame(baseSnapshot),
+            skipTurns: turnIndex,
+            skipMovesInFirstTurn: moveIndex
+          };
+        }
+        const move = turn[moveIndex];
+        if (!move) {
+          continue;
+        }
+        const afterSnapshot = previewPlannedMove(baseSnapshot, move);
+        if (!afterSnapshot) {
+          baseSnapshot = null;
+          break;
+        }
+        baseSnapshot = afterSnapshot;
+      }
+      if (!baseSnapshot) {
+        break;
+      }
     }
-    const decisionBoard = boardAt(decision.game, position.timelineId, position.time);
-    return decisionBoard ? boardSnapshotKey(decisionBoard) === boardSnapshotKey(clickedBoard) : false;
-  }) ?? null;
+  }
+  return null;
 }
 
 function showBotPlanForPosition(position: Position): boolean {
@@ -1045,23 +1081,23 @@ function showBotPlanForPosition(position: Position): boolean {
     return true;
   }
   const reviewSnapshot = botReviewProjection?.finalGame ?? game;
-  const decision = botReviewDecisionForBoard(position, reviewSnapshot);
-  if (!decision) {
+  const match = botReviewPlanForBoard(position, reviewSnapshot);
+  if (!match) {
     return false;
   }
-  const baseSnapshot = cloneGame(decision.game);
+  const baseSnapshot = cloneGame(match.baseSnapshot);
   botReviewProjection = {
     finalGame: botReviewProjection?.finalGame ?? cloneGame(reviewSnapshot),
     finalCommittedGame: botReviewProjection?.finalCommittedGame ?? cloneGame(committedGame),
-    decision
+    decision: match.decision
   };
   game = cloneGame(baseSnapshot);
   committedGame = cloneGame(baseSnapshot);
-  buildBotReviewPlan(decision, baseSnapshot);
-  elements.message.textContent = `${botDisplayName(decision.botColor)} depth ${decision.selectedDepth ?? "?"} plan from turn ${decision.ply}.`;
+  buildBotReviewPlan(match.decision, baseSnapshot, match.skipTurns, match.skipMovesInFirstTurn);
+  elements.message.textContent = `${botDisplayName(match.decision.botColor)} depth ${match.decision.selectedDepth ?? "?"} plan from turn ${match.decision.ply}.`;
   const focusPosition = snapshotHasBoard(baseSnapshot, position)
     ? position
-    : decision.selectedMoves[0]?.from
+    : match.decision.selectedMoves[0]?.from
     ?? (snapshotHasBoard(baseSnapshot, position) ? position : null);
   render(focusPosition ? { focusPosition } : {});
   return true;

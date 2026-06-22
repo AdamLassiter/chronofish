@@ -102,6 +102,12 @@ export interface FrontierBufferSet {
   indirect: GPUBuffer;
 }
 
+export type FrontierCandidateScorer = (
+  encoder: GPUCommandEncoder,
+  buffers: FrontierBufferSet,
+  candidateCapacity: number
+) => void | Promise<void>;
+
 export interface EncodedFrontierRoot {
   words: Int32Array;
   boardCount: number;
@@ -236,7 +242,8 @@ export class FrontierGpuPipeline {
   async encodeExpansionCycle(
     encoder: GPUCommandEncoder,
     buffers: FrontierBufferSet,
-    options: FrontierPassOptions
+    options: FrontierPassOptions,
+    scoreCandidates?: FrontierCandidateScorer
   ): Promise<void> {
     const pipelines = await this.pipelines();
     const candidateCapacity = floorPowerOfTwo(this.tuning.candidateCapacity);
@@ -284,6 +291,7 @@ export class FrontierGpuPipeline {
         buffers.states, buffers.candidates, buffers.deltas, buffers.counters, expandParamsBuffer
       ], Math.ceil(count / this.tuning.candidateWorkgroupSize), 1, `frontier_expand_${options.cycleIndex}_${base}`);
     }
+    await scoreCandidates?.(encoder, buffers, candidateCapacity);
 
     const selectParams = u32Uniform([
       candidateCapacity,

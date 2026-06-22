@@ -12,6 +12,11 @@ const smokeGpuMode = optionValue("--gpu-mode") ?? "full";
 const allowSoftwareAdapter = hasFlag("--allow-software-adapter");
 const disableNeural = hasFlag("--disable-neural");
 const cpuMinDepthOnly = hasFlag("--cpu-min-depth-only");
+const trainingBenchmarkSubject = optionValue("--training-benchmark");
+const trainingBenchmarkTimeoutMs = positiveNumber(optionValue("--training-timeout-ms"), 180_000, 10_000);
+const trainingBenchmarkSamples = positiveNumber(optionValue("--training-samples"), 16, 1);
+const trainingBenchmarkEpochs = positiveNumber(optionValue("--training-epochs"), 256, 1);
+const trainingBenchmarkBatch = positiveNumber(optionValue("--training-batch"), 64, 16);
 const browser = process.env.CHRONOFISH_BROWSER ?? await findBrowser();
 if (!browser) {
   throw new Error("Set CHRONOFISH_BROWSER to a Chrome/Chromium binary for GPU frontier smoke tests.");
@@ -106,6 +111,18 @@ async function main() {
     if (smokeGpuMode === "full" && adapter.fallback && !allowSoftwareAdapter) {
       throw new Error("Full GPU smoke selected a fallback software adapter. Install/configure Chromium with native Vulkan WebGPU support, or pass --allow-software-adapter for a deliberately slow functional run.");
     }
+    if (trainingBenchmarkSubject) {
+      if (trainingBenchmarkSubject !== "gpu" && trainingBenchmarkSubject !== "cpu") {
+        throw new Error("--training-benchmark must be gpu or cpu.");
+      }
+      const benchmark = await cdp.evaluate(trainingBenchmarkExpression(trainingBenchmarkSubject), sessionId);
+      if (!benchmark.ok) {
+        throw new Error("training benchmark failed: " + (benchmark.error ?? "unknown error"));
+      }
+      console.log(JSON.stringify(benchmark.result));
+      cdp.close();
+      return;
+    }
 
     for (const fixture of fixtures) {
       if (fixture.expectedTarget) {
@@ -172,6 +189,90 @@ async function main() {
     child.kill("SIGTERM");
     await rm(userDataDir, { recursive: true, force: true });
   }
+}
+
+function trainingBenchmarkExpression(subject) {
+  const config = subject === "gpu"
+    ? {
+        trainingSubject: "gpu",
+        trainingModes: ["distill"],
+        samples: trainingBenchmarkSamples,
+        selfPlayWorkers: 1,
+        searchWorkers: 1,
+        explorationTemperature: 0,
+        depth: 1,
+        nodes: 64,
+        learningRate: 0.005,
+        epochs: trainingBenchmarkEpochs,
+        maxBuffer: Math.max(16, trainingBenchmarkSamples),
+        batchSize: trainingBenchmarkBatch,
+        validationSplit: 0.2,
+        validationInterval: Math.min(64, trainingBenchmarkEpochs),
+        patience: 2,
+        weightDecay: 0.00001,
+        lossLogReplay: 0
+      }
+    : {
+        trainingSubject: "cpu",
+        trainingModes: ["vsCpu"],
+        samples: Math.min(trainingBenchmarkSamples, 8),
+        depth: 1,
+        nodes: 16,
+        cpuDepth: 1,
+        cpuNodes: 16,
+        cpuTrainingTimeMs: 20,
+        cpuCandidates: 2,
+        cpuFinalists: 1,
+        cpuPairBatch: 1,
+        cpuOpponentVariants: 1,
+        cpuScreeningOpponentVariants: 1,
+        cpuRoundsPerVariant: 1,
+        cpuHallOfFameEntries: 0,
+        cpuLeagueContenders: 1,
+        cpuLeagueHallOfFameEntries: 0,
+        cpuMinPairs: 1,
+        cpuMaxPairs: 1,
+        cpuDrawWindow: 4,
+        cpuDrawRateLimit: 0.8,
+        cpuMaxMatchPlies: 1,
+        cpuMaxMatchTimeMs: 3_000,
+        cpuMaxGenerationsWithoutCandidate: 1,
+        cpuWorkers: 1,
+        cpuTrainSeconds: 10
+      };
+  const payload = {
+    id: "training-benchmark",
+    type: "train",
+    game: initialGame(),
+    config
+  };
+  return "new Promise((resolve) => {"
+    + "const started = performance.now();"
+    + "let last = null;"
+    + "const worker = new Worker('./training-worker.js', { type: 'module' });"
+    + "const timeout = setTimeout(() => { worker.terminate(); resolve({ ok: false, error: 'training benchmark timed out: ' + JSON.stringify(last) }); }, "
+    + trainingBenchmarkTimeoutMs + ");"
+    + "worker.onmessage = (event) => {"
+    + "const data = event.data || {};"
+    + "if (data.id !== 'training-benchmark') return;"
+    + "last = { labelKind: data.labelKind ?? null, collected: data.collected ?? null, sampleCount: data.sampleCount ?? null, generation: data.generation ?? null, metrics: data.metrics ?? null };"
+    + "if (data.ok === false) { clearTimeout(timeout); worker.terminate(); resolve({ ok: false, error: data.error || 'training worker error' }); return; }"
+    + "if (!data.model && !data.cpuParameters) return;"
+    + "clearTimeout(timeout); worker.terminate();"
+    + "resolve({ ok: true, result: {"
+    + "fixture: 'training-benchmark', subject: " + JSON.stringify(subject) + ", elapsedMs: Math.round(performance.now() - started),"
+    + "metrics: data.metrics || null, loss: data.loss ?? null, initialValidationLoss: data.initialValidationLoss ?? null,"
+    + "bestValidationLoss: data.bestValidationLoss ?? null, initialPolicyValidationLoss: data.initialPolicyValidationLoss ?? null,"
+    + "bestPolicyValidationLoss: data.bestPolicyValidationLoss ?? null, valueCheckpointImproved: data.valueCheckpointImproved ?? null,"
+    + "policyCheckpointImproved: data.policyCheckpointImproved ?? null, modelChanged: data.modelChanged ?? null,"
+    + "replaySize: data.replaySize ?? null, trainingSampleCount: data.trainingSampleCount ?? null, policyTrainingSampleCount: data.policyTrainingSampleCount ?? null, cpuScore: data.cpuScore ?? null,"
+    + "phasePercentages: data.metrics && data.metrics.phases && data.metrics.totalMs ? Object.fromEntries(Object.entries(data.metrics.phases).map(([name, ms]) => [name, Number((ms * 100 / data.metrics.totalMs).toFixed(1))])) : null,"
+    + "trainingSamplesPerSecond: data.trainingSampleCount && data.metrics && data.metrics.phases && data.metrics.phases.train ? Number((data.trainingSampleCount / (data.metrics.phases.train / 1000)).toFixed(2)) : null"
+    + "} });"
+    + "};"
+    + "worker.onerror = (event) => { clearTimeout(timeout); worker.terminate(); resolve({ ok: false, error: event.message || 'training worker error' }); };"
+    + "worker.postMessage(" + JSON.stringify(payload) + ");"
+    + "})";
 }
 
 function cpuMinimumDepthExpression() {

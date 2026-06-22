@@ -32,17 +32,19 @@ test("frontend loads GPU effort separately from CPU effort", async () => {
 test("bot timeout preserves minimum depth and a completed legal result", async () => {
   const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
 
-  assert.match(controller, /const targetDepth = evenSearchDepthAtMost\(effort\.depth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
-  assert.match(controller, /evenSearchDepthAtLeast\(effort\.minDepth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
-  assert.match(controller, /const nextDepth = nextBotSearchDepth\(pending\.currentDepth\)/);
-  assert.match(controller, /return currentDepth <= 0 \? 2 : currentDepth \+ 2/);
+  assert.match(controller, /const targetDepth = searchDepthAtLeastOne\(effort\.depth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
+  assert.match(controller, /searchDepthAtLeastOne\(effort\.minDepth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
+  assert.match(controller, /const nextDepth = nextBotSearchDepth\(pending\.currentDepth, pending\.targetDepth\)/);
+  assert.match(controller, /return currentDepth <= 0 \? Math\.min\(2, targetDepth\) : Math\.min\(targetDepth, currentDepth \+ 2\)/);
   assert.match(controller, /minDepth: Math\.min\(nextDepth, pending\.minDepth\)/);
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth && pending\.depthReceived < pending\.depthExpected/);
-  assert.match(controller, /function completedEvenSearchDepth/);
+  assert.match(controller, /function completedSearchDepth/);
+  assert.match(controller, /function resultEndsInRoyalCapture/);
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth/);
   assert.match(controller, /completedDepth >= pending\.minDepth/);
   assert.match(controller, /if \(bestResult && \(bestResult\.depth \?\? 0\) >= pending\.minDepth\)/);
-  assert.match(controller, /completedDepth === requestedDepth && completedDepth >= 2 && completedDepth % 2 === 0/);
+  assert.match(controller, /completedDepth >= 2 && completedDepth % 2 === 0/);
+  assert.match(controller, /resultEndsInRoyalCapture\(result\) \? completedDepth : null/);
   assert.match(controller, /pending\.incompleteDepthAttempt = true/);
   assert.match(controller, /pending\.incompleteDepthAttempt && pending\.currentDepth >= pending\.minDepth/);
   assert.match(controller, /is completing depth/);
@@ -78,6 +80,7 @@ test("bot search result ranking prefers deeper completed searches before score",
 
 test("GPU worker honors minimum depth before applying its internal deadline", async () => {
   const worker = await readFile(path.join(webRoot, "src/ai-worker.ts"), "utf8");
+  const cpuWorker = await readFile(path.join(webRoot, "src/cpu-ai-worker.ts"), "utf8");
 
   assert.match(worker, /minDepth\?: number/);
   assert.match(worker, /const requestedDepth = Math\.max\(1, depth \?\? 1\)/);
@@ -85,6 +88,10 @@ test("GPU worker honors minimum depth before applying its internal deadline", as
   assert.match(worker, /gpuDeadlineAt = minimumDepth >= requestedDepth/);
   assert.match(worker, /Number\.POSITIVE_INFINITY/);
   assert.match(worker, /depth: requestedDepth/);
+  assert.match(worker, /resultReason\?: SearchResultReason/);
+  assert.match(worker, /resultReason: replayed\.result\?\.reason/);
+  assert.match(worker, /gpuTerminal: result\.gpuTerminal === true \|\| replayed\.result\?\.reason === "royal-capture"/);
+  assert.match(cpuWorker, /resultReason\?: "royal-capture" \| "threefold-repetition" \| "stalemate" \| null/);
 });
 
 test("bot move choice logging includes full principal variation plans", async () => {
@@ -100,15 +107,18 @@ test("bot move choice logging includes full principal variation plans", async ()
   assert.match(worker, /principalVariation: candidate\.principalVariation/);
 });
 
-test("post-match bot review opens plans from matching side-to-move boards", async () => {
+test("post-match bot review opens principal variation suffixes from clicked boards", async () => {
   const main = await readFile(path.join(webRoot, "src/main.ts"), "utf8");
 
-  assert.match(main, /function botReviewDecisionForBoard\(position: Position, snapshot: GameSnapshot\): BotDecisionRecord \| null/);
-  assert.match(main, /decision\.botColor !== clickedBoard\.sideToMove/);
+  assert.match(main, /function botReviewPlanForBoard\(position: Position, snapshot: GameSnapshot\): BotReviewPlanMatch \| null/);
+  assert.match(main, /for \(let turnIndex = 0; turnIndex < decision\.principalVariation\.length; turnIndex \+= 1\)/);
+  assert.match(main, /for \(let moveIndex = 0; moveIndex < turn\.length; moveIndex \+= 1\)/);
   assert.match(main, /boardSnapshotKey\(decisionBoard\) === boardSnapshotKey\(clickedBoard\)/);
+  assert.match(main, /skipTurns: turnIndex/);
+  assert.match(main, /skipMovesInFirstTurn: moveIndex/);
   assert.match(main, /const reviewSnapshot = botReviewProjection\?\.finalGame \?\? game/);
-  assert.match(main, /const baseSnapshot = cloneGame\(decision\.game\)/);
-  assert.match(main, /buildBotReviewPlan\(decision, baseSnapshot\)/);
+  assert.match(main, /const baseSnapshot = cloneGame\(match\.baseSnapshot\)/);
+  assert.match(main, /buildBotReviewPlan\(match\.decision, baseSnapshot, match\.skipTurns, match\.skipMovesInFirstTurn\)/);
   assert.doesNotMatch(main, /selectedTurnClicked/);
   assert.doesNotMatch(main, /applyBotReviewTurn/);
 });

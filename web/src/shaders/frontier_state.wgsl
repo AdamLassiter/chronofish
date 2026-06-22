@@ -52,6 +52,7 @@ const CANDIDATE_MOVE: u32 = 8u;
 const CANDIDATE_DELTA_COUNT: u32 = 16u;
 const CANDIDATE_CARRY: u32 = 19u;
 const CANDIDATE_NODE_ID: u32 = 20u;
+const CANDIDATE_POLICY_PRIOR: u32 = 21u;
 
 const BOARD_STRIDE: u32 = 78u;
 const BOARD_TIMELINE: u32 = 0u;
@@ -143,7 +144,8 @@ fn materialize_selected(@builtin(global_invocation_id) id: vec3<u32>) {
 
   next_states[output_base + HEADER_PARENT] = i32(parent_index);
   next_states[output_base + HEADER_ROOT] = candidates[candidate_base + CANDIDATE_ROOT];
-  next_states[output_base + HEADER_SCORE] = candidates[candidate_base + CANDIDATE_SCORE];
+  next_states[output_base + HEADER_SCORE] =
+    candidates[candidate_base + CANDIDATE_SCORE] - candidates[candidate_base + CANDIDATE_POLICY_PRIOR];
   next_states[output_base + HEADER_LAST_NEURAL] = candidates[candidate_base + CANDIDATE_LAST_NEURAL];
   next_states[output_base + HEADER_HASH_LOW] = candidates[candidate_base + CANDIDATE_HASH_LOW];
   next_states[output_base + HEADER_HASH_HIGH] = candidates[candidate_base + CANDIDATE_HASH_HIGH];

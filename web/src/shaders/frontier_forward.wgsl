@@ -29,7 +29,7 @@ fn forward_layer_masked(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn forward_output_masked(@builtin(global_invocation_id) id: vec3<u32>) {
+fn forward_output_masked_linear(@builtin(global_invocation_id) id: vec3<u32>) {
   let sample = id.x;
   if (sample >= layer_params.sample_count || active_states[sample] == 0u) {
     return;
@@ -41,4 +41,19 @@ fn forward_output_masked(@builtin(global_invocation_id) id: vec3<u32>) {
     sum = sum + input_values[input_base + input_index] * weights[input_index];
   }
   output_values[sample] = sum;
+}
+
+@compute @workgroup_size(64)
+fn forward_output_masked(@builtin(global_invocation_id) id: vec3<u32>) {
+  let sample = id.x;
+  if (sample >= layer_params.sample_count || active_states[sample] == 0u) {
+    return;
+  }
+
+  var sum = weights[layer_params.input_size];
+  let input_base = sample * layer_params.input_size;
+  for (var input_index = 0u; input_index < layer_params.input_size; input_index = input_index + 1u) {
+    sum = sum + input_values[input_base + input_index] * weights[input_index];
+  }
+  output_values[sample] = tanh(sum);
 }

@@ -291,13 +291,8 @@ impl Game {
                     values[neural_feature_index(board_index, 28, square)] = owner_sign;
                     values[neural_feature_index(board_index, 29, square)] = time_distance;
                     values[neural_feature_index(board_index, 30, square)] = 1.0;
-                    values[neural_feature_index(board_index, 31, square)] = if latest
-                        && (self.is_in_check(color) || self.is_in_check(color.opposite()))
-                    {
-                        1.0
-                    } else {
-                        0.0
-                    };
+                    // Reserved until GPU frontier states carry authoritative check metadata.
+                    values[neural_feature_index(board_index, 31, square)] = 0.0;
                 }
             }
         }

@@ -41,6 +41,7 @@ pub(crate) struct AiSearchResult {
     pub(crate) nodes: usize,
     pub(crate) status: &'static str,
     pub(crate) principal_variation: Vec<Vec<MoveStep>>,
+    pub(crate) terminal_royal_capture: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]

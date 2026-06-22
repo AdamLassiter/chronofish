@@ -7,6 +7,9 @@
     "build": "node scripts/build.mjs",
     "check": "node scripts/check.mjs && npm run typecheck",
     "gpu:smoke": "node scripts/gpu-frontier-smoke.mjs",
+    "model:initialize": "node scripts/initialize-value-model.mjs",
+    "training:benchmark": "node scripts/gpu-frontier-smoke.mjs --training-benchmark gpu",
+    "training:benchmark:cpu": "node scripts/gpu-frontier-smoke.mjs --training-benchmark cpu",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test \"tests/**/*.test.js\""

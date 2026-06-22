@@ -20,7 +20,9 @@ fn output_delta(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let dataset_sample = batch_indices[sample];
   let normalization = f32(params.batch_count) / max(params.total_weight, 0.000001);
-  deltas[sample] = (predictions[sample] - labels[dataset_sample])
+  let prediction = predictions[sample];
+  deltas[sample] = (prediction - labels[dataset_sample])
+    * (1.0 - prediction * prediction)
     * label_weights[dataset_sample]
     * normalization;
 }

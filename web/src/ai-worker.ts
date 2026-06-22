@@ -82,6 +82,8 @@ interface SearchChoice {
   gpuSearch?: string | undefined;
 }
 
+type SearchResultReason = "royal-capture" | "threefold-repetition" | "stalemate";
+
 interface SearchResult {
   status: string;
   moves: Move[];
@@ -90,6 +92,9 @@ interface SearchResult {
   principalVariation?: Move[][] | undefined;
   depth?: number | undefined;
   nodes?: number | undefined;
+  terminal?: boolean | undefined;
+  winner?: Color | undefined;
+  resultReason?: SearchResultReason | undefined;
   gpu?: boolean | undefined;
   gpuMode?: GpuMode | undefined;
   gpuTerminal?: boolean | undefined;
@@ -132,7 +137,8 @@ interface LegalTargetSelection {
 
 interface WorkerRequest {
   id: number | string;
-  type?: "search" | "legalTargets" | "applyMove" | "submitTurn" | "debugLoseDevice";
+  type?: "search" | "legalTargets" | "applyMove" | "submitTurn" | "debugLoseDevice" | "setModel";
+  modelBytes?: ArrayBuffer;
   game?: GameSnapshot;
   position?: Position;
   move?: Move;
@@ -157,6 +163,7 @@ const pipelineCache = new Map<string, GPUComputePipeline>();
 let frontierRuntime: { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } | null = null;
 let validationEnginePromise: Promise<ChronofishEngine> | null = null;
 let activeSearchGeneration = 0;
+let frontierModelOverride: ArrayBuffer | null = null;
 
 async function tryGpuSearch({
   depth,
@@ -279,10 +286,11 @@ async function tryGpuResidentFrontierSearch(
     device,
     nodes,
     boardCount,
-    "gpu-v1-cfnn-v1",
+    "gpu-v1-cfnn-v3-policy-head",
     maxCycles * 2
   );
   const runtime = frontierRuntimeFor(device, tuning);
+  runtime.neural.beginSearch();
   const buffers = runtime.pipeline.pool.createSearchBuffers();
   const root = encodeFrontierRoot(snapshot, tuning.maxBoards);
   const startedAt = performance.now();
@@ -305,13 +313,32 @@ async function tryGpuResidentFrontierSearch(
       const perParentLimit = Math.max(2, Math.min(16, Math.ceil(tuning.frontierWidth / 8)));
       const encoder = device.createCommandEncoder();
       const validationScope = pushGpuValidationScope(device);
-      await runtime.pipeline.encodeExpansionCycle(encoder, buffers, {
-        rootColor,
-        targetDepth: requestedDepth,
-        cycleIndex: cycle,
-        stateCount: activeStateLimit,
-        perParentLimit
-      });
+      await runtime.pipeline.encodeExpansionCycle(
+        encoder,
+        buffers,
+        {
+          rootColor,
+          targetDepth: requestedDepth,
+          cycleIndex: cycle,
+          stateCount: activeStateLimit,
+          perParentLimit
+        },
+        async (policyEncoder, policyBuffers, candidateCapacity) => {
+          modelUsed = await runtime.neural.encodePolicyPrior(
+            policyEncoder,
+            policyBuffers.states,
+            policyBuffers.candidates,
+            candidateCapacity,
+            GPU_CANDIDATE_STRIDE,
+            activeStateLimit,
+            frontierStateStride(tuning.maxBoards),
+            GPU_FRONTIER_BOARD_OFFSET,
+            tuning.maxBoards,
+            tuning.neuralBatchSize,
+            requestedDepth
+          ) || modelUsed;
+        }
+      );
       activeStateLimit = Math.min(tuning.frontierWidth, activeStateLimit * perParentLimit);
       if (!disableNeural) {
         modelUsed = await runtime.neural.encode(
@@ -325,7 +352,7 @@ async function tryGpuResidentFrontierSearch(
           rootColor,
           tuning.neuralBatchSize,
           requestedDepth
-        );
+        ) || modelUsed;
       }
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
@@ -333,6 +360,7 @@ async function tryGpuResidentFrontierSearch(
       runtime.pipeline.releaseCycleTemporaries();
       runtime.neural.releaseTemporaries();
       runtime.pipeline.swapFrontiers(buffers);
+      runtime.neural.advancePolicyFeatures();
       cyclesCompleted += 1;
     }
 
@@ -402,7 +430,7 @@ function frontierRuntimeFor(device: GPUDevice, tuning: FrontierTuning): { device
   frontierRuntime = {
     device,
     pipeline: new FrontierGpuPipeline(device, tuning),
-    neural: new FrontierNeuralEvaluator(device)
+    neural: new FrontierNeuralEvaluator(device, frontierModelOverride)
   };
   return frontierRuntime;
 }
@@ -557,9 +585,18 @@ async function validateSearchResultBeforePost(snapshot: GpuSnapshot, result: Sea
       return null;
     }
     if (engine.chronofish_submit_turn()) {
-      return index === result.moves.length - 1
-        ? { ...result, authoritativeReplay: true }
-        : null;
+      if (index !== result.moves.length - 1) {
+        return null;
+      }
+      const replayed = JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json())) as GameSnapshot;
+      return {
+        ...result,
+        authoritativeReplay: true,
+        terminal: replayed.result?.terminal === true,
+        winner: replayed.result?.winner ?? undefined,
+        resultReason: replayed.result?.reason,
+        gpuTerminal: result.gpuTerminal === true || replayed.result?.reason === "royal-capture"
+      };
     }
   }
   return null;
@@ -1686,11 +1723,23 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     temperature = 0,
     randomSeed = 0,
     gpuMode = "hybrid",
-    disableNeural = false
+    disableNeural = false,
+    modelBytes
   } = event.data;
   const searchGeneration = type === "search" ? ++activeSearchGeneration : activeSearchGeneration;
 
   try {
+    if (type === "setModel") {
+      if (!modelBytes) {
+        throw new Error("GPU model override request is missing model bytes.");
+      }
+      frontierModelOverride = modelBytes;
+      frontierRuntime?.pipeline.destroy();
+      frontierRuntime?.neural.destroy();
+      frontierRuntime = null;
+      self.postMessage({ id, ok: true, modelConfigured: true });
+      return;
+    }
     if (type === "debugLoseDevice") {
       const hadDevice = await destroyCachedGpuDeviceForSmoke();
       self.postMessage({ id, ok: true, lostDevice: hadDevice });

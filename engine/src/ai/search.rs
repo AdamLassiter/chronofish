@@ -147,6 +147,7 @@ impl Game {
         // capture/block already saves the royal piece.
         if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
             let score = plan.score_hint;
+            let terminal_royal_capture = self.turn_plan_ends_in_royal_capture(&plan.moves);
             let result = AiSearchResult {
                 principal_variation: vec![plan.moves.clone()],
                 moves: plan.moves,
@@ -154,6 +155,7 @@ impl Game {
                 depth: min_completed_depth,
                 nodes: context.nodes,
                 status: "ok",
+                terminal_royal_capture,
             };
             let sample = label.map(|label| SearchPerfSample {
                 label,
@@ -174,6 +176,7 @@ impl Game {
             nodes: 0,
             status: "noLegalTurn",
             principal_variation: Vec::new(),
+            terminal_royal_capture: false,
         };
 
         // Iterative deepening preserves a usable shallower answer if the node
@@ -202,6 +205,7 @@ impl Game {
             previous_score = score;
             best = AiSearchResult {
                 principal_variation,
+                terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
                 moves: plan.moves,
                 score,
                 depth: current_depth,
@@ -227,6 +231,7 @@ impl Game {
             {
                 best = AiSearchResult {
                     principal_variation: vec![plan.moves.clone()],
+                    terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
                     moves: plan.moves,
                     score: plan.score_hint,
                     depth: 1,
@@ -291,6 +296,7 @@ impl Game {
         if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
             return AiSearchResult {
                 principal_variation: vec![plan.moves.clone()],
+                terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
                 moves: plan.moves,
                 score: plan.score_hint,
                 depth: 1,
@@ -309,6 +315,7 @@ impl Game {
             nodes: 0,
             status: "noLegalTurn",
             principal_variation: Vec::new(),
+            terminal_royal_capture: false,
         };
         let mut previous_score = 0;
         for current_depth in 1..=depth {
@@ -328,6 +335,7 @@ impl Game {
             previous_score = score;
             best = AiSearchResult {
                 principal_variation,
+                terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
                 moves: plan.moves,
                 score,
                 depth: current_depth,
@@ -1229,6 +1237,22 @@ impl Game {
         self.staged_notation.clear();
         self.staged_royal_capture_by = royal_capture_by;
         true
+    }
+
+    fn turn_plan_ends_in_royal_capture(&self, moves: &[MoveStep]) -> bool {
+        if moves.is_empty() {
+            return false;
+        }
+        let mut replay = self.clone();
+        for movement in moves {
+            if replay.apply_move(movement.from, movement.to) == 0 {
+                return false;
+            }
+        }
+        replay.submit_turn() == 1
+            && replay
+                .result
+                .is_some_and(|result| result.reason == GameResultReason::RoyalCapture)
     }
 
     pub(crate) fn apply_move_for_search(&mut self, from: Position, to: Position) -> bool {
