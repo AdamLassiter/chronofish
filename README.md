@@ -250,14 +250,21 @@ Run native heuristic tuning with:
 ./train-cpu --max-seconds 3600
 ```
 
-The CPU trainer is native-only and lives under `engine/src/training/`. It mutates
-the evaluation weights, scores candidates in short self-play matches, verifies a
-candidate against the committed baseline, and only promotes it when paired match
-evidence clears the configured confidence thresholds.
+The CPU trainer is native-only and lives under `engine/src/training/`. By
+default it runs a coordinate sweep over selected evaluation parameters, scores
+linear candidate values in paired self-play matches, commits each local winner
+to the in-memory pass result, shrinks the range, and repeats. The accumulated
+sweep winner is still verified against the committed baseline before promotion.
 
-CPU evolution uses mostly sparse mutations so match outcomes can identify useful
-parameter directions, with occasional broad mutations to retain global
-exploration. The browser CPU trainer uses the same search policy.
+The default sweep trains the `classic-basic` parameter group. Use
+`--parameter-groups classic-basic`, `--parameter-groups alternate-basic`,
+`--parameter-groups classic-basic,intermediate`, `--parameter-groups advanced`,
+or `--parameter-groups all` to change the field set. `--sweep-points N`
+controls the candidate grid per parameter, `--sweep-passes N` caps passes
+(default 2), `--sweep-range LOW:HIGH` controls the initial multiplicative range
+for non-zero values, and `--sweep-shrink F` narrows the range after each pass.
+Royal objective weights stay fixed. The previous sparse-mutation genetic
+trainer remains available with `--strategy genetic`.
 
 Candidate scoring and seed comparisons use Rayon parallel iterators, so training
 uses available CPU cores without launching extra trainer processes. Fitness uses
@@ -285,8 +292,8 @@ For a short smoke run:
 
 ```sh
 cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
-  --generations 1 --population 4 --training-time-ms 100 --nodes 20 \
-  --min-pairs 4 --max-pairs 8 --max-seconds 20
+  --sweep-passes 1 --sweep-points 3 --training-time-ms 100 --nodes 20 \
+  --min-pairs 2 --max-pairs 4 --max-seconds 20 --verify true
 ```
 
 Alpha-beta is the default training search. Select the alternative beam strategy
@@ -320,12 +327,13 @@ including minimum depth, and is served via `/ai/gpu-effort.json`.
 | `expert` | Highest included browser bot effort. |
 
 `engine/models/cpu-v1/training.json` owns search time/nodes, candidate
-population and finalists, parallel pair batch, opponent variant counts, rounds
-per variant, hall-of-fame depth, league composition, promotion pair limits,
-draw threshold, match bounds, and candidate-stagnation limit. The `candidates`
-field controls the population scored each generation. A `null` candidate count,
-finalist count, or pair batch selects the host-derived automatic value. CLI
-flags remain available as later overrides; for example,
+population and finalists for the genetic strategy, parallel pair batch, opponent
+variant counts, rounds per variant, hall-of-fame depth, league composition,
+promotion pair limits, draw threshold, match bounds, and candidate-stagnation
+limit. The `candidates` field controls the population scored by
+`--strategy genetic`. A `null` candidate count, finalist count, or pair batch
+selects the host-derived automatic value. CLI flags remain available as later
+overrides; for example,
 `--rounds-per-variant 3` plays three paired rounds against every selected
 baseline, hall-of-fame, or mutated opponent variant.
 
@@ -337,22 +345,41 @@ feature. Some fields are piece values, while others scale positional, tactical,
 or multiverse-specific terms. The tables below use Rust's `snake_case` field
 names; the JSON file uses their Serde `camelCase` equivalents.
 
-### Basic Parameters
+### Classic Basic Parameters
+
+Classic Basic includes the classic chess piece material values below plus every
+non-material heuristic listed under Shared Basic.
 
 | Heuristic | Meaning |
 | --- | --- |
 | `king` | Material value for a royal king. Kept extremely high so king capture dominates normal material. |
-| `common_king` | Material value for a non-royal common king variant. |
 | `queen` | Material value for a queen. |
-| `royal_queen` | Material value for a royal queen variant. |
-| `princess` | Material value for the rook+bishop style princess variant. |
 | `rook` | Material value for a rook. |
 | `bishop` | Material value for a bishop. |
-| `unicorn` | Material value for a three-axis diagonal slider. |
-| `dragon` | Material value for a four-axis diagonal slider. |
 | `knight` | Material value for a knight. |
 | `pawn` | Material value for a pawn. |
+
+### Alternate Basic Parameters
+
+Alternate Basic includes the alternate chess piece material values below plus
+every non-material heuristic listed under Shared Basic.
+
+| Heuristic | Meaning |
+| --- | --- |
+| `common_king` | Material value for a non-royal common king variant. |
+| `royal_queen` | Material value for a royal queen variant. |
+| `princess` | Material value for the rook+bishop style princess variant. |
+| `unicorn` | Material value for a three-axis diagonal slider. |
+| `dragon` | Material value for a four-axis diagonal slider. |
 | `brawn` | Material value for the brawn pawn variant. |
+
+### Shared Basic Parameters
+
+Shared Basic heuristics are included when training either `classic-basic` or
+`alternate-basic`.
+
+| Heuristic | Meaning |
+| --- | --- |
 | `check_penalty` | Penalty for own check and bonus for checking the opponent. |
 | `active_timeline` | Value assigned to owning an active timeline. |
 | `inactive_timeline` | Value assigned through timeline ownership when a timeline is inactive. |

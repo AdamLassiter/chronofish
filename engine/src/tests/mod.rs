@@ -25,6 +25,7 @@ fn snapshot(time: i32, side_to_move: Color, board: [[Option<Piece>; 8]; 8]) -> B
 }
 
 mod ai_search;
+mod evaluation_neural_rules;
 mod evaluation_training;
 mod rules_foundation;
 mod rules_special_pieces;

@@ -5,7 +5,10 @@ pub fn run_training_cli() {
 
     if config.train_cycle {
         // The top-level ./train script loops this mode until interrupted.
-        run_training_cycle(&config);
+        match config.training_strategy {
+            CpuTrainingStrategy::Sweep => run_sweep_training_cycle(&config),
+            CpuTrainingStrategy::Genetic => run_training_cycle(&config),
+        }
         return;
     }
 
@@ -24,7 +27,10 @@ pub fn run_training_cli() {
         return;
     }
 
-    let weights = train_weights(&config);
+    let weights = match config.training_strategy {
+        CpuTrainingStrategy::Sweep => train_weights_sweep(&config),
+        CpuTrainingStrategy::Genetic => train_weights(&config),
+    };
     let json = weights.to_json();
     if let Some(path) = &config.out {
         std::fs::write(path, &json).expect("failed to write training output");
@@ -49,6 +55,7 @@ impl TrainerConfig {
             score: None,
             score_default: false,
             train_cycle: false,
+            training_strategy: CpuTrainingStrategy::Sweep,
             compare_seeds: default_compare_seeds(seed),
             min_wins: 0,
             min_total_delta: 0,
@@ -73,6 +80,12 @@ impl TrainerConfig {
             max_generations_without_candidate: training.max_generations_without_candidate,
             finalist_count: training.finalists.unwrap_or_else(auto_finalists),
             search_strategy: TrainingSearchStrategy::AlphaBeta,
+            sweep_parameter_groups: vec![SweepParameterGroup::ClassicBasic],
+            sweep_points: 5,
+            sweep_passes: Some(2),
+            sweep_range_low: 1.0 / 3.0,
+            sweep_range_high: 5.0 / 3.0,
+            sweep_shrink: 0.5,
         };
         let mut index = 0;
         let mut compare_seeds_overridden = false;
@@ -89,6 +102,41 @@ impl TrainerConfig {
                 }
                 "--population" => {
                     config.population = parse_arg(value, config.population);
+                    index += 2;
+                }
+                "--strategy" | "--training-strategy" => {
+                    if let Some(strategy) = value {
+                        config.training_strategy = CpuTrainingStrategy::parse(&strategy)
+                            .unwrap_or_else(|message| panic!("{message}"));
+                    }
+                    index += 2;
+                }
+                "--parameter-groups" | "--sweep-groups" => {
+                    if let Some(groups) = value {
+                        config.sweep_parameter_groups = SweepParameterGroup::parse_list(&groups)
+                            .unwrap_or_else(|message| panic!("{message}"));
+                    }
+                    index += 2;
+                }
+                "--sweep-points" => {
+                    config.sweep_points = parse_arg(value, config.sweep_points);
+                    index += 2;
+                }
+                "--sweep-passes" => {
+                    config.sweep_passes = value.and_then(|raw| raw.parse().ok());
+                    index += 2;
+                }
+                "--sweep-range" => {
+                    if let Some(range) = value {
+                        let (low, high) =
+                            parse_sweep_range(&range).unwrap_or_else(|message| panic!("{message}"));
+                        config.sweep_range_low = low;
+                        config.sweep_range_high = high;
+                    }
+                    index += 2;
+                }
+                "--sweep-shrink" => {
+                    config.sweep_shrink = parse_arg(value, config.sweep_shrink);
                     index += 2;
                 }
                 "--config" | "--effort" => {
@@ -252,6 +300,12 @@ impl TrainerConfig {
         config.max_match_plies = config.max_match_plies.max(1);
         config.max_generations_without_candidate = config.max_generations_without_candidate.max(1);
         config.finalist_count = config.finalist_count.clamp(2, config.population);
+        config.sweep_points = config.sweep_points.max(3);
+        if config.sweep_range_low <= 0.0 || config.sweep_range_high <= config.sweep_range_low {
+            config.sweep_range_low = 1.0 / 3.0;
+            config.sweep_range_high = 5.0 / 3.0;
+        }
+        config.sweep_shrink = config.sweep_shrink.clamp(0.01, 0.99);
         if !compare_seeds_overridden {
             config.compare_seeds = default_compare_seeds(config.seed);
         }
@@ -279,4 +333,20 @@ impl TrainerConfig {
             .min(self.training_time_ms);
         config
     }
+}
+
+fn parse_sweep_range(value: &str) -> Result<(f64, f64), String> {
+    let Some((low, high)) = value.split_once(':') else {
+        return Err("sweep range must use LOW:HIGH".to_string());
+    };
+    let low = low
+        .parse::<f64>()
+        .map_err(|_| format!("invalid sweep range low value `{low}`"))?;
+    let high = high
+        .parse::<f64>()
+        .map_err(|_| format!("invalid sweep range high value `{high}`"))?;
+    if low <= 0.0 || high <= low {
+        return Err("sweep range must satisfy 0 < LOW < HIGH".to_string());
+    }
+    Ok((low, high))
 }

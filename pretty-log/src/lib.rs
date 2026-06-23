@@ -31,8 +31,8 @@ enum TransientStream {
 
 #[derive(Default)]
 struct TransientState {
-    stdout: bool,
-    stderr: bool,
+    stdout_lines: usize,
+    stderr_lines: usize,
 }
 
 static TRANSIENT_ACTIVE: OnceLock<Mutex<TransientState>> = OnceLock::new();
@@ -130,19 +130,23 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     out
 }
 
-fn stream_active(active: &mut TransientState, stream: TransientStream) -> &mut bool {
+fn stream_active_lines(active: &mut TransientState, stream: TransientStream) -> &mut usize {
     match stream {
-        TransientStream::Stdout => &mut active.stdout,
-        TransientStream::Stderr => &mut active.stderr,
+        TransientStream::Stdout => &mut active.stdout_lines,
+        TransientStream::Stderr => &mut active.stderr_lines,
     }
 }
 
 fn clear_stream(active: &mut TransientState, stream: TransientStream) {
-    let active_for_stream = stream_active(active, stream);
-    if *active_for_stream && stream_is_terminal(stream) {
-        write_stream(stream, "\r\x1b[2K\r");
+    let active_for_stream = stream_active_lines(active, stream);
+    if *active_for_stream > 0 && stream_is_terminal(stream) {
+        write_stream(stream, "\r\x1b[2K");
+        for _ in 1..*active_for_stream {
+            write_stream(stream, "\x1b[1A\r\x1b[2K");
+        }
+        write_stream(stream, "\r");
     }
-    *active_for_stream = false;
+    *active_for_stream = 0;
 }
 
 pub fn clear_transient() {
@@ -176,7 +180,80 @@ pub fn transient(msg: impl AsRef<str>) {
             stream_style(stream, RESET)
         ),
     );
-    *stream_active(&mut active, stream) = true;
+    *stream_active_lines(&mut active, stream) = 1;
+}
+
+pub struct ProgressRow<'a> {
+    pub label: &'a str,
+    pub current: usize,
+    pub total: usize,
+    pub rate: f64,
+    pub detail: &'a str,
+}
+
+pub fn progress(rows: &[ProgressRow<'_>]) {
+    let Some(stream) = preferred_transient_stream() else {
+        return;
+    };
+    let Ok(mut active) = transient_state().lock() else {
+        return;
+    };
+    clear_stream(&mut active, stream);
+    if rows.is_empty() {
+        return;
+    }
+
+    let width = transient_width(stream);
+    let rendered: Vec<String> = rows
+        .iter()
+        .map(|row| render_progress_row(stream, width, row))
+        .collect();
+    write_stream(stream, &rendered.join("\n"));
+    *stream_active_lines(&mut active, stream) = rendered.len();
+}
+
+fn render_progress_row(stream: TransientStream, width: usize, row: &ProgressRow<'_>) -> String {
+    let percent = if row.total == 0 {
+        0.0
+    } else {
+        (row.current as f64 / row.total.max(1) as f64 * 100.0).clamp(0.0, 100.0)
+    };
+    let prefix_width = 18usize;
+    let fixed_suffix = format!(
+        " {:>5.1}% {}/{} {:>5.1}/s ",
+        percent, row.current, row.total, row.rate
+    );
+    let bar_width = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(char_len(&fixed_suffix))
+        .saturating_sub(5)
+        .clamp(8, 32);
+    let detail_width = width
+        .saturating_sub(prefix_width)
+        .saturating_sub(bar_width)
+        .saturating_sub(char_len(&fixed_suffix))
+        .saturating_sub(5);
+    let detail = truncate_chars(row.detail, detail_width);
+    let suffix = format!("{fixed_suffix}{detail}");
+    let filled = if row.total == 0 {
+        0
+    } else {
+        row.current.saturating_mul(bar_width) / row.total.max(1)
+    }
+    .min(bar_width);
+    let bar = format!("{}{}", "#".repeat(filled), "-".repeat(bar_width - filled));
+    let label = truncate_chars(row.label, prefix_width);
+    format!(
+        "{}{}{} {:<prefix_width$} [{}{}{}]{}",
+        stream_style(stream, CYAN),
+        "·",
+        stream_style(stream, RESET),
+        label,
+        stream_style(stream, GREEN),
+        bar,
+        stream_style(stream, RESET),
+        suffix,
+    )
 }
 
 fn render_spinner_frame(stream: TransientStream, frame: &str, label: &str) {
@@ -315,7 +392,7 @@ impl Spinner {
                     let frame = frames[i % frames.len()];
                     let label = truncate_spinner_label(stream, frame, &label_for_thread);
                     render_spinner_frame(stream, frame, &label);
-                    *stream_active(&mut active, stream) = true;
+                    *stream_active_lines(&mut active, stream) = 1;
                     drop(active);
                     i += 1;
                     thread::sleep(Duration::from_millis(90));

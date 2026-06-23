@@ -1,7 +1,14 @@
 use super::*;
 use crate::{
     ai::effort::ai_effort_config,
-    training::{default_hall_of_fame_path, train_weights, TrainerConfig, TrainingSearchStrategy},
+    training::{
+        default_hall_of_fame_path,
+        train_weights,
+        CpuTrainingStrategy,
+        SweepParameterGroup,
+        TrainerConfig,
+        TrainingSearchStrategy,
+    },
 };
 
 #[test]
@@ -1045,6 +1052,7 @@ fn training_mutation_is_seeded() {
         score: None,
         score_default: false,
         train_cycle: false,
+        training_strategy: CpuTrainingStrategy::Sweep,
         compare_seeds: vec![101, 202],
         min_wins: 1,
         min_total_delta: 1,
@@ -1067,6 +1075,12 @@ fn training_mutation_is_seeded() {
         max_generations_without_candidate: 1,
         finalist_count: 2,
         search_strategy: TrainingSearchStrategy::AlphaBeta,
+        sweep_parameter_groups: vec![SweepParameterGroup::ClassicBasic],
+        sweep_points: 5,
+        sweep_passes: Some(1),
+        sweep_range_low: 1.0 / 3.0,
+        sweep_range_high: 5.0 / 3.0,
+        sweep_shrink: 0.5,
     };
 
     assert_eq!(
