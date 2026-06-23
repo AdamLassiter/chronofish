@@ -1,29 +1,16 @@
 import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SHADER, FORWARD_OUTPUT_SHADER, OUTPUT_DELTA_SHADER, HIDDEN_DELTA_SHADER, HIDDEN3_DELTA_SHADER, APPLY_LAYER_SHADER, APPLY_INDEXED_LAYER_SHADER, APPLY_OUTPUT_SHADER, POLICY_SHADER, POLICY_LOSS_SHADER, REDUCE_LOSS_SHADER } from "./training-shaders.js";
 import { POLICY_BUCKETS } from "./training-policy.js";
 import { trainingLabelPriority } from "./training-replay.js";
+import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, OPTIMIZER_MOMENTUM, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, TILED_TRAINING_MIN_BATCH, VALUE_EPOCHS_PER_SUBMIT, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
+import { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
 import type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
-import type { Color } from "./types.js";
+import type { SparseProjectionFeatures, TrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
+export { VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
+export { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, formatShaderErrors, getGpuDevice, requestHighLimitDevice } from "./training-gpu-device.js";
 export { byteArraysEqual, compactModelIsFinite, decodeCompactModel, encodeCompactModel, writeAscii, writeF32, writeU32 } from "./training-gpu-model.js";
 export type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
-
-const PROJECTION_SIZE = 2048;
-const PROJECTION_SEED = 2166136261;
-export const VALUE_SCORE_SCALE = 20_000;
-const HIDDEN_LAYERS = [1024, 512, 256];
-const VALUE_EPOCHS_PER_SUBMIT = 64;
-const POLICY_STEPS_PER_SUBMIT = 64;
-const TILED_TRAINING_MIN_BATCH = 16;
-const CPU_PREDICTION_MAX_BATCH = 4;
-const MIN_HIDDEN_TRAINING_POSITIONS = 256;
-const CPU_HEAD_TRAINING_MAX_POSITIONS = 32;
-const OPTIMIZER_MOMENTUM = 0.9;
-const MIN_POLICY_WORKING_SET_FRACTION = 0.25;
-const PROJECTION_CHUNK_SIZE = 256;
-const PROJECTION_TEMPORARY_BUDGET = 128 * 1024 * 1024;
-let cachedGpuAdapter: GPUAdapter | null = null;
-let cachedGpuDevice: GPUDevice | null = null;
-const pipelineCache = new Map<string, GPUComputePipeline>();
+export type { SparseProjectionFeatures, TrainingConfig, TrainingLabelKind, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
 
 interface GpuBufferUsageConstants {
   MAP_READ: number;
@@ -47,39 +34,6 @@ const gpuBufferUsage: GpuBufferUsageConstants = (globalThis as unknown as { GPUB
 const gpuMapMode: GpuMapModeConstants = (globalThis as unknown as { GPUMapMode?: GpuMapModeConstants }).GPUMapMode ?? {
   READ: 1
 };
-
-export type TrainingLabelKind = "search" | "outcome" | "distilled" | "unknown" | string;
-
-export interface TrainingSample {
-  sideToMove?: Color;
-  boardCount?: number;
-  positionKey?: string;
-  features: number[] | Float32Array;
-  label: number;
-  labelKind?: TrainingLabelKind;
-  labelWeight?: number;
-  baseLabelWeight?: number;
-  labelMass?: number;
-  observationCount?: number;
-  policy?: number | null;
-  pseudo?: boolean;
-}
-
-export interface TrainingMetrics {
-  phases?: Record<string, number>;
-  [key: string]: unknown;
-}
-
-export interface TrainingConfig {
-  learningRate: number;
-  epochs: number;
-  batchSize: number;
-  validationSplit?: number;
-  validationInterval?: number;
-  patience: number;
-  weightDecay: number;
-  metrics?: TrainingMetrics | null;
-}
 
 interface TrainedValueWeights {
   featureCount: number | undefined;
@@ -108,13 +62,6 @@ interface ValidationSplit {
   trainIndices: number[];
   validationIndices: number[];
   seed: number;
-}
-
-export interface SparseProjectionFeatures {
-  offsets: Uint32Array;
-  indices: Uint32Array;
-  values: Float32Array;
-  byteLength: number;
 }
 
 interface PredictionModel {
@@ -2229,83 +2176,4 @@ export function initialHiddenWeights(inputSize: number, hiddenLayers: number[]):
     previous = layerSize;
   }
   return new Float32Array(weights);
-}
-
-export async function getGpuDevice(): Promise<GPUDevice | null> {
-  if (!navigator.gpu) {
-    return null;
-  }
-  if (cachedGpuDevice) {
-    return cachedGpuDevice;
-  }
-  cachedGpuAdapter = cachedGpuAdapter ?? await navigator.gpu.requestAdapter();
-  if (!cachedGpuAdapter) {
-    return null;
-  }
-  cachedGpuDevice = await requestHighLimitDevice(cachedGpuAdapter);
-  cachedGpuDevice.lost?.then(() => {
-    cachedGpuDevice = null;
-    pipelineCache.clear();
-  });
-  return cachedGpuDevice;
-}
-
-export async function requestHighLimitDevice(adapter: GPUAdapter): Promise<GPUDevice> {
-  const requiredLimits: Record<string, number> = {};
-  for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"] as const) {
-    const value = adapter.limits[key];
-    if (Number.isFinite(value) && value > 0) {
-      requiredLimits[key] = value;
-    }
-  }
-  if (Object.keys(requiredLimits).length === 0) {
-    return adapter.requestDevice();
-  }
-  try {
-    return await adapter.requestDevice({ requiredLimits });
-  } catch {
-    return adapter.requestDevice();
-  }
-}
-
-export function denseKernelEntryPoint(entryPoint: string, sampleCount: number): string {
-  return sampleCount >= TILED_TRAINING_MIN_BATCH ? entryPoint : `${entryPoint}_naive`;
-}
-
-export async function createComputePipelineChecked(device: GPUDevice, label: string, code: string, entryPoint: string): Promise<GPUComputePipeline> {
-  const cacheKey = `${label}:${entryPoint}`;
-  const cached = pipelineCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const module = device.createShaderModule({ label: `${label}.module`, code });
-  if (module.getCompilationInfo) {
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message: GPUCompilationMessage) => message.type === "error");
-    if (errors.length > 0) {
-      throw new Error(formatShaderErrors(label, errors));
-    }
-  }
-  const pipeline = device.createComputePipeline({
-    label,
-    layout: "auto",
-    compute: { module, entryPoint }
-  });
-  pipelineCache.set(cacheKey, pipeline);
-  return pipeline;
-}
-
-export function formatShaderErrors(label: string, errors: GPUCompilationMessage[]): string {
-  return `${label} shader compilation failed: ${errors.map((error) =>
-    `line ${error.lineNum ?? "?"}, column ${error.linePos ?? "?"}: ${error.message}`
-  ).join("; ")}`;
-}
-
-export function formatBytes(bytes: number): string {
-  const mib = bytes / (1024 * 1024);
-  return `${mib.toFixed(mib >= 10 ? 0 : 1)} MiB`;
-}
-
-export function align4(value: number): number {
-  return Math.ceil(value / 4) * 4;
 }

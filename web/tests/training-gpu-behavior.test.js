@@ -35,7 +35,8 @@ const {
   encodeNeuralPositionFeatures,
   NEURAL_BOARD_PLANES,
   NEURAL_BOARD_SQUARES,
-  NEURAL_INPUT_SIZE
+  NEURAL_INPUT_SIZE,
+  neuralBoardSelection
 } = await import(modules.trainingEncoding);
 const {
   breedCpuPopulation,
@@ -288,18 +289,54 @@ test("CPU position encoding preserves neural plane layout and perspective", () =
 
   assert.equal(encoded.boardCount, 3);
   assert.equal(encoded.values.length, NEURAL_INPUT_SIZE);
-  assert.equal(encoded.values[plane(0, 22, 63)], 1);
-  assert.equal(encoded.values[plane(0, 24)], 1);
-  assert.equal(encoded.values[plane(0, 27)], 0);
-  assert.equal(encoded.values[plane(0, 28)], 1);
-  assert.equal(encoded.values[plane(0, 29)], 0.125);
-  assert.equal(encoded.values[plane(1, 0, 0)], 1);
-  assert.equal(encoded.values[plane(1, 24)], -1);
-  assert.equal(encoded.values[plane(1, 27)], 1);
-  assert.equal(encoded.values[plane(1, 28)], -1);
+  assert.equal(encoded.values[plane(0, 0, 0)], 1);
+  assert.equal(encoded.values[plane(0, 24)], -1);
+  assert.equal(encoded.values[plane(0, 27)], 1);
+  assert.equal(encoded.values[plane(0, 28)], -1);
+  assert.equal(encoded.values[plane(0, 29)], 0);
+  assert.equal(encoded.values[plane(1, 22, 63)], 1);
+  assert.equal(encoded.values[plane(1, 24)], 1);
+  assert.equal(encoded.values[plane(1, 27)], 0);
+  assert.equal(encoded.values[plane(1, 28)], 1);
+  assert.equal(encoded.values[plane(1, 29)], 0.125);
   assert.equal(encoded.values[plane(2, 14, 27)], 1);
   assert.equal(encoded.values[plane(2, 25)], 0);
   assert.equal(encoded.values[plane(0, 31)], 0);
+});
+
+test("CPU neural board selection prefers canonical structure before raw timeline ids", () => {
+  const quietBoard = board(4, "white", pieceAt(7, 7, "black", "pawn"));
+  const royalBoard = board(4, "white", pieceAt(0, 0, "white", "king"));
+  const game = {
+    turn: "white",
+    presentTime: 4,
+    nextTimelineId: 10,
+    nextBlackTimelineId: -10,
+    checkedRoyals: [],
+    timelines: [
+      {
+        id: -9,
+        row: -1,
+        label: "raw-first",
+        owner: "white",
+        active: true,
+        boards: [quietBoard]
+      },
+      {
+        id: 9,
+        row: 1,
+        label: "structural-first",
+        owner: "white",
+        active: true,
+        boards: [royalBoard]
+      }
+    ]
+  };
+
+  const selected = neuralBoardSelection(game);
+
+  assert.equal(selected[0].timeline.id, 9);
+  assert.equal(selected[1].timeline.id, -9);
 });
 
 test("CFNN v3 preserves position-conditioned policy weights and older versions remain readable", () => {

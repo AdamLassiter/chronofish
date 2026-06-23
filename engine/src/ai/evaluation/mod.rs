@@ -4,6 +4,7 @@ mod core;
 pub(crate) use core::*;
 mod board_control;
 mod extended_multiverse_balance;
+mod extended_multiverse_features;
 mod forcing_pressure;
 mod fork_pressure;
 mod mobility;

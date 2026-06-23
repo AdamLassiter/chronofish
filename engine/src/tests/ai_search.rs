@@ -797,6 +797,94 @@ fn temporal_capture_ordering_accounts_for_attacker_value() {
 }
 
 #[test]
+fn limited_move_generation_caps_equivalent_quiet_queen_time_travel() {
+    let mut game = Game::new();
+    let past = empty_board_with_kings();
+    let mut present = empty_board_with_kings();
+    present[3][3] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Queen,
+    });
+    game.timelines[0].boards = vec![
+        snapshot(0, Color::Black, past),
+        snapshot(2, Color::White, present),
+    ];
+    game.turn = Color::White;
+    game.position_hash = game.recompute_position_hash();
+
+    let mut context = SearchContext::new(EvalWeights::default_tuned(), Color::White, 10_000, None);
+    let moves = game.legal_single_moves_for_board_limited_until(0, 2, &mut context, 64);
+    let quiet_temporal_queen_moves = moves
+        .iter()
+        .filter(|movement| {
+            movement.from.time != movement.to.time
+                && movement.from.timeline_id == movement.to.timeline_id
+                && game.piece_at(movement.to).is_none()
+        })
+        .count();
+
+    assert!(
+        quiet_temporal_queen_moves <= 2,
+        "quiet queen time-travel moves should be intent-capped: {moves:?}"
+    );
+}
+
+#[test]
+fn tactical_dependency_ordering_prefers_royal_graph_moves() {
+    let mut game = Game::new();
+    let mut board = empty_board_with_kings();
+    board[4][2] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Knight,
+    });
+    board[0][1] = Some(Piece {
+        color: Color::White,
+        piece_type: PieceType::Knight,
+    });
+    game.timelines[0].boards = vec![snapshot(0, Color::White, board)];
+    game.position_hash = game.recompute_position_hash();
+    let weights = EvalWeights::default_tuned();
+
+    let graph_touching = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 2,
+            y: 4,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 3,
+            y: 6,
+        },
+    };
+    let unrelated = MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 1,
+            y: 0,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 0,
+            x: 0,
+            y: 2,
+        },
+    };
+
+    assert!(game
+        .legal_move_kind(graph_touching.from, graph_touching.to)
+        .is_some());
+    assert!(game.legal_move_kind(unrelated.from, unrelated.to).is_some());
+    assert!(
+        game.tactical_dependency_order_score(graph_touching, &weights)
+            > game.tactical_dependency_order_score(unrelated, &weights)
+    );
+}
+
+#[test]
 fn evaluation_penalizes_exposed_royal_piece() {
     let mut exposed = Game::new();
     let mut board = empty_board_with_kings();

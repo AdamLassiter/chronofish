@@ -156,6 +156,20 @@ impl SearchContext {
             *self.history.entry(move_hash(movement)).or_default() += HISTORY_BONUS * depth.max(1);
         }
     }
+
+    pub(crate) fn move_is_search_suggested(&self, movement: MoveStep, key: u64) -> bool {
+        self.table
+            .get(&key)
+            .is_some_and(|entry| entry.best_move == Some(movement))
+            || self
+                .killers
+                .iter()
+                .any(|killers| killers.contains(&Some(movement)))
+            || self
+                .history
+                .get(&move_hash(movement))
+                .is_some_and(|score| *score > 0)
+    }
 }
 
 impl EvaluationCache {

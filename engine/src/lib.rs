@@ -4,6 +4,7 @@ pub(crate) use model::*;
 mod game;
 mod hash;
 mod movegen;
+mod movegen_piece;
 mod notation;
 pub(crate) use notation::*;
 mod ai;

@@ -8,6 +8,11 @@ export const NEURAL_INPUT_SIZE = NEURAL_MAX_BOARDS * NEURAL_BOARD_PLANES * NEURA
 interface SelectedBoard {
   category: number;
   negativeTime: number;
+  presentDistance: number;
+  activeRank: number;
+  ownerRank: number;
+  royalRank: number;
+  structuralHash: number;
   absTimeline: number;
   timelineId: number;
   timelineIndex: number;
@@ -76,6 +81,7 @@ export function encodeNeuralPositionFeatures(game: GameSnapshot, perspective: Co
 export function neuralBoardSelection(game: GameSnapshot): SelectedBoard[] {
   const candidates: SelectedBoard[] = [];
   const activeDistance = timelineActiveDistance(game);
+  const present = presentTime(game, activeDistance);
   game.timelines.forEach((timeline, timelineIndex) => {
     const latestTime = latestBoard(timeline)?.time;
     timeline.boards.forEach((board, boardIndex) => {
@@ -89,6 +95,11 @@ export function neuralBoardSelection(game: GameSnapshot): SelectedBoard[] {
       candidates.push({
         category: latest && active ? 0 : latest ? 1 : hasRoyal ? 2 : 3,
         negativeTime: -board.time,
+        presentDistance: Math.abs(board.time - present),
+        activeRank: active ? 0 : 1,
+        ownerRank: ownerRank(timeline.owner),
+        royalRank: hasRoyal ? 0 : 1,
+        structuralHash: boardStructuralHash(board),
         absTimeline: Math.abs(timeline.id),
         timelineId: timeline.id,
         timelineIndex,
@@ -100,13 +111,55 @@ export function neuralBoardSelection(game: GameSnapshot): SelectedBoard[] {
   });
   candidates.sort((left, right) =>
     left.category - right.category ||
+    left.presentDistance - right.presentDistance ||
     left.negativeTime - right.negativeTime ||
+    left.activeRank - right.activeRank ||
+    left.ownerRank - right.ownerRank ||
+    left.royalRank - right.royalRank ||
+    left.structuralHash - right.structuralHash ||
     left.absTimeline - right.absTimeline ||
     left.timelineId - right.timelineId ||
     left.timelineIndex - right.timelineIndex ||
     left.boardIndex - right.boardIndex
   );
   return candidates.slice(0, NEURAL_MAX_BOARDS);
+}
+
+function presentTime(game: GameSnapshot, activeDistance: number): number {
+  const derivedPresent = game.timelines.reduce((earliest, timeline) => {
+    if (!timelineActive(timeline, activeDistance)) {
+      return earliest;
+    }
+    const time = latestBoard(timeline)?.time;
+    return Number.isInteger(time) ? Math.min(earliest, time!) : earliest;
+  }, Number.MAX_SAFE_INTEGER);
+  return Number.isInteger(game.presentTime)
+    ? game.presentTime!
+    : derivedPresent === Number.MAX_SAFE_INTEGER ? 0 : derivedPresent;
+}
+
+function ownerRank(owner: Timeline["owner"]): number {
+  return owner === "neutral" ? 0 : owner === "white" ? 1 : 2;
+}
+
+function boardStructuralHash(board: BoardSnapshot): number {
+  let hash = 2166136261;
+  hash = mixHash(hash, board.sideToMove === "white" ? 1 : 2);
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const piece = board.board[y]?.[x];
+      if (!piece) {
+        continue;
+      }
+      hash = mixHash(hash, (piecePlane(piece) + 1) * 67 + y * 8 + x);
+    }
+  }
+  return hash >>> 0;
+}
+
+function mixHash(hash: number, value: number): number {
+  hash ^= value >>> 0;
+  return Math.imul(hash, 16777619) >>> 0;
 }
 
 function piecePlane(piece: Piece | null | undefined): number {

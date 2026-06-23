@@ -803,6 +803,8 @@ impl Game {
                         self.push_limited_ordered_move(
                             &mut scored,
                             MoveStep { from, to },
+                            piece,
+                            move_kind,
                             &weights,
                             limit,
                         );
@@ -824,6 +826,8 @@ impl Game {
         &self,
         scored: &mut Vec<(i32, MoveStep)>,
         movement: MoveStep,
+        piece: Piece,
+        move_kind: MoveKind,
         weights: &EvalWeights,
         limit: usize,
     ) {
@@ -833,7 +837,12 @@ impl Game {
         {
             return;
         }
-        let score = self.cheap_move_order_score(&movement, weights);
+        let tier_bonus = if self.present_obligation_count(self.turn) > 1 {
+            0
+        } else {
+            self.search_move_tier_bonus(movement, piece, move_kind, weights)
+        };
+        let score = self.cheap_move_order_score(&movement, weights) + tier_bonus;
         let insert_at = scored
             .iter()
             .position(|(existing_score, existing)| {
@@ -848,6 +857,164 @@ impl Game {
         if scored.len() > limit {
             scored.pop();
         }
+        let Some((inserted_bucket, cap)) =
+            self.temporal_dominance_bucket(movement, piece, move_kind, weights)
+        else {
+            return;
+        };
+        self.truncate_temporal_dominance(scored, weights, inserted_bucket, cap);
+    }
+
+    fn search_move_tier_bonus(
+        &self,
+        movement: MoveStep,
+        piece: Piece,
+        move_kind: MoveKind,
+        weights: &EvalWeights,
+    ) -> i32 {
+        match self.search_move_tier(movement, piece, move_kind, weights) {
+            SearchMoveTier::Forced => CHECKMATE_SCORE / 3,
+            SearchMoveTier::Tactical => 80_000,
+            SearchMoveTier::Strategic => 8_000,
+            SearchMoveTier::Quiet => 0,
+        }
+    }
+
+    fn search_move_tier(
+        &self,
+        movement: MoveStep,
+        piece: Piece,
+        move_kind: MoveKind,
+        weights: &EvalWeights,
+    ) -> SearchMoveTier {
+        if self.is_in_check(piece.color) {
+            return SearchMoveTier::Forced;
+        }
+        if self
+            .piece_at(movement.to)
+            .is_some_and(|victim| Self::is_royal_piece(victim.piece_type))
+        {
+            return SearchMoveTier::Forced;
+        }
+        let mut setup_probe = None;
+        if self
+            .piece_at(movement.to)
+            .is_some_and(|victim| weights.piece_value(victim.piece_type) >= weights.rook)
+            || matches!(move_kind, MoveKind::Branch)
+            || self.move_creates_royal_capture_setup_with_probe(movement, weights, &mut setup_probe)
+        {
+            return SearchMoveTier::Tactical;
+        }
+        if self.tactical_dependency_order_score(movement, weights) > 0
+            || self.quiet_development_order_score(movement, weights) > 0
+        {
+            return SearchMoveTier::Strategic;
+        }
+        SearchMoveTier::Quiet
+    }
+
+    fn truncate_temporal_dominance(
+        &self,
+        scored: &mut Vec<(i32, MoveStep)>,
+        weights: &EvalWeights,
+        inserted_bucket: TemporalDominanceBucket,
+        cap: usize,
+    ) {
+        let mut seen = 0usize;
+        scored.retain(|(_, movement)| {
+            let Some((piece, move_kind)) = self.legal_move_kind(movement.from, movement.to) else {
+                return true;
+            };
+            let Some((bucket, _)) =
+                self.temporal_dominance_bucket(*movement, piece, move_kind, weights)
+            else {
+                return true;
+            };
+            if bucket != inserted_bucket {
+                return true;
+            }
+            seen += 1;
+            seen <= cap
+        });
+    }
+
+    fn temporal_dominance_bucket(
+        &self,
+        movement: MoveStep,
+        piece: Piece,
+        move_kind: MoveKind,
+        weights: &EvalWeights,
+    ) -> Option<(TemporalDominanceBucket, usize)> {
+        if piece.piece_type != PieceType::Queen
+            || movement.from.timeline_id == movement.to.timeline_id
+                && movement.from.time == movement.to.time
+        {
+            return None;
+        }
+        if self
+            .piece_at(movement.to)
+            .is_some_and(|victim| Self::is_royal_piece(victim.piece_type))
+        {
+            return None;
+        }
+        let intent = self.queen_temporal_intent(movement, piece, move_kind, weights);
+        let branch_class = if matches!(move_kind, MoveKind::Branch) {
+            TemporalBranchClass::Branch
+        } else {
+            TemporalBranchClass::SameTimeline
+        };
+        let cap = match intent {
+            QueenTemporalIntent::CaptureHighValue => 16,
+            QueenTemporalIntent::CaptureLowValue => 8,
+            QueenTemporalIntent::CreateBranch => 8,
+            QueenTemporalIntent::DefendRoyal => 8,
+            QueenTemporalIntent::RetreatFromAttack => 4,
+            QueenTemporalIntent::ImproveMobility => 4,
+            QueenTemporalIntent::QuietReposition => 2,
+        };
+        Some((
+            TemporalDominanceBucket {
+                source_timeline: movement.from.timeline_id,
+                source_time: movement.from.time,
+                target_time_cmp: movement.to.time.cmp(&movement.from.time),
+                branch_class,
+                intent,
+            },
+            cap,
+        ))
+    }
+
+    fn queen_temporal_intent(
+        &self,
+        movement: MoveStep,
+        piece: Piece,
+        move_kind: MoveKind,
+        weights: &EvalWeights,
+    ) -> QueenTemporalIntent {
+        if let Some(victim) = self.piece_at(movement.to) {
+            return if weights.piece_value(victim.piece_type) >= weights.rook {
+                QueenTemporalIntent::CaptureHighValue
+            } else {
+                QueenTemporalIntent::CaptureLowValue
+            };
+        }
+        if matches!(move_kind, MoveKind::Branch) {
+            return QueenTemporalIntent::CreateBranch;
+        }
+        if self
+            .royal_piece_positions(piece.color)
+            .into_iter()
+            .any(|royal| same_board(royal, movement.to) && board_distance(royal, movement.to) <= 2)
+        {
+            return QueenTemporalIntent::DefendRoyal;
+        }
+        if self.is_square_attacked(movement.from, piece.color.opposite()) {
+            return QueenTemporalIntent::RetreatFromAttack;
+        }
+        if centrality(movement.to.x, movement.to.y) > centrality(movement.from.x, movement.from.y) {
+            return QueenTemporalIntent::ImproveMobility;
+        }
+        QueenTemporalIntent::QuietReposition
     }
 
     pub(crate) fn order_moves(&self, moves: Vec<MoveStep>, weights: &EvalWeights) -> Vec<MoveStep> {
@@ -1173,7 +1340,52 @@ impl Game {
         {
             score += weights.present_progress;
         }
+        score += self.tactical_dependency_order_score(*movement, weights);
         score += self.quiet_development_order_score(*movement, weights);
+        score
+    }
+
+    pub(crate) fn tactical_dependency_order_score(
+        &self,
+        movement: MoveStep,
+        weights: &EvalWeights,
+    ) -> i32 {
+        let Some(piece) = self.piece_at(movement.from) else {
+            return 0;
+        };
+        let mut score = 0;
+        let source_touches_royal_board = self
+            .royal_piece_positions(piece.color)
+            .into_iter()
+            .chain(self.royal_piece_positions(piece.color.opposite()))
+            .any(|royal| {
+                same_board(royal, movement.from) && board_distance(royal, movement.from) <= 2
+            });
+        let destination_touches_royal_board = self
+            .royal_piece_positions(piece.color)
+            .into_iter()
+            .chain(self.royal_piece_positions(piece.color.opposite()))
+            .any(|royal| same_board(royal, movement.to) && board_distance(royal, movement.to) <= 2);
+        if source_touches_royal_board {
+            score += weights.royal_shelter.max(1) * 2;
+        }
+        if destination_touches_royal_board {
+            score += weights.royal_threat.max(weights.royal_shelter).max(1) * 2;
+        }
+        if let Some(victim) = self.piece_at(movement.to) {
+            if weights.piece_value(victim.piece_type) >= weights.rook {
+                score += weights.fork_pressure.max(1) * 4;
+            }
+            return score;
+        }
+        if movement.from.timeline_id != movement.to.timeline_id
+            || movement.from.time != movement.to.time
+        {
+            return score;
+        }
+        if !source_touches_royal_board && !destination_touches_royal_board {
+            score -= weights.piece_activity.max(1);
+        }
         score
     }
 
@@ -1448,6 +1660,40 @@ impl Game {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct TemporalDominanceBucket {
+    source_timeline: i32,
+    source_time: i32,
+    target_time_cmp: std::cmp::Ordering,
+    branch_class: TemporalBranchClass,
+    intent: QueenTemporalIntent,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TemporalBranchClass {
+    SameTimeline,
+    Branch,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QueenTemporalIntent {
+    CaptureHighValue,
+    CaptureLowValue,
+    CreateBranch,
+    DefendRoyal,
+    RetreatFromAttack,
+    ImproveMobility,
+    QuietReposition,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchMoveTier {
+    Forced,
+    Tactical,
+    Strategic,
+    Quiet,
+}
+
 fn push_unique_move(moves: &mut Vec<MoveStep>, movement: MoveStep) {
     if !moves
         .iter()
@@ -1455,4 +1701,12 @@ fn push_unique_move(moves: &mut Vec<MoveStep>, movement: MoveStep) {
     {
         moves.push(movement);
     }
+}
+
+fn same_board(left: Position, right: Position) -> bool {
+    left.timeline_id == right.timeline_id && left.time == right.time
+}
+
+fn board_distance(left: Position, right: Position) -> i32 {
+    (left.x - right.x).abs().max((left.y - right.y).abs())
 }

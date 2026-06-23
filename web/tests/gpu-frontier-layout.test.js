@@ -531,6 +531,7 @@ test("GPU training validation split falls back to a high-signal holdout", async 
 
 test("GPU training selects a device-sized high-signal working set", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const replay = await readFile(path.join(root, "src/training-replay.ts"), "utf8");
 
   assert.match(trainer, /const trainingSamples = selectTrainingWorkingSet\(samples, device\)/);
@@ -542,7 +543,7 @@ test("GPU training selects a device-sized high-signal working set", async () => 
   assert.match(trainer, /device\.limits\?\.maxStorageBufferBindingSize/);
   assert.match(trainer, /maxProjectedSamples = Math\.max\(1, Math\.floor\(maxBindingSize \/ \(PROJECTION_SIZE \* Float32Array\.BYTES_PER_ELEMENT\)\)\)/);
   assert.match(trainer, /trainingSamplePriority\(sample, index, samples\.length\)/);
-  assert.match(trainer, /const MIN_POLICY_WORKING_SET_FRACTION = 0\.25/);
+  assert.match(constants, /export const MIN_POLICY_WORKING_SET_FRACTION = 0\.25/);
   assert.match(trainer, /const requiredPolicyCount = Math\.min/);
   assert.match(trainer, /for \(let index = selected\.length - 1; index >= 0; index -= 1\)/);
   assert.match(trainer, /import \{ trainingLabelPriority \} from "\.\/training-replay\.js"/);
@@ -584,6 +585,8 @@ test("GPU training records internal phase timings for hardware benchmarks", asyn
 
 test("GPU dense training kernels use workgroup-tiled matrix operations", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
+  const device = await readFile(path.join(root, "src/training-gpu-device.ts"), "utf8");
   const shaders = await Promise.all([
     "forward_layer.wgsl",
     "forward_indexed_layer.wgsl",
@@ -607,8 +610,8 @@ test("GPU dense training kernels use workgroup-tiled matrix operations", async (
   }
   assert.match(shaders[5], /fn forward_policy_naive\(/);
   assert.match(shaders[5], /fn apply_policy_naive\(/);
-  assert.match(trainer, /const TILED_TRAINING_MIN_BATCH = 16/);
-  assert.match(trainer, /sampleCount >= TILED_TRAINING_MIN_BATCH \? entryPoint : `\$\{entryPoint\}_naive`/);
+  assert.match(constants, /export const TILED_TRAINING_MIN_BATCH = 16/);
+  assert.match(device, /sampleCount >= TILED_TRAINING_MIN_BATCH \? entryPoint : `\$\{entryPoint\}_naive`/);
   assert.match(trainer, /denseKernelEntryPoint\("forward_layer", batchSize\)/);
   assert.match(trainer, /denseKernelEntryPoint\("apply_layer", batchSize\)/);
   assert.match(trainer, /denseKernelEntryPoint\("hidden_delta", batchSize\)/);
@@ -618,8 +621,9 @@ test("GPU dense training kernels use workgroup-tiled matrix operations", async (
 
 test("GPU training unlocks hidden-layer backpropagation only with enough unique positions", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
 
-  assert.match(trainer, /const MIN_HIDDEN_TRAINING_POSITIONS = 256/);
+  assert.match(constants, /export const MIN_HIDDEN_TRAINING_POSITIONS = 256/);
   assert.match(trainer, /const hiddenLayersTrained = uniqueTrainingPositionCount\(samples, trainIndices\) >= MIN_HIDDEN_TRAINING_POSITIONS/);
   assert.match(trainer, /const deltaBuffers = hiddenLayersTrained/);
   assert.match(trainer, /const hiddenDeltaPipeline = hiddenLayersTrained/);
@@ -630,6 +634,7 @@ test("GPU training unlocks hidden-layer backpropagation only with enough unique 
 
 test("GPU and CPU-head optimizers retain momentum without checkpoint readbacks", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const shaders = await Promise.all([
     "apply_output.wgsl",
     "apply_layer.wgsl",
@@ -637,7 +642,7 @@ test("GPU and CPU-head optimizers retain momentum without checkpoint readbacks",
     "policy.wgsl"
   ].map((name) => readFile(path.join(root, "src/shaders", name), "utf8")));
 
-  assert.match(trainer, /const OPTIMIZER_MOMENTUM = 0\.9/);
+  assert.match(constants, /export const OPTIMIZER_MOMENTUM = 0\.9/);
   assert.match(trainer, /const velocityBuffers = hiddenLayersTrained/);
   assert.match(trainer, /const outputVelocityBuffer = zeroStorageBuffer/);
   assert.match(trainer, /const policyVelocityBuffer = zeroStorageBuffer/);
@@ -660,7 +665,8 @@ test("GPU value inference restores the normalized training score scale", async (
   const frontierForward = await readFile(path.join(root, "src/shaders/frontier_forward.wgsl"), "utf8");
   const delta = await readFile(path.join(root, "src/shaders/output_delta.wgsl"), "utf8");
 
-  assert.match(trainer, /export const VALUE_SCORE_SCALE = 20_000/);
+  const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
+  assert.match(constants, /export const VALUE_SCORE_SCALE = 20_000/);
   assert.match(worker, /return normalizedSearchScore\(score\)/);
   assert.match(shader, /clamp\(predictions\[state\] \* apply_params\.value_scale \+ apply_params\.value_bias, -1\.0, 1\.0\)/);
   assert.match(shader, /neural \* 20000\.0/);

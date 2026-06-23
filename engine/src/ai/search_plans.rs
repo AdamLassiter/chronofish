@@ -302,6 +302,9 @@ impl Game {
             if context.exhausted() {
                 break;
             }
+            if self.should_prune_quiet_temporal_branch(movement, depth_left as i32, context) {
+                continue;
+            }
             if context.options.capture_sanity
                 && move_limit == MAX_MOVES_PER_NODE
                 && self.is_likely_bad_capture_with_context(movement, &weights, context)
@@ -344,6 +347,20 @@ impl Game {
             soft_limit.max(1),
         );
         if self.is_in_check(color) {
+            let evasions = self.check_evasion_moves(
+                timeline_id,
+                time,
+                self.legal_single_moves_for_board_until(
+                    timeline_id,
+                    time,
+                    &context.weights,
+                    context.deadline,
+                ),
+                color,
+            );
+            if !evasions.is_empty() {
+                return evasions;
+            }
             return self.legal_single_moves_for_board_until(
                 timeline_id,
                 time,
@@ -364,6 +381,27 @@ impl Game {
                 .collect();
         }
         moves
+    }
+
+    fn check_evasion_moves(
+        &self,
+        _timeline_id: i32,
+        _time: i32,
+        moves: Vec<MoveStep>,
+        color: Color,
+    ) -> Vec<MoveStep> {
+        moves
+            .into_iter()
+            .filter(|movement| {
+                let mut probe = self.clone_for_search();
+                let Some(undo) = probe.make_search_move(*movement) else {
+                    return false;
+                };
+                let escaped = !probe.is_in_check(color);
+                probe.unmake_search_move(undo);
+                escaped
+            })
+            .collect()
     }
 
     pub(crate) fn prioritized_turn_moves_for_evaluation(
@@ -454,6 +492,38 @@ impl Game {
         }
         weights.piece_value(attacker.piece_type) > weights.piece_value(victim.piece_type) * 2
             && context.is_square_attacked_cached(self, movement.to, attacker.color.opposite())
+    }
+
+    pub(crate) fn should_prune_quiet_temporal_branch(
+        &self,
+        movement: MoveStep,
+        depth: i32,
+        context: &SearchContext,
+    ) -> bool {
+        if depth <= 1 || self.is_in_check(self.turn) {
+            return false;
+        }
+        if movement.from.timeline_id == movement.to.timeline_id
+            && movement.from.time == movement.to.time
+        {
+            return false;
+        }
+        if self.piece_at(movement.to).is_some() {
+            return false;
+        }
+        let Some(piece) = self.piece_at(movement.from) else {
+            return false;
+        };
+        if Self::is_royal_piece(piece.piece_type) {
+            return false;
+        }
+        if self.present_time() == Some(movement.to.time) {
+            return false;
+        }
+        if context.move_is_search_suggested(movement, self.search_key(context.root_color)) {
+            return false;
+        }
+        self.cheap_move_order_score(&movement, &context.weights) <= 0
     }
 
     pub(crate) fn playable_board_keys(&self, color: Color) -> Vec<(i32, i32)> {
