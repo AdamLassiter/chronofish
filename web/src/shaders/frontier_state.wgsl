@@ -53,6 +53,7 @@ const CANDIDATE_DELTA_COUNT: u32 = 16u;
 const CANDIDATE_CARRY: u32 = 19u;
 const CANDIDATE_NODE_ID: u32 = 20u;
 const CANDIDATE_POLICY_PRIOR: u32 = 21u;
+const CANDIDATE_TACTICAL_PRIORITY: u32 = 22u;
 
 const BOARD_STRIDE: u32 = 78u;
 const BOARD_TIMELINE: u32 = 0u;
@@ -135,6 +136,9 @@ fn materialize_selected(@builtin(global_invocation_id) id: vec3<u32>) {
   }
   let candidate_index = u32(selected[output_index]);
   let candidate_base = candidate_index * params.candidate_stride;
+  if (candidates[candidate_base + CANDIDATE_TACTICAL_PRIORITY] > 0) {
+    atomicAdd(&counters[5], 1u);
+  }
   let parent_index = u32(max(0, candidates[candidate_base + CANDIDATE_PARENT]));
   let parent_base = parent_index * params.state_stride;
   let output_base = output_index * params.state_stride;

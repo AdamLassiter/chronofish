@@ -23,6 +23,8 @@ test("GPU frontier uses parent-plus-delta candidates and pooled retained states"
 
 test("GPU frontier pruning is deterministic and diversity bounded", async () => {
   const shader = await readFile(path.join(root, "src/shaders/frontier_select.wgsl"), "utf8");
+  const expand = await readFile(path.join(root, "src/shaders/frontier_expand.wgsl"), "utf8");
+  const policy = await readFile(path.join(root, "src/shaders/frontier_policy.wgsl"), "utf8");
 
   assert.match(shader, /fn hash_candidates/);
   assert.match(shader, /fn bucket_order/);
@@ -33,7 +35,33 @@ test("GPU frontier pruning is deterministic and diversity bounded", async () => 
   assert.match(shader, /fn fill_selection_underflow/);
   assert.match(shader, /already_selected/);
   assert.match(shader, /parent_selected_count/);
+  assert.match(shader, /parent_intent_selected_count/);
+  assert.match(shader, /fn puct_score/);
+  assert.match(shader, /CANDIDATE_POLICY_PRIOR/);
+  assert.match(shader, /sqrt\(parent_visits\)/);
+  assert.match(shader, /params\.puct_scale/);
   assert.match(shader, /CANDIDATE_MOVE/);
+  assert.match(shader, /CANDIDATE_TACTICAL_PRIORITY/);
+  assert.match(shader, /CANDIDATE_INTENT/);
+  assert.match(shader, /fn intent_cap/);
+  assert.match(shader, /INTENT_CHECK_ROYAL/);
+  assert.match(shader, /intent_count >= intent_cap\(intent\)/);
+  assert.match(shader, /left_tactical != right_tactical/);
+  assert.match(shader, /return left_tactical > right_tactical/);
+  assert.match(shader, /let left_score = puct_score\(left\)/);
+  assert.match(expand, /fn move_checks_royal_after_move/);
+  assert.match(expand, /path_clear_after_move/);
+  assert.match(expand, /let tactical_priority = select/);
+  assert.match(expand, /let intent = select/);
+  assert.match(expand, /INTENT_CREATE_TIMELINE/);
+  assert.match(expand, /INTENT_AFFECT_PRESENT/);
+  assert.match(expand, /INTENT_QUIET_TEMPORAL/);
+  assert.match(expand, /royal_check/);
+  assert.match(expand, /captured_value >= 900/);
+  assert.match(expand, /CANDIDATE_TACTICAL_PRIORITY\] = tactical_priority/);
+  assert.match(expand, /CANDIDATE_INTENT\] = intent/);
+  assert.match(policy, /CANDIDATE_TACTICAL_PRIORITY/);
+  assert.match(policy, /prior < 0/);
 });
 
 test("GPU frontier pipelines use explicit superset bind layouts", async () => {
@@ -127,6 +155,24 @@ test("GPU frontier move generation includes special pawn cases", async () => {
   assert.match(shader, /placed_piece = select\(piece, 3,/);
 });
 
+test("GPU frontier prunes quiet moves on low-relevance inactive boards", async () => {
+  const shader = await readFile(path.join(root, "src/shaders/frontier_expand.wgsl"), "utf8");
+  const encoding = await readFile(path.join(root, "src/training-encoding.ts"), "utf8");
+
+  assert.match(shader, /fn board_relevance/);
+  assert.match(shader, /fn board_contains_royal/);
+  assert.match(shader, /BOARD_PENDING/);
+  assert.match(shader, /BOARD_ACTIVE/);
+  assert.match(shader, /BOARD_ORIGIN/);
+  assert.match(shader, /prune_low_relevance_quiet_target/);
+  assert.match(shader, /tactical_priority == 0 && inactive && non_present/);
+  assert.match(shader, /board_relevance\(state, target_board\) < 4/);
+  assert.match(shader, /if \(prune_low_relevance_quiet_target\(state, target_board, tactical_priority\)\) \{\s*return;\s*\}/);
+  assert.match(encoding, /present-frontier/);
+  assert.match(encoding, /royalInCheck/);
+  assert.match(encoding, /containsRoyal/);
+});
+
 test("normal server exposes the committed GPU value model read-only", async () => {
   const server = await readFile(path.resolve(root, "../server/src/static_files.rs"), "utf8");
 
@@ -155,6 +201,17 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.doesNotMatch(source, /PROJECT_FEATURES_SHADER/);
   assert.doesNotMatch(source, /rawFeatures/);
   assert.match(source, /activeStates/);
+  assert.match(source, /#currentPolicyFeatures/);
+  assert.match(source, /#nextPolicyFeatures/);
+  assert.match(source, /cacheStats\(\)/);
+  assert.match(source, /#cacheStats\.hits \+= stateCount/);
+  assert.match(source, /#cacheStats\.misses \+= stateCount/);
+  assert.match(source, /#cacheStats\.stores \+= batchCount/);
+  assert.match(source, /sharedBoardEncoder/);
+  assert.match(source, /fastNet: \{/);
+  assert.match(source, /policy-prior-candidate-pruning/);
+  assert.match(source, /bigNet: \{/);
+  assert.match(source, /retained-state-value-and-auxiliary-heads/);
   assert.match(forward, /forward_layer_masked/);
   assert.match(forward, /active_states\[sample\] == 0u/);
   assert.match(worker, /let activeStateLimit = 1/);
@@ -210,9 +267,22 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
   const stateShader = await readFile(path.join(root, "src/shaders/frontier_state.wgsl"), "utf8");
 
   assert.match(frontier, /await scoreCandidates\?\.\(encoder, buffers, candidateCapacity\)/);
+  assert.match(frontier, /options\.cycleIndex,\s*100/s);
   assert.match(neural, /async encodePolicyPrior/);
   assert.match(neural, /model\.policyWeights\?\.length === expected/);
   assert.match(neural, /policyWeightsForModel/);
+  assert.match(neural, /quantizePolicyWeights/);
+  assert.match(neural, /format: "int8-dequantized-upload"/);
+  assert.match(neural, /format: inferencePrecision === "fp16" \? "int8-to-fp16-upload" : "int8-dequantized-upload"/);
+  assert.match(neural, /device\.features\?\.has\("shader-f16" as GPUFeatureName\)/);
+  assert.match(neural, /const frontierForwardF16 = `enable f16;/);
+  assert.match(neural, /var<storage, read> weights: array<f16>/);
+  assert.match(neural, /const frontierPolicyF16 = `enable f16;/);
+  assert.match(neural, /var<storage, read> policy_weights: array<f16>/);
+  assert.match(neural, /float32ToFloat16Array/);
+  assert.match(neural, /policyWeights: policyQuantization \? initializedWeightBuffer\(device, policyQuantization\.dequantized, inferencePrecision\) : null/);
+  assert.match(neural, /modelBuffers\.fastNet\.policyWeights/);
+  assert.match(neural, /modelBuffers\.bigNet\.outputWeights/);
   assert.match(neural, /#currentPolicyFeatures/);
   assert.match(neural, /advancePolicyFeatures/);
   assert.match(neural, /FRONTIER_POLICY_SHADER/);
@@ -220,6 +290,8 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
   assert.match(worker, /"gpu-v1-cfnn-v3-policy-head"/);
   assert.match(shader, /fn policy_bucket/);
   assert.match(shader, /CANDIDATE_CARRY/);
+  assert.match(shader, /CANDIDATE_INTENT/);
+  assert.match(shader, /hash_value\(hash, candidates\[base \+ CANDIDATE_INTENT\]\)/);
   assert.match(shader, /hidden_features\[parent \* params\.input_size \+ input\]/);
   assert.match(shader, /policy_weights\[row \+ input\]/);
   assert.match(shader, /CANDIDATE_POLICY_PRIOR/);
@@ -250,10 +322,13 @@ test("GPU worker replays every posted search result through authoritative WASM",
 
 test("GPU frontier publishes diagnostics needed for rollout gates", async () => {
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const workerTypes = await readFile(path.join(root, "src/ai-worker-types.ts"), "utf8");
   const controller = await readFile(path.join(root, "src/bot-controller.ts"), "utf8");
   const source = await readFile(path.join(root, "scripts/gpu-frontier-smoke.mjs"), "utf8");
+  const expandShader = await readFile(path.join(root, "src/shaders/frontier_expand.wgsl"), "utf8");
+  const stateShader = await readFile(path.join(root, "src/shaders/frontier_state.wgsl"), "utf8");
 
-  assert.match(worker, /interface GpuSearchDiagnostics/);
+  assert.match(workerTypes, /interface GpuSearchDiagnostics/);
   assert.match(worker, /frontierWidth: tuning\.frontierWidth/);
   assert.match(worker, /candidateCapacity: tuning\.candidateCapacity/);
   assert.match(worker, /selectedCount: readback\.selectedCount/);
@@ -262,7 +337,39 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(worker, /nodes: readback\.nodes/);
   assert.match(worker, /readbacks: 1/);
   assert.match(worker, /candidateOverflow: readback\.candidateOverflow \? 1 : 0/);
+  assert.match(worker, /tacticalCandidates: readback\.tacticalCandidates/);
+  assert.match(worker, /selectedTacticalCandidates: readback\.selectedTacticalCandidates/);
+  assert.match(worker, /candidateSelectionRate: ratio\(readback\.selectedCount, readback\.nodes\)/);
+  assert.match(worker, /tacticalSelectionRate: ratio\(readback\.selectedTacticalCandidates, readback\.tacticalCandidates\)/);
+  assert.match(worker, /effectiveBranchingFactor/);
+  assert.match(worker, /searchController: "puct-frontier-graph"/);
+  assert.match(worker, /progressiveWideningLimit: Math\.max\(2, Math\.min\(16, Math\.ceil\(tuning\.frontierWidth \/ 8\)\)\)/);
+  assert.match(worker, /graphDeduplication: 1/);
+  assert.match(worker, /legalChoiceCount: selected\.choices\.length/);
+  assert.match(worker, /legalTacticalChoiceCount: selected\.choices\.filter\(\(choice\) => choice\.tactical\)\.length/);
+  assert.match(worker, /topPolicyChoiceAgreement: choiceAgreement\(selected, selected\.choices, 1\)/);
+  assert.match(worker, /top5PolicyChoiceAgreement: choiceAgreement\(selected, selected\.choices, 5\)/);
+  assert.match(worker, /top20PolicyChoiceAgreement: choiceAgreement\(selected, selected\.choices, 20\)/);
+  assert.match(worker, /selectedMovePrunedRisk: selected\.tactical \? 0 : 1/);
+  assert.match(worker, /selectedMoveTactical: selected\.tactical \? 1 : 0/);
+  assert.match(worker, /const neuralCache = runtime\.neural\.cacheStats\(\)/);
+  assert.match(worker, /const quantization = await runtime\.neural\.quantizationStats\(\)/);
+  assert.match(worker, /inferencePrecision: quantization\.inferencePrecision \?\? undefined/);
+  assert.match(worker, /fastNetPolicyFormat: quantization\.fastNetPolicy\?\.format/);
+  assert.match(workerTypes, /inferencePrecision\?: string/);
+  assert.match(workerTypes, /fastNetPolicyMaxAbsError/);
+  assert.match(worker, /nnCacheHits: neuralCache\.hits/);
+  assert.match(worker, /nnCacheMisses: neuralCache\.misses/);
+  assert.match(worker, /nnCacheStores: neuralCache\.stores/);
+  assert.match(worker, /nnCacheHitRate: neuralCache\.hitRate/);
+  assert.match(worker, /const networkRoles = runtime\.neural\.networkRoles\(\)/);
+  assert.match(worker, /fastNet: networkRoles\.fastNet/);
+  assert.match(worker, /bigNet: networkRoles\.bigNet/);
+  assert.match(worker, /function choiceAgreement/);
+  assert.match(worker, /const counterByteLength = 24/);
   assert.match(worker, /nodesPerSecond/);
+  assert.match(expandShader, /atomicAdd\(&counters\[4\], 1u\)/);
+  assert.match(stateShader, /atomicAdd\(&counters\[5\], 1u\)/);
   assert.match(source, /selectedCount < Math\.min/);
   assert.match(controller, /Selected GPU frontier diagnostics/);
 });
@@ -344,9 +451,10 @@ test("GPU bot search uses one worker and one device queue", async () => {
 
 test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
 
   assert.match(worker, /function gpuTrainingWorkerCount/);
-  assert.match(worker, /const MAX_PARALLEL_GPU_TRAINING_WORKERS = 16/);
+  assert.match(workerTypes, /const MAX_PARALLEL_GPU_TRAINING_WORKERS = 16/);
   assert.match(worker, /Math\.min\(MAX_PARALLEL_GPU_TRAINING_WORKERS, Math\.floor\(requestedWorkers\) \|\| 1\)/);
   assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(positions\.length, config\.searchWorkers\)/);
   assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(target, config\.selfPlayWorkers\)/);
@@ -393,12 +501,14 @@ test("GPU candidate selection accepts single-move choices", async () => {
 
 test("GPU frontier smoke harness can force device-loss cleanup and rebuild", async () => {
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const gpuDevice = await readFile(path.join(root, "src/ai-gpu-device.ts"), "utf8");
 
   assert.match(worker, /debugLoseDevice/);
   assert.match(worker, /destroyCachedGpuDeviceForSmoke/);
   assert.match(worker, /device\.destroy\(\)/);
   assert.match(worker, /cachedGpuAdapter = null/);
-  assert.match(worker, /pipelineCache\.clear\(\)/);
+  assert.match(worker, /clearComputePipelineCache\(\)/);
+  assert.match(gpuDevice, /pipelineCache\.clear\(\)/);
 });
 
 test("GPU frontier tuning uses timestamp queries when available", async () => {
@@ -494,6 +604,29 @@ test("GPU training distinguishes completed outcomes from search bootstraps", asy
   assert.match(delta, /\* label_weights\[dataset_sample\]/);
 });
 
+test("GPU training has staged curriculum and tactical adversarial label modes", async () => {
+  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
+  const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
+  const html = await readFile(path.join(root, "src/index.html"), "utf8");
+
+  assert.match(workerTypes, /"curriculum" \| "tactical"/);
+  assert.match(worker, /collectCurriculumSamples/);
+  assert.match(worker, /collectTacticalSamples/);
+  assert.match(worker, /generateCurriculumPositionGame/);
+  assert.match(worker, /curriculumGame/);
+  assert.match(worker, /generateTacticalPositionGame/);
+  assert.match(worker, /tacticalPositionPriority/);
+  assert.match(worker, /collectGpuSearchLabels\(positions, config, progress, "curriculum"/);
+  assert.match(worker, /collectGpuSearchLabels\([\s\S]*"tactical"/);
+  assert.match(html, /<option value="curriculum" selected/);
+  assert.match(html, /<option value="tactical"/);
+  assert.match(ui, /gpuModes: \["vsGpu", "self", "curriculum"\]/);
+  assert.match(ui, /gpuModes: \["vsGpu", "vsCpu", "self", "curriculum", "tactical", "distill"\]/);
+  assert.match(ui, /curriculum: "Curriculum"/);
+  assert.match(ui, /tactical: "Tactics"/);
+});
+
 test("GPU distillation labels searched positions instead of duplicating the root snapshot", async () => {
   const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
 
@@ -505,28 +638,29 @@ test("GPU distillation labels searched positions instead of duplicating the root
 
 test("GPU training samples uniform minibatches and applies label weights once", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
 
-  assert.match(trainer, /export function fillGroupedTrainingBatchIndices/);
-  assert.match(trainer, /export function groupTrainingIndicesByPosition/);
-  assert.match(trainer, /state = xorshift32\(state \|\| 1\)/);
-  assert.match(trainer, /const group = trainGroups\[state % trainGroups\.length\]!/);
-  assert.match(trainer, /const selected = group\[state % group\.length\]!/);
-  assert.match(trainer, /batch\[index\] = selected/);
-  assert.match(trainer, /batchWeight \+= Math\.max\(0, labelWeights\[selected\] \?\? 1\)/);
-  assert.doesNotMatch(trainer, /trainingWeightCdf/);
-  assert.doesNotMatch(trainer, /weightedTrainingIndex/);
-  assert.doesNotMatch(trainer, /const epochOrder = shuffledIndices\(trainIndices, epoch, split\.seed\)/);
+  assert.match(sampleHelpers, /export function fillGroupedTrainingBatchIndices/);
+  assert.match(sampleHelpers, /export function groupTrainingIndicesByPosition/);
+  assert.match(sampleHelpers, /state = xorshift32\(state \|\| 1\)/);
+  assert.match(sampleHelpers, /const group = trainGroups\[state % trainGroups\.length\]!/);
+  assert.match(sampleHelpers, /const selected = group\[state % group\.length\]!/);
+  assert.match(sampleHelpers, /batch\[index\] = selected/);
+  assert.match(sampleHelpers, /batchWeight \+= Math\.max\(0, labelWeights\[selected\] \?\? 1\)/);
+  assert.doesNotMatch(`${trainer}\n${sampleHelpers}`, /trainingWeightCdf/);
+  assert.doesNotMatch(`${trainer}\n${sampleHelpers}`, /weightedTrainingIndex/);
+  assert.doesNotMatch(`${trainer}\n${sampleHelpers}`, /const epochOrder = shuffledIndices\(trainIndices, epoch, split\.seed\)/);
 });
 
 test("GPU training validation split falls back to a high-signal holdout", async () => {
-  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
 
-  assert.match(trainer, /validationSplit > 0 && !validationIndices\.length && trainIndices\.length > 1/);
-  assert.match(trainer, /movePositionGroupToValidation\(samples, trainIndices, validationIndices, seed\)/);
-  assert.match(trainer, /groupTrainingIndicesByPosition\(samples, trainIndices\)/);
-  assert.match(trainer, /function validationSamplePriority/);
-  assert.match(trainer, /trainingLabelPriority\(sample\.labelKind, sample\.pseudo\)/);
-  assert.match(trainer, /Math\.max\(0, sample\.labelWeight \?\? 1\)/);
+  assert.match(sampleHelpers, /validationSplit > 0 && !validationIndices\.length && trainIndices\.length > 1/);
+  assert.match(sampleHelpers, /movePositionGroupToValidation\(samples, trainIndices, validationIndices, seed\)/);
+  assert.match(sampleHelpers, /groupTrainingIndicesByPosition\(samples, trainIndices\)/);
+  assert.match(sampleHelpers, /function validationSamplePriority/);
+  assert.match(sampleHelpers, /trainingLabelPriority\(sample\.labelKind, sample\.pseudo\)/);
+  assert.match(sampleHelpers, /Math\.max\(0, sample\.labelWeight \?\? 1\)/);
 });
 
 test("GPU training selects a device-sized high-signal working set", async () => {
@@ -622,6 +756,7 @@ test("GPU dense training kernels use workgroup-tiled matrix operations", async (
 test("GPU training unlocks hidden-layer backpropagation only with enough unique positions", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
+  const model = await readFile(path.join(root, "src/training-gpu-model.ts"), "utf8");
 
   assert.match(constants, /export const MIN_HIDDEN_TRAINING_POSITIONS = 256/);
   assert.match(trainer, /const hiddenLayersTrained = uniqueTrainingPositionCount\(samples, trainIndices\) >= MIN_HIDDEN_TRAINING_POSITIONS/);
@@ -630,6 +765,10 @@ test("GPU training unlocks hidden-layer backpropagation only with enough unique 
   assert.match(trainer, /const applyLayerPipeline = hiddenLayersTrained/);
   assert.match(trainer, /if \(hiddenLayersTrained\) \{\s*const lastLayerIndex/);
   assert.match(trainer, /model\.hiddenLayersTrained = value\.hiddenLayersTrained/);
+  assert.match(trainer, /AUXILIARY_VALUE_HEADS/);
+  assert.match(trainer, /trainAuxiliaryValueHeadsOnCpu/);
+  assert.match(trainer, /auxiliaryValueWeights: auxiliary\.weights/);
+  assert.match(model, /auxiliaryValueWeights/);
 });
 
 test("GPU and CPU-head optimizers retain momentum without checkpoint readbacks", async () => {
@@ -747,13 +886,16 @@ test("training label workers encode positions on CPU and transfer typed feature 
   assert.match(encoding, /new Float32Array\(NEURAL_INPUT_SIZE\)/);
   assert.match(encoding, /values\.fill/);
   assert.match(encoding, /neuralBoardSelection/);
+  assert.match(encoding, /buildNeuralBoardGraph/);
+  assert.match(encoding, /NeuralBoardGraphEdgeKind/);
+  assert.match(encoding, /present-frontier/);
 });
 
 test("GPU replay deduplicates positions and keeps validation groups separate", async () => {
   const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
   const replay = await readFile(path.join(root, "src/training-replay.ts"), "utf8");
   const labels = await readFile(path.join(root, "src/training-label-worker.ts"), "utf8");
-  const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
+  const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
 
   assert.match(labels, /positionKey: positionKey\(game\)/);
   assert.match(worker, /import \{ appendReplaySamples, dedupeTrainingSamples \} from "\.\/training-replay\.js"/);
@@ -766,8 +908,8 @@ test("GPU replay deduplicates positions and keeps validation groups separate", a
   assert.match(replay, /\$\{sample\.positionKey\}\|\$\{labelKind\}/);
   assert.match(replay, /features:\$\{features\.length\}:\$\{hash\.toString\(16\)\}/);
   assert.doesNotMatch(replay, /\$\{sample\.positionKey\}\|\$\{sample\.labelKind \?\? "unknown"\}\|\$\{sample\.policy/);
-  assert.match(trainer, /sample\.positionKey/);
-  assert.doesNotMatch(trainer, /boardCount \?\? 0\}\|\$\{index\}/);
+  assert.match(sampleHelpers, /sample\.positionKey/);
+  assert.doesNotMatch(sampleHelpers, /boardCount \?\? 0\}\|\$\{index\}/);
 });
 
 test("GPU replay retention prioritizes stronger label sources", async () => {

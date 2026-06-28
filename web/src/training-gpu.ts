@@ -1,16 +1,33 @@
 import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SHADER, FORWARD_OUTPUT_SHADER, OUTPUT_DELTA_SHADER, HIDDEN_DELTA_SHADER, HIDDEN3_DELTA_SHADER, APPLY_LAYER_SHADER, APPLY_INDEXED_LAYER_SHADER, APPLY_OUTPUT_SHADER, POLICY_SHADER, POLICY_LOSS_SHADER, REDUCE_LOSS_SHADER } from "./training-shaders.js";
 import { POLICY_BUCKETS } from "./training-policy.js";
 import { trainingLabelPriority } from "./training-replay.js";
+import { NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES } from "./training-encoding.js";
 import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, OPTIMIZER_MOMENTUM, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, TILED_TRAINING_MIN_BATCH, VALUE_EPOCHS_PER_SUBMIT, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
 import { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
+import { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, moveOrCollapseValidationGroup, movePositionGroupToValidation, shuffledIndices, splitValidationSamples, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
 import type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
 import type { SparseProjectionFeatures, TrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
+import type { ValidationSplit } from "./training-gpu-samples.js";
 export { VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
 export { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, formatShaderErrors, getGpuDevice, requestHighLimitDevice } from "./training-gpu-device.js";
 export { byteArraysEqual, compactModelIsFinite, decodeCompactModel, encodeCompactModel, writeAscii, writeF32, writeU32 } from "./training-gpu-model.js";
+export { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, shuffledIndices, splitValidationSamples, stableSampleHash, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
 export type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
+export type { ValidationSplit } from "./training-gpu-samples.js";
 export type { SparseProjectionFeatures, TrainingConfig, TrainingLabelKind, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
+
+export const AUXILIARY_VALUE_HEADS = [
+  "value_wdl",
+  "value_scalar",
+  "mate_or_forced_loss_risk",
+  "royal_safety_score",
+  "active_timeline_advantage",
+  "present_control",
+  "material_active",
+  "material_inactive",
+  "policy_uncertainty"
+] as const;
 
 interface GpuBufferUsageConstants {
   MAP_READ: number;
@@ -58,10 +75,9 @@ interface TrainedPolicyWeights {
   checkpointImproved: boolean;
 }
 
-interface ValidationSplit {
-  trainIndices: number[];
-  validationIndices: number[];
-  seed: number;
+interface TrainedAuxiliaryValueWeights {
+  weights: Float32Array;
+  validationLoss: number;
 }
 
 interface PredictionModel {
@@ -172,6 +188,11 @@ export async function train(
     trainValue(device, trainingSamples, config, activeModel, progress)
   );
   try {
+    const valueSplit = splitValidationSamples(trainingSamples, config.validationSplit);
+    const hiddenFeatures = trainingSamples.map((sample) =>
+      hiddenFeaturesOnCpu(sample, PROJECTION_SIZE, PROJECTION_SEED, HIDDEN_LAYERS, value.hiddenWeights)
+    );
+    const auxiliary = trainAuxiliaryValueHeadsOnCpu(trainingSamples, hiddenFeatures, config, activeModel, valueSplit);
     const policy = await timed(config.metrics, "policyTrain", () =>
       trainPolicy(
         device,
@@ -188,6 +209,7 @@ export async function train(
       hiddenLayers: HIDDEN_LAYERS,
       hiddenWeights: value.hiddenWeights,
       outputWeights: value.weights,
+      auxiliaryValueWeights: auxiliary.weights,
       policyWeights: policy.weights,
       scale: 1,
       bias: 0,
@@ -200,12 +222,14 @@ export async function train(
     model.initialPolicyValidationLoss = policy.initialValidationLoss;
     model.policyValidationLoss = policy.validationLoss;
     model.bestPolicyValidationLoss = policy.bestValidationLoss;
+    model.auxiliaryValidationLoss = auxiliary.validationLoss;
+    model.auxiliaryHeadCount = AUXILIARY_VALUE_HEADS.length;
     model.valueCheckpointImproved = value.checkpointImproved;
     model.policyCheckpointImproved = policy.checkpointImproved;
     model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
     model.earlyStopReason = value.earlyStopReason;
     model.labelCounts = labelSourceCounts(trainingSamples);
-    model.nonZeroWeights = countNonZero(value.weights) + countNonZero(value.hiddenWeights) + countNonZero(policy.weights);
+    model.nonZeroWeights = countNonZero(value.weights) + countNonZero(auxiliary.weights) + countNonZero(value.hiddenWeights) + countNonZero(policy.weights);
     model.replayBufferSize = samples.length;
     model.trainingSampleCount = trainingSamples.length;
     model.policyTrainingSampleCount = trainingSamples.filter(hasPolicyTrainingTarget).length;
@@ -304,6 +328,7 @@ export function trainHeadsOnCpu(
     }
   }
 
+  const auxiliary = trainAuxiliaryValueHeadsOnCpu(samples, hiddenFeatures, config, activeModel, split);
   const policy = trainPolicyHeadOnCpu(samples, hiddenFeatures, config, activeModel, split);
   const model: EncodedCompactModel = encodeCompactModel({
     projectionSize: PROJECTION_SIZE,
@@ -311,6 +336,7 @@ export function trainHeadsOnCpu(
     hiddenLayers: HIDDEN_LAYERS,
     hiddenWeights,
     outputWeights: bestOutputWeights,
+    auxiliaryValueWeights: auxiliary.weights,
     policyWeights: policy.weights,
     scale: 1,
     bias: 0,
@@ -323,12 +349,14 @@ export function trainHeadsOnCpu(
   model.initialPolicyValidationLoss = policy.initialValidationLoss;
   model.policyValidationLoss = policy.validationLoss;
   model.bestPolicyValidationLoss = policy.bestValidationLoss;
+  model.auxiliaryValidationLoss = auxiliary.validationLoss;
+  model.auxiliaryHeadCount = AUXILIARY_VALUE_HEADS.length;
   model.valueCheckpointImproved = checkpointImproved;
   model.policyCheckpointImproved = policy.checkpointImproved;
   model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
   model.earlyStopReason = earlyStopReason;
   model.labelCounts = labelSourceCounts(samples);
-  model.nonZeroWeights = countNonZero(bestOutputWeights) + countNonZero(hiddenWeights) + countNonZero(policy.weights);
+  model.nonZeroWeights = countNonZero(bestOutputWeights) + countNonZero(auxiliary.weights) + countNonZero(hiddenWeights) + countNonZero(policy.weights);
   model.replayBufferSize = samples.length;
   model.trainingSampleCount = samples.length;
   model.policyTrainingSampleCount = samples.filter(hasPolicyTrainingTarget).length;
@@ -1356,193 +1384,6 @@ export function packSparseProjectionFeatures(samples: TrainingSample[], inputSiz
   };
 }
 
-export function splitValidationSamples(samples: TrainingSample[], validationSplit = 0): ValidationSplit {
-  const trainIndices: number[] = [];
-  const validationIndices: number[] = [];
-  const threshold = Math.floor(validationSplit * 10000);
-  const seed = samples.reduce((hash, sample, index) => {
-    hash ^= stableSampleHash(sample, index);
-    return Math.imul(hash, 16777619) >>> 0;
-  }, 2166136261);
-  for (let index = 0; index < samples.length; index += 1) {
-    const bucket = stableSampleHash(samples[index]!, index) % 10000;
-    if (threshold > 0 && bucket < threshold) {
-      validationIndices.push(index);
-    } else {
-      trainIndices.push(index);
-    }
-  }
-  if (validationSplit > 0 && !validationIndices.length && trainIndices.length > 1) {
-    movePositionGroupToValidation(samples, trainIndices, validationIndices, seed);
-  }
-  if (!trainIndices.length && validationIndices.length) {
-    moveOrCollapseValidationGroup(samples, trainIndices, validationIndices);
-  }
-  return { trainIndices, validationIndices, seed };
-}
-
-function fallbackValidationOffset(samples: TrainingSample[], trainIndices: number[], seed: number): number {
-  let bestOffset = 0;
-  let bestPriority = Number.NEGATIVE_INFINITY;
-  for (let offset = 0; offset < trainIndices.length; offset += 1) {
-    const sampleIndex = trainIndices[offset]!;
-    const sample = samples[sampleIndex]!;
-    const priority = validationSamplePriority(sample, sampleIndex, seed);
-    if (priority > bestPriority) {
-      bestPriority = priority;
-      bestOffset = offset;
-    }
-  }
-  return bestOffset;
-}
-
-function movePositionGroupToValidation(
-  samples: TrainingSample[],
-  trainIndices: number[],
-  validationIndices: number[],
-  seed = 0
-): void {
-  const groups = groupTrainingIndicesByPosition(samples, trainIndices);
-  if (groups.length < 2) {
-    return;
-  }
-  const representatives = groups.map((group) => group[0]!);
-  const selectedOffset = fallbackValidationOffset(samples, representatives, seed);
-  const selected = new Set(groups[selectedOffset]!);
-  for (let offset = trainIndices.length - 1; offset >= 0; offset -= 1) {
-    if (selected.has(trainIndices[offset]!)) {
-      validationIndices.push(trainIndices.splice(offset, 1)[0]!);
-    }
-  }
-  validationIndices.sort((left, right) => left - right);
-}
-
-function moveOrCollapseValidationGroup(
-  samples: TrainingSample[],
-  trainIndices: number[],
-  validationIndices: number[]
-): void {
-  const groups = groupTrainingIndicesByPosition(samples, validationIndices);
-  if (groups.length < 2) {
-    trainIndices.push(...validationIndices);
-    validationIndices.length = 0;
-    return;
-  }
-  const selected = new Set(groups[0]!);
-  for (let offset = validationIndices.length - 1; offset >= 0; offset -= 1) {
-    if (selected.has(validationIndices[offset]!)) {
-      trainIndices.push(validationIndices.splice(offset, 1)[0]!);
-    }
-  }
-  trainIndices.sort((left, right) => left - right);
-}
-
-function validationSamplePriority(sample: TrainingSample, index: number, seed: number): number {
-  const hashTieBreak = ((stableSampleHash(sample, index) ^ seed) >>> 0) / 0xffffffff;
-  return trainingLabelPriority(sample.labelKind, sample.pseudo) +
-    Math.max(0, sample.labelWeight ?? 1) +
-    hashTieBreak * 0.001;
-}
-
-export function stableSampleHash(sample: TrainingSample, _index: number): number {
-  let hash = 2166136261;
-  const text = trainingPositionIdentity(sample);
-  for (let offset = 0; offset < text.length; offset += 1) {
-    hash ^= text.charCodeAt(offset);
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return hash >>> 0;
-}
-
-function trainingPositionIdentity(sample: TrainingSample): string {
-  return sample.positionKey
-    ? `${sample.positionKey}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}`
-    : `${featureFingerprint(sample.features)}|${sample.sideToMove ?? ""}|${sample.boardCount ?? 0}`;
-}
-
-function featureFingerprint(features: number[] | Float32Array): string {
-  let hash = 2166136261;
-  for (let index = 0; index < features.length; index += 1) {
-    const value = features[index] ?? 0;
-    if (value === 0) { continue; }
-    hash ^= index;
-    hash = Math.imul(hash, 16777619) >>> 0;
-    hash ^= Math.round(value * 1024);
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return hash.toString(16);
-}
-
-export function shuffledIndices(indices: number[], epoch: number, seed: number): number[] {
-  const result = indices.slice();
-  let state = (seed ^ Math.imul(epoch, 2654435761)) >>> 0;
-  for (let index = result.length - 1; index > 0; index -= 1) {
-    state = xorshift32(state);
-    const swapIndex = state % (index + 1);
-    const current = result[index]!;
-    result[index] = result[swapIndex]!;
-    result[swapIndex] = current;
-  }
-  return result;
-}
-
-export function groupTrainingIndicesByPosition(samples: TrainingSample[], indices: number[]): number[][] {
-  const groups = new Map<string, number[]>();
-  for (const index of indices) {
-    const identity = trainingPositionIdentity(samples[index]!);
-    const group = groups.get(identity);
-    if (group) {
-      group.push(index);
-    } else {
-      groups.set(identity, [index]);
-    }
-  }
-  return Array.from(groups.values());
-}
-
-export function uniqueTrainingPositionCount(samples: TrainingSample[], indices: number[]): number {
-  return new Set(indices.map((index) => trainingPositionIdentity(samples[index]!))).size;
-}
-
-export function fillGroupedTrainingBatchIndices(
-  batch: Uint32Array,
-  trainGroups: number[][],
-  epoch: number,
-  seed: number,
-  labelWeights: Float32Array
-): number {
-  if (!trainGroups.length) {
-    throw new Error("Training requires at least one train position.");
-  }
-  let state = (seed ^ Math.imul(epoch, 2654435761)) >>> 0;
-  let batchWeight = 0;
-  for (let index = 0; index < batch.length; index += 1) {
-    state = xorshift32(state || 1);
-    const group = trainGroups[state % trainGroups.length]!;
-    state = xorshift32(state || 1);
-    const selected = group[state % group.length]!;
-    batch[index] = selected;
-    batchWeight += Math.max(0, labelWeights[selected] ?? 1);
-  }
-  return batchWeight;
-}
-
-export function xorshift32(value: number): number {
-  let state = value >>> 0;
-  state ^= state << 13;
-  state ^= state >>> 17;
-  state ^= state << 5;
-  return state >>> 0;
-}
-
-export function featureLength(samples: TrainingSample[]): number {
-  const length = samples[0]?.features?.length;
-  if (!length || !samples.every((sample) => sample.features.length === length)) {
-    throw new Error("Training samples have inconsistent feature lengths.");
-  }
-  return length;
-}
-
 export function projectionParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, projectionSize: number, seed: number, outputOffset = 0): GPUBuffer {
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
@@ -1879,6 +1720,168 @@ function applyValueHeadGradientOnCpu(
     const update = gradient[input]! * normalization + decay;
     velocity[input] = optimizerVelocity(velocity[input] ?? 0, update);
     weights[input] = (weights[input] ?? 0) - learningRate * velocity[input]!;
+  }
+}
+
+function trainAuxiliaryValueHeadsOnCpu(
+  samples: TrainingSample[],
+  features: Float32Array[],
+  config: TrainingConfig,
+  activeModel: CompactValueModel | null,
+  valueSplit: ValidationSplit
+): TrainedAuxiliaryValueWeights {
+  const inputSize = features[0]?.length ?? outputLayerSize();
+  const rowSize = inputSize + 1;
+  const expected = AUXILIARY_VALUE_HEADS.length * rowSize;
+  const weights = modelArchitectureMatches(activeModel)
+    && activeModel?.auxiliaryValueWeights?.length === expected
+    ? activeModel.auxiliaryValueWeights.slice()
+    : new Float32Array(expected);
+  const velocity = new Float32Array(weights.length);
+  const trainIndices = valueSplit.trainIndices.length ? valueSplit.trainIndices : valueSplit.validationIndices;
+  const validationIndices = valueSplit.validationIndices.length ? valueSplit.validationIndices : trainIndices;
+  if (!trainIndices.length) {
+    return { weights, validationLoss: 0 };
+  }
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
+  const batchSize = Math.min(config.batchSize, Math.max(1, trainIndices.length));
+  const batchIndices = new Uint32Array(batchSize);
+  const labelWeights = Float32Array.from(samples, (sample) => Math.max(0, sample.labelWeight ?? 1));
+  const steps = Math.max(1, Math.min(config.epochs, policyTrainingSteps(config.epochs)));
+  for (let step = 1; step <= steps; step += 1) {
+    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, step, valueSplit.seed ^ 0xa77a11, labelWeights);
+    applyAuxiliaryValueHeadGradientOnCpu(features, samples, weights, batchIndices, batchWeight, config, velocity);
+  }
+  return {
+    weights,
+    validationLoss: auxiliaryValueHeadLossOnCpu(features, samples, weights, validationIndices)
+  };
+}
+
+function auxiliaryValueTargets(sample: TrainingSample): number[] {
+  const features = sample.features;
+  const boardStride = NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
+  const boardCount = Math.max(1, Math.min(sample.boardCount ?? Math.floor(features.length / boardStride), Math.floor(features.length / boardStride)));
+  let activeBoards = 0;
+  let presentBoards = 0;
+  let royalDanger = 0;
+  let activeMaterial = 0;
+  let inactiveMaterial = 0;
+  for (let board = 0; board < boardCount; board += 1) {
+    const base = board * boardStride;
+    const active = features[base + 25 * NEURAL_BOARD_SQUARES] ?? 0;
+    const present = features[base + 27 * NEURAL_BOARD_SQUARES] ?? 0;
+    const royal = features[base + 35 * NEURAL_BOARD_SQUARES] ?? 0;
+    activeBoards += active > 0 ? 1 : 0;
+    presentBoards += present > 0 ? 1 : 0;
+    royalDanger = Math.max(royalDanger, royal);
+    const material = materialBalanceForEncodedBoard(features, base);
+    if (active > 0) {
+      activeMaterial += material;
+    } else {
+      inactiveMaterial += material;
+    }
+  }
+  return [
+    sample.label > 0.05 ? 1 : sample.label < -0.05 ? -1 : 0,
+    boundedValue(sample.label),
+    royalDanger,
+    boundedValue(1 - 2 * royalDanger),
+    boundedValue(activeBoards / boardCount),
+    boundedValue(presentBoards / boardCount),
+    boundedValue(activeMaterial / 16),
+    boundedValue(inactiveMaterial / 16),
+    Number.isInteger(sample.policy) ? 0 : 1
+  ];
+}
+
+function materialBalanceForEncodedBoard(features: number[] | Float32Array, boardBase: number): number {
+  let balance = 0;
+  for (let plane = 0; plane < 24; plane += 1) {
+    const pieceValue = encodedPieceValue(plane % 12);
+    const sign = plane < 12 ? 1 : -1;
+    for (let square = 0; square < NEURAL_BOARD_SQUARES; square += 1) {
+      balance += sign * pieceValue * (features[boardBase + plane * NEURAL_BOARD_SQUARES + square] ?? 0);
+    }
+  }
+  return balance;
+}
+
+function encodedPieceValue(pieceType: number): number {
+  if (pieceType === 0 || pieceType === 3) return 8;
+  if (pieceType === 2) return 5;
+  if (pieceType === 4 || pieceType === 5) return 4;
+  if (pieceType === 6 || pieceType === 9) return 3;
+  if (pieceType === 7 || pieceType === 8) return 2;
+  return 1;
+}
+
+function auxiliaryValueHeadLossOnCpu(
+  features: Float32Array[],
+  samples: TrainingSample[],
+  weights: Float32Array,
+  indices: number[]
+): number {
+  const inputSize = features[0]?.length ?? 0;
+  const rowSize = inputSize + 1;
+  let total = 0;
+  let totalWeight = 0;
+  for (const index of indices) {
+    const feature = features[index]!;
+    const targets = auxiliaryValueTargets(samples[index]!);
+    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    for (let head = 0; head < AUXILIARY_VALUE_HEADS.length; head += 1) {
+      const row = head * rowSize;
+      let logit = weights[row + inputSize] ?? 0;
+      for (let input = 0; input < inputSize; input += 1) {
+        logit += feature[input]! * (weights[row + input] ?? 0);
+      }
+      const prediction = Math.tanh(logit);
+      const error = prediction - (targets[head] ?? 0);
+      total += weight * error * error;
+      totalWeight += weight;
+    }
+  }
+  return totalWeight > 0 ? total / totalWeight : 0;
+}
+
+function applyAuxiliaryValueHeadGradientOnCpu(
+  features: Float32Array[],
+  samples: TrainingSample[],
+  weights: Float32Array,
+  batchIndices: Uint32Array,
+  batchWeight: number,
+  config: TrainingConfig,
+  velocity: Float32Array
+): void {
+  const inputSize = features[0]?.length ?? 0;
+  const rowSize = inputSize + 1;
+  const gradient = new Float32Array(weights.length);
+  for (const sampleIndex of batchIndices) {
+    const feature = features[sampleIndex]!;
+    const targets = auxiliaryValueTargets(samples[sampleIndex]!);
+    const sampleWeight = Math.max(0, samples[sampleIndex]!.labelWeight ?? 1);
+    for (let head = 0; head < AUXILIARY_VALUE_HEADS.length; head += 1) {
+      const row = head * rowSize;
+      let logit = weights[row + inputSize] ?? 0;
+      for (let input = 0; input < inputSize; input += 1) {
+        logit += feature[input]! * (weights[row + input] ?? 0);
+      }
+      const prediction = Math.tanh(logit);
+      const scale = 2 * sampleWeight * (prediction - (targets[head] ?? 0)) * (1 - prediction * prediction);
+      for (let input = 0; input < inputSize; input += 1) {
+        gradient[row + input] = (gradient[row + input] ?? 0) + scale * feature[input]!;
+      }
+      gradient[row + inputSize] = (gradient[row + inputSize] ?? 0) + scale;
+    }
+  }
+  const normalization = 1 / Math.max(batchWeight, 1e-6);
+  for (let index = 0; index < weights.length; index += 1) {
+    const isBias = index % rowSize === inputSize;
+    const decay = isBias ? 0 : config.weightDecay * weights[index]!;
+    const update = gradient[index]! * normalization + decay;
+    velocity[index] = optimizerVelocity(velocity[index] ?? 0, update);
+    weights[index] = (weights[index] ?? 0) - config.learningRate * velocity[index]!;
   }
 }
 

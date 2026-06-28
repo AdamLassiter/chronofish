@@ -62,6 +62,16 @@ const CANDIDATE_TERMINAL: u32 = 18u;
 const CANDIDATE_CARRY: u32 = 19u;
 const CANDIDATE_NODE_ID: u32 = 20u;
 const CANDIDATE_POLICY_PRIOR: u32 = 21u;
+const CANDIDATE_TACTICAL_PRIORITY: u32 = 22u;
+const CANDIDATE_INTENT: u32 = 23u;
+
+const INTENT_ROYAL_CAPTURE: i32 = 0;
+const INTENT_CHECK_ROYAL: i32 = 1;
+const INTENT_HIGH_VALUE_CAPTURE: i32 = 2;
+const INTENT_CREATE_TIMELINE: i32 = 3;
+const INTENT_AFFECT_PRESENT: i32 = 4;
+const INTENT_QUIET_TEMPORAL: i32 = 5;
+const INTENT_QUIET: i32 = 6;
 
 fn abs_i32(value: i32) -> i32 { return select(value, -value, value < 0); }
 fn sign_i32(value: i32) -> i32 { return select(select(0, 1, value > 0), -1, value < 0); }
@@ -166,6 +176,58 @@ fn path_clear(state: u32, piece: i32, color: i32, row: i32, time: i32, x: i32, y
   return true;
 }
 
+fn path_clear_after_move(state: u32, piece: i32, color: i32, row: i32, time: i32, x: i32, y: i32, vacated_row: i32, vacated_time: i32, vacated_x: i32, vacated_y: i32, dx: i32, dy: i32, raw_dt: i32, dt: i32, dl: i32) -> bool {
+  let sliding = piece == 3 || piece == 4 || piece == 5 || piece == 6 || piece == 7 || piece == 8 || piece == 9;
+  if (!sliding && piece != 11 && piece != 12) { return true; }
+  let distance = max(max(abs_i32(dx), abs_i32(dy)), max(abs_i32(dt), abs_i32(dl)));
+  if (distance <= 1) { return true; }
+  let step_x = sign_i32(dx); let step_y = sign_i32(dy); let step_t = raw_dt / distance; let step_l = sign_i32(dl);
+  for (var step = 1; step < distance; step = step + 1) {
+    let check_row = row + step_l * step; let check_time = time + step_t * step;
+    if (step_t != 0 && board_side_at(state, check_row, check_time) != color) { continue; }
+    let check_x = x + step_x * step; let check_y = y + step_y * step;
+    if (check_row == vacated_row && check_time == vacated_time && check_x == vacated_x && check_y == vacated_y) { continue; }
+    if (square_at(state, check_row, check_time, check_x, check_y) != 0) { return false; }
+  }
+  return true;
+}
+
+fn move_checks_royal_after_move(state: u32, source_board: u32, target_board: u32, from_x: i32, from_y: i32, to_x: i32, to_y: i32, piece: i32, color: i32) -> bool {
+  let board_count = u32(max(0, states[state_base(state) + HEADER_BOARD_COUNT]));
+  let source = board_base(state, source_board);
+  let target = board_base(state, target_board);
+  let target_row = states[target + BOARD_ROW];
+  let target_time = states[target + BOARD_TIME];
+  let vacated_row = states[source + BOARD_ROW];
+  let vacated_time = states[source + BOARD_TIME];
+  for (var board = 0u; board < board_count; board = board + 1u) {
+    let royal_board = board_base(state, board);
+    if (states[royal_board + BOARD_LATEST] == 0) { continue; }
+    let same_board = board == target_board;
+    if (!same_board && states[royal_board + BOARD_SIDE] != color) { continue; }
+    for (var square = 0u; square < 64u; square = square + 1u) {
+      let occupant = states[royal_board + BOARD_SQUARES + square];
+      let occupant_piece = occupant & 255;
+      let occupant_color = (occupant >> 8) & 255;
+      if ((occupant_piece != 1 && occupant_piece != 4) || occupant_color == color) { continue; }
+      let royal_x = i32(square % 8u);
+      let royal_y = i32(square / 8u);
+      if (same_board && royal_x == to_x && royal_y == to_y) { continue; }
+      let dx = royal_x - to_x;
+      let dy = royal_y - to_y;
+      let raw_dt = states[royal_board + BOARD_TIME] - target_time;
+      var dt = raw_dt;
+      if (!same_board && dt % 2 == 0) { dt = dt / 2; }
+      let dl = states[royal_board + BOARD_ROW] - target_row;
+      if (!legal_shape(piece, color, to_y, royal_x, royal_y, dx, dy, dt, dl, same_board, occupant_piece, occupant_color, states[target + BOARD_CASTLING], states[target + BOARD_EP], states[target + BOARD_EP + 1u])) { continue; }
+      if (path_clear_after_move(state, piece, color, target_row, target_time, to_x, to_y, vacated_row, vacated_time, from_x, from_y, dx, dy, raw_dt, dt, dl)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 fn castling_clear(state: u32, piece: i32, color: i32, row: i32, time: i32, x: i32, y: i32, dx: i32, dy: i32, dt: i32, dl: i32, castling: i32) -> bool {
   if (piece != 1 || dy != 0 || dt != 0 || dl != 0 || abs_i32(dx) != 2) { return true; }
   let expected_y = select(0, 7, color == 1); let rook_x = select(0, 7, dx > 0);
@@ -209,6 +271,35 @@ fn next_branch_row(state: u32, source_row: i32, color: i32) -> i32 {
   return row;
 }
 
+fn board_contains_royal(base: u32) -> bool {
+  for (var square = 0u; square < 64u; square = square + 1u) {
+    let piece = states[base + BOARD_SQUARES + square] & 255;
+    if (piece == 1 || piece == 4) {
+      return true;
+    }
+  }
+  return false;
+}
+
+fn board_relevance(state: u32, board: u32) -> i32 {
+  let base = board_base(state, board);
+  var relevance = 0;
+  if (states[base + BOARD_PENDING] != 0) { relevance = relevance + 6; }
+  if (states[base + BOARD_ACTIVE] != 0) { relevance = relevance + 3; }
+  if (states[base + BOARD_TIME] == states[state_base(state) + HEADER_PRESENT]) { relevance = relevance + 2; }
+  if (states[base + BOARD_LATEST] != 0) { relevance = relevance + 1; }
+  if (states[base + BOARD_ORIGIN] != 0) { relevance = relevance + 1; }
+  if (board_contains_royal(base)) { relevance = relevance + 4; }
+  return relevance;
+}
+
+fn prune_low_relevance_quiet_target(state: u32, target_board: u32, tactical_priority: i32) -> bool {
+  let target = board_base(state, target_board);
+  let inactive = states[target + BOARD_ACTIVE] == 0;
+  let non_present = states[target + BOARD_TIME] != states[state_base(state) + HEADER_PRESENT];
+  return tactical_priority == 0 && inactive && non_present && board_relevance(state, target_board) < 4;
+}
+
 fn copy_board(source: u32, destination: u32) { for (var word = 0u; word < BOARD_STRIDE; word = word + 1u) { deltas[destination + word] = states[source + word]; } }
 
 fn write_carry(state: u32) {
@@ -226,17 +317,42 @@ fn write_carry(state: u32) {
   candidates[base + CANDIDATE_CARRY] = 1;
   candidates[base + CANDIDATE_NODE_ID] = 0;
   candidates[base + CANDIDATE_POLICY_PRIOR] = 0;
+  candidates[base + CANDIDATE_TACTICAL_PRIORITY] = 0;
+  candidates[base + CANDIDATE_INTENT] = INTENT_QUIET;
 }
 
 fn write_candidate(state: u32, source_board: u32, target_board: u32, from_x: i32, from_y: i32, to_x: i32, to_y: i32, piece: i32, color: i32, captured: i32, heuristic: i32) {
+  let state_offset = state_base(state); let source = board_base(state, source_board); let target_base = board_base(state, target_board);
+  let same_board = source_board == target_board; let target_latest = states[target_base + BOARD_LATEST] != 0;
+  let terminal = (captured & 255) == 1 || (captured & 255) == 4;
+  let captured_value = piece_value(captured & 255);
+  let royal_check = move_checks_royal_after_move(state, source_board, target_board, from_x, from_y, to_x, to_y, piece, color);
+  let tactical_priority = select(
+    select(select(0, select(1, 2, captured_value >= 900), captured_value >= 500), 3, royal_check),
+    4,
+    terminal
+  );
+  if (prune_low_relevance_quiet_target(state, target_board, tactical_priority)) {
+    return;
+  }
   let slot = atomicAdd(&counters[0], 1u);
   atomicAdd(&counters[3], 1u);
   if (slot >= params.candidate_capacity) { atomicStore(&counters[2], 1u); return; }
-  let state_offset = state_base(state); let source = board_base(state, source_board); let target_base = board_base(state, target_board);
   let candidate = slot * params.candidate_stride; let delta = slot * params.delta_stride;
-  let same_board = source_board == target_board; let target_latest = states[target_base + BOARD_LATEST] != 0;
-  let terminal = (captured & 255) == 1 || (captured & 255) == 4;
+  if (tactical_priority > 0) {
+    atomicAdd(&counters[4], 1u);
+  }
   let historical_branch = !same_board && !target_latest;
+  let affects_present = states[target_base + BOARD_TIME] == states[state_offset + HEADER_PRESENT];
+  let intent = select(
+    select(
+      select(select(select(INTENT_QUIET, INTENT_QUIET_TEMPORAL, !same_board), INTENT_AFFECT_PRESENT, affects_present), INTENT_CREATE_TIMELINE, historical_branch),
+      INTENT_HIGH_VALUE_CAPTURE,
+      captured_value >= 500
+    ),
+    select(INTENT_CHECK_ROYAL, INTENT_ROYAL_CAPTURE, terminal),
+    royal_check || terminal
+  );
   let status = select(select(1, 3, historical_branch), select(2, 4, historical_branch), terminal);
   candidates[candidate + CANDIDATE_PARENT] = i32(state);
   let inherited_root = states[state_offset + HEADER_ROOT];
@@ -259,6 +375,8 @@ fn write_candidate(state: u32, source_board: u32, target_board: u32, from_x: i32
   candidates[candidate + CANDIDATE_CARRY] = 0;
   candidates[candidate + CANDIDATE_NODE_ID] = i32(params.cycle_index * params.candidate_capacity + slot + 1u);
   candidates[candidate + CANDIDATE_POLICY_PRIOR] = 0;
+  candidates[candidate + CANDIDATE_TACTICAL_PRIORITY] = tactical_priority;
+  candidates[candidate + CANDIDATE_INTENT] = intent;
 
   copy_board(source, delta);
   let source_square = BOARD_SQUARES + u32(from_y * 8 + from_x); let target_square = BOARD_SQUARES + u32(to_y * 8 + to_x);

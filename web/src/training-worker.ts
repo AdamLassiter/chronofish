@@ -1,215 +1,16 @@
-import { train, predictValues, decodeCompactModel, normalizedSearchScore } from "./training-gpu.js";
+import { train, predictValues, normalizedSearchScore } from "./training-gpu.js";
 import { policyBucket } from "./training-policy.js";
 import { breedCpuPopulation, cpuParametersKey, cpuReferenceWorkerCount, uniqueCpuParameters } from "./training-cpu.js";
 import type { CpuParameters } from "./training-cpu.js";
 import { appendReplaySamples, dedupeTrainingSamples } from "./training-replay.js";
+import { fetchActiveModel, fetchCpuParameters, loadReplayBuffer, saveReplayBuffer } from "./training-worker-storage.js";
 import type { Color, GameSnapshot, Move, BoardSnapshot, Timeline } from "./types.js";
 import type { CompactValueModel, EncodedCompactModel, TrainingConfig as GpuTrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu.js";
-const BUFFER_KEY = "value-policy-buffer";
-const PROJECTION_SIZE = 2048;
-const PROJECTION_SEED = 2166136261;
-const MAX_PLAYOUT_PLIES = 10;
-const HIDDEN_LAYERS = [1024, 512, 256];
-const VALUE_EPOCHS_PER_SUBMIT = 64;
-const POLICY_STEPS_PER_SUBMIT = 64;
-const DEFAULT_BATCH_SIZE = 1024;
-const DEFAULT_VALIDATION_SPLIT = 0.1;
-const DEFAULT_PATIENCE = 12;
-const DEFAULT_WEIGHT_DECAY = 0.00001;
-const MAX_GPU_TRAINING_SAMPLES = 16384;
-const MAX_GPU_TRAINING_BATCH = 16384;
-const MAX_GPU_VALIDATION_INTERVAL = 16384;
-const PROJECTION_CHUNK_SIZE = 256;
-const LABEL_REQUEST_MIN_TIMEOUT_MS = 30000;
-const LABEL_REQUEST_MAX_TIMEOUT_MS = 120000;
-const LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS = 3;
-const TRAINING_IO_TIMEOUT_MS = 15000;
-const MAX_PARALLEL_GPU_TRAINING_WORKERS = 16;
+import { DEFAULT_BATCH_SIZE, DEFAULT_PATIENCE, DEFAULT_VALIDATION_SPLIT, DEFAULT_WEIGHT_DECAY, HIDDEN_LAYERS, LABEL_REQUEST_MAX_TIMEOUT_MS, LABEL_REQUEST_MIN_TIMEOUT_MS, LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS, MAX_GPU_TRAINING_BATCH, MAX_GPU_TRAINING_SAMPLES, MAX_GPU_VALIDATION_INTERVAL, MAX_PARALLEL_GPU_TRAINING_WORKERS, MAX_PLAYOUT_PLIES, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, TRAINING_IO_TIMEOUT_MS, VALUE_EPOCHS_PER_SUBMIT } from "./training-worker-types.js";
+import type { AiWorkerResponse, AppliedWorkerTurn, CpuReferenceScore, CpuTrainingResult, EncodedPosition, LabelJob, LabelWorkerSample, LossLog, LossLogValidation, LossLogValidationExample, MetricsSummary, NormalizedTrainingConfig, ProgressCallback, TrainingLabelKind, TrainingMode, TrainingRunMetrics, TrainingSubject, TrainingWorkerRequest, TrainingWorkerResponse, WorkerRequestPayload, WorkerScope } from "./training-worker-types.js";
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
 const pipelineCache = new Map<string, GPUComputePipeline>();
-
-type TrainingLabelKind = "search" | "outcome" | "distilled" | string;
-type TrainingSubject = "gpu" | "cpu";
-type TrainingMode = "vsGpu" | "vsCpu" | "self" | "distill";
-
-interface WorkerScope {
-  addEventListener(type: "message", listener: (event: MessageEvent<TrainingWorkerRequest>) => void | Promise<void>): void;
-  postMessage(message: TrainingWorkerResponse): void;
-}
-
-interface TrainingWorkerRequest {
-  id: number;
-  type?: "train" | "validateLossLogs";
-  game?: GameSnapshot;
-  config?: Partial<NormalizedTrainingConfig>;
-  candidateModel?: ArrayBuffer;
-}
-
-type TrainingWorkerResponse = Record<string, unknown> & {
-  id: number;
-  ok: boolean;
-};
-
-type ProgressMessage = Record<string, unknown>;
-type ProgressCallback = (message: ProgressMessage) => void;
-
-interface NormalizedTrainingConfig extends GpuTrainingConfig {
-  trainingSubject: TrainingSubject;
-  trainingModes: TrainingMode[];
-  runSeed: number;
-  samples: number;
-  selfPlayWorkers: number;
-  searchWorkers: number;
-  explorationTemperature: number;
-  depth: number;
-  nodes: number;
-  maxBuffer: number;
-  lossLogReplay: number;
-  cpuDepth: number;
-  cpuNodes: number;
-  cpuTrainingTimeMs: number;
-  cpuCandidates: number;
-  cpuFinalists: number;
-  cpuPairBatch: number;
-  cpuOpponentVariants: number;
-  cpuScreeningOpponentVariants: number;
-  cpuRoundsPerVariant: number;
-  cpuHallOfFameEntries: number;
-  cpuLeagueContenders: number;
-  cpuLeagueHallOfFameEntries: number;
-  cpuMinPairs: number;
-  cpuMaxPairs: number;
-  cpuDrawWindow: number;
-  cpuDrawRateLimit: number;
-  cpuMaxMatchPlies: number;
-  cpuMaxMatchTimeMs: number;
-  cpuMaxGenerationsWithoutCandidate: number;
-  cpuWorkers: number;
-  cpuTrainSeconds: number;
-  labelWorkers?: number;
-  metrics?: TrainingRunMetrics | null;
-}
-
-interface TrainingRunMetrics extends TrainingMetrics {
-  startedAt: number;
-  phases: Record<string, number>;
-  sampleCounts?: Record<string, number>;
-  searchPositionCount?: number;
-  searchLabelCount?: number;
-  lossLogValidation?: LossLogValidation | null;
-}
-
-interface MetricsSummary {
-  totalMs: number;
-  phases: Record<string, number>;
-  sampleRates: Record<string, number>;
-  lossLogValidation: LossLogValidation | null;
-}
-
-interface CpuTrainingResult {
-  parametersJson: string;
-  score: number;
-}
-
-interface CpuReferenceScore {
-  baselineScore?: number;
-  baselineMoves?: Move[];
-  gpuScore?: number;
-  gpuMoves?: Move[];
-}
-
-interface EncodedPosition {
-  game: GameSnapshot;
-  sample: TrainingSample;
-}
-
-interface LabelWorkerSample extends TrainingSample {
-  outcomeTurn?: Color;
-  ply?: number;
-}
-
-interface AiSearchResult {
-  moves?: Move[];
-  score?: number;
-  cpuSearch?: string | null;
-  gpuSearch?: string | null;
-}
-
-interface AiWorkerStatus {
-  complete?: boolean;
-  terminal?: boolean;
-  winner?: Color;
-  nextTurn?: Color;
-}
-
-interface AppliedWorkerTurn {
-  game: GameSnapshot;
-  status: AiWorkerStatus;
-  winner: Color | null;
-}
-
-interface AiWorkerResponse {
-  ok: boolean;
-  result?: AiSearchResult;
-  game?: GameSnapshot;
-  status?: AiWorkerStatus;
-  sample?: TrainingSample;
-  samples?: TrainingSample[];
-  error?: string;
-}
-
-interface LossLogDecision {
-  game?: GameSnapshot;
-  selectedMoves?: Move[];
-  ply?: number;
-  botColor?: Color;
-  selectedScore?: number;
-}
-
-interface LossLog {
-  logPath?: string;
-  decisions?: LossLogDecision[];
-}
-
-interface LossLogValidation {
-  checked: number;
-  changed: number;
-  unchanged: number;
-  skipped: number;
-  failed: boolean;
-  examples: LossLogValidationExample[];
-}
-
-interface LossLogValidationExample {
-  logPath: string | null;
-  ply: number | null;
-  botColor: Color | null;
-  previous: string;
-  current: string;
-  previousScore: number | null;
-  currentScore: number | null;
-}
-
-interface LabelJob {
-  game: GameSnapshot;
-  index: number;
-  seed: number;
-  plies: number;
-}
-
-interface WorkerRequestPayload extends Record<string, unknown> {
-  type?: string;
-  game?: GameSnapshot;
-  games?: GameSnapshot[];
-  move?: Move | null;
-  nodes?: number;
-  depth?: number;
-  timeMs?: number;
-  parametersJson?: string;
-}
-
-interface ReplayDb extends IDBDatabase {}
 
 const workerSelf = self as unknown as WorkerScope;
 
@@ -361,7 +162,12 @@ function isTrainingSubject(value: unknown): value is TrainingSubject {
 }
 
 function isTrainingMode(value: unknown): value is TrainingMode {
-  return value === "vsGpu" || value === "vsCpu" || value === "self" || value === "distill";
+  return value === "vsGpu"
+    || value === "vsCpu"
+    || value === "self"
+    || value === "distill"
+    || value === "curriculum"
+    || value === "tactical";
 }
 
 function legacyTrainingSubject(config: Partial<NormalizedTrainingConfig>): TrainingSubject {
@@ -399,6 +205,9 @@ function legacyTrainingModes(config: Partial<NormalizedTrainingConfig>, subject:
   }
   if (target !== "trainCpu" && (labelMode === "mixed" || labelMode === "distill" || labelMode === undefined)) {
     modes.push("distill");
+  }
+  if (target !== "trainCpu" && labelMode === "mixed") {
+    modes.push("curriculum", "tactical");
   }
   return modes;
 }
@@ -463,9 +272,14 @@ async function collectTrainingSamples(
   const vsCpu = trainingModeEnabled(config, "vsCpu");
   const self = trainingModeEnabled(config, "self");
   const distill = config.trainingSubject === "gpu" && trainingModeEnabled(config, "distill");
+  const curriculum = config.trainingSubject === "gpu" && trainingModeEnabled(config, "curriculum");
+  const tactical = config.trainingSubject === "gpu" && trainingModeEnabled(config, "tactical");
   if (config.trainingSubject === "cpu") {
     collectors.push(() => timed(metrics, "cpuLabels", () => collectCpuSearchSamples(game, config, progress)));
   } else {
+    if (curriculum) {
+      collectors.push(() => timed(metrics, "curriculumLabels", () => collectCurriculumSamples(game, config, progress)));
+    }
     if (vsGpu) {
       collectors.push(() => collectSearchSamples(game, config, progress));
     }
@@ -477,6 +291,9 @@ async function collectTrainingSamples(
     }
     if (distill) {
       collectors.push(() => timed(metrics, "distillLabels", () => collectDistilledSamples(game, config, activeModel, progress)));
+    }
+    if (tactical) {
+      collectors.push(() => timed(metrics, "tacticalLabels", () => collectTacticalSamples(game, config, progress)));
     }
   }
   if (config.trainingSubject === "gpu" && vsGpu && vsCpu) {
@@ -1146,6 +963,96 @@ async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTra
   }
 }
 
+async function collectCurriculumSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
+  const target = modeLabelTarget(config, 8);
+  const positions = await timed(config.metrics, "curriculumPositions", () =>
+    collectGpuPositions(game, config, target, progress, "curriculum", config.searchWorkers, generateCurriculumPositionGame)
+  );
+  return collectGpuSearchLabels(positions, config, progress, "curriculum", 1.05, 0xc374_0001);
+}
+
+async function collectTacticalSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
+  const target = modeLabelTarget(config, 8);
+  const positions = await timed(config.metrics, "tacticalPositions", () =>
+    collectGpuPositions(game, config, target, progress, "tactical", config.searchWorkers, generateTacticalPositionGame)
+  );
+  return collectGpuSearchLabels(
+    positions,
+    config,
+    progress,
+    "tactical",
+    1.6,
+    0x7ac7_0001,
+    (position) => 1 + tacticalPositionPriority(position.game) * 0.2
+  );
+}
+
+async function collectGpuSearchLabels(
+  positions: EncodedPosition[],
+  config: NormalizedTrainingConfig,
+  progress: ProgressCallback,
+  labelKind: TrainingLabelKind,
+  baseLabelWeight: number,
+  seedSalt: number,
+  labelWeightMultiplier: (position: EncodedPosition) => number = () => 1
+): Promise<TrainingSample[]> {
+  const workerCount = gpuTrainingWorkerCount(positions.length, config.searchWorkers);
+  const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
+  let nextPosition = 0;
+  let collected = 0;
+  progress({ sampleCount: positions.length, labelWorkers: workerCount, labelKind, labelPhase: "labels" });
+  await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) => runWorker(workerIndex)));
+  return samples.filter((sample): sample is TrainingSample => Boolean(sample));
+
+  async function runWorker(workerIndex: number): Promise<void> {
+    const ai = new Worker("./ai-worker.js", { type: "module" });
+    try {
+      while (nextPosition < positions.length) {
+        const index = nextPosition;
+        nextPosition += 1;
+        const position = positions[index];
+        if (!position) {
+          continue;
+        }
+        samples[index] = await labelPosition(ai, position, index, workerIndex);
+        collected += samples[index] ? 1 : 0;
+        progress({ collected, sampleCount: positions.length, labelWorkers: workerCount, labelKind, labelPhase: "labels" });
+      }
+    } finally {
+      ai.terminate();
+    }
+  }
+
+  async function labelPosition(ai: Worker, position: EncodedPosition, index: number, workerIndex: number): Promise<TrainingSample | null> {
+    try {
+      const response = await requestWorker(ai, {
+        type: "search",
+        game: position.game,
+        depth: config.depth,
+        nodes: config.nodes,
+        timeMs: workerSearchTimeMs(config),
+        gpuMode: "full",
+        temperature: config.explorationTemperature,
+        randomSeed: sampleSeed(String(labelKind), index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ seedSalt))
+      }, workerRequestTimeout(config));
+      const result = response.result;
+      if (!result?.moves?.length) {
+        return null;
+      }
+      return {
+        ...position.sample,
+        label: normalizeSearchScore(result.score ?? 0),
+        policy: policyBucket(result.moves[0]),
+        labelKind,
+        labelWeight: baseLabelWeight * labelWeightMultiplier(position),
+        pseudo: false
+      };
+    } catch {
+      return null;
+    }
+  }
+}
+
 async function collectCpuGpuDuelSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
   const target = modeLabelTarget(config, 8);
   if (target <= 0) {
@@ -1420,7 +1327,14 @@ async function collectGpuPositions(
   target: number,
   progress: ProgressCallback,
   labelKind: TrainingLabelKind,
-  requestedWorkers: number = config.searchWorkers
+  requestedWorkers: number = config.searchWorkers,
+  positionGenerator: (
+    ai: Worker,
+    game: GameSnapshot,
+    config: NormalizedTrainingConfig,
+    index: number,
+    workerIndex: number
+  ) => Promise<GameSnapshot> = generatePositionGame
 ): Promise<EncodedPosition[]> {
   if (target <= 0) {
     return [];
@@ -1441,7 +1355,7 @@ async function collectGpuPositions(
       while (nextJob < target) {
         const index = nextJob;
         nextJob += 1;
-        const positionGame = await generatePositionGame(ai, game, config, index, workerIndex);
+        const positionGame = await positionGenerator(ai, game, config, index, workerIndex);
         local.push({ index, game: positionGame });
         generated += 1;
         progress({ collected: generated, sampleCount: target, labelWorkers: workerCount, labelKind, labelPhase: "positions" });
@@ -1509,6 +1423,200 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
     }
   }
   return current;
+}
+
+async function generateCurriculumPositionGame(
+  ai: Worker,
+  game: GameSnapshot,
+  config: NormalizedTrainingConfig,
+  index: number,
+  workerIndex: number
+): Promise<GameSnapshot> {
+  const generated = await generatePositionGame(ai, game, curriculumSearchConfig(config, index), index, workerIndex);
+  return curriculumGame(generated, index);
+}
+
+async function generateTacticalPositionGame(
+  ai: Worker,
+  game: GameSnapshot,
+  config: NormalizedTrainingConfig,
+  index: number,
+  workerIndex: number
+): Promise<GameSnapshot> {
+  let best = cloneGame(game);
+  let bestPriority = tacticalPositionPriority(best);
+  const attempts = 1 + (index % 4);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const generated = await generatePositionGame(
+      ai,
+      bestPriority > 0 ? best : game,
+      tacticalSearchConfig(config, attempt),
+      index + attempt * MAX_PLAYOUT_PLIES,
+      workerIndex
+    );
+    const priority = tacticalPositionPriority(generated);
+    if (priority > bestPriority) {
+      best = generated;
+      bestPriority = priority;
+    }
+    if (priority >= 4) {
+      break;
+    }
+  }
+  return best;
+}
+
+function curriculumSearchConfig(config: NormalizedTrainingConfig, index: number): NormalizedTrainingConfig {
+  const stage = index % 6;
+  return {
+    ...config,
+    depth: Math.max(1, Math.min(config.depth, 1 + Math.floor(stage / 2))),
+    nodes: Math.max(1, Math.min(config.nodes, 512 * (stage + 1))),
+    explorationTemperature: Math.min(0.6, Math.max(config.explorationTemperature, stage >= 3 ? 0.35 : 0.15))
+  };
+}
+
+function tacticalSearchConfig(config: NormalizedTrainingConfig, attempt: number): NormalizedTrainingConfig {
+  return {
+    ...config,
+    depth: Math.max(2, Math.min(config.depth, 3 + attempt)),
+    nodes: Math.max(1024, Math.min(config.nodes, 2048 * (attempt + 1))),
+    explorationTemperature: Math.min(0.8, Math.max(config.explorationTemperature, 0.4 + attempt * 0.1))
+  };
+}
+
+function curriculumGame(game: GameSnapshot, index: number): GameSnapshot {
+  const stage = index % 6;
+  const cloned = cloneGame(game);
+  const presentTime = activePresentTime(cloned);
+  let timelines = cloned.timelines
+    .map((timeline) => ({
+      ...timeline,
+      boards: curriculumBoards(timeline.boards, presentTime, stage)
+    }))
+    .filter((timeline) => timeline.boards.length > 0)
+    .sort((left, right) => curriculumTimelinePriority(right, presentTime) - curriculumTimelinePriority(left, presentTime));
+  const timelineLimit = stage <= 1 ? 1 : stage <= 3 ? 2 : Math.max(2, Math.min(timelines.length, 4));
+  timelines = timelines.slice(0, timelineLimit).map((timeline, row) => {
+    const next = { ...timeline, row };
+    if (stage < 4) {
+      next.active = row === 0;
+    }
+    return next;
+  });
+  const timelineIds = new Set(timelines.map((timeline) => timeline.id));
+  const boardTimes = new Map(timelines.map((timeline) => [
+    timeline.id,
+    new Set(timeline.boards.map((board) => board.time))
+  ]));
+  return {
+    ...cloned,
+    presentTime,
+    timelines,
+    checkedRoyals: cloned.checkedRoyals.filter((position) =>
+      timelineIds.has(position.timelineId) && boardTimes.get(position.timelineId)?.has(position.time)
+    )
+  };
+}
+
+function curriculumBoards(boards: BoardSnapshot[], presentTime: number, stage: number): BoardSnapshot[] {
+  if (!boards.length) {
+    return [];
+  }
+  const latest = latestBoard({ id: 0, row: 0, label: "", owner: "neutral", boards });
+  const presentBoards = boards.filter((board) => board.time === presentTime);
+  const candidates = stage <= 1
+    ? [presentBoards.at(-1) ?? latest]
+    : stage <= 3
+      ? [...boards.slice(-2), presentBoards.at(-1)]
+      : boards.slice(Math.max(0, boards.length - (stage + 1)));
+  const unique = new Map<number, BoardSnapshot>();
+  for (const board of candidates) {
+    if (board) {
+      unique.set(board.time, curriculumBoard(board, stage));
+    }
+  }
+  return Array.from(unique.values()).sort((left, right) => left.time - right.time);
+}
+
+function curriculumBoard(board: BoardSnapshot, stage: number): BoardSnapshot {
+  if (stage !== 0) {
+    return board;
+  }
+  const classic = new Set(["king", "queen", "rook", "bishop", "knight", "pawn"]);
+  return {
+    ...board,
+    board: board.board.map((row) => row.map((piece) => {
+      if (!piece) {
+        return null;
+      }
+      if (classic.has(piece.type)) {
+        return piece;
+      }
+      return piece.type === "royalQueen"
+        ? { ...piece, type: "queen" }
+        : null;
+    }))
+  };
+}
+
+function curriculumTimelinePriority(timeline: Timeline, presentTime: number): number {
+  const hasPresent = timeline.boards.some((board) => board.time === presentTime) ? 4 : 0;
+  const active = timeline.active ? 2 : 0;
+  const latest = latestBoard(timeline)?.time ?? Number.NEGATIVE_INFINITY;
+  return hasPresent + active + latest / 1000;
+}
+
+function tacticalPositionPriority(game: GameSnapshot): number {
+  let priority = 0;
+  const activeTimelines = game.timelines.filter((timeline) => timeline.active !== false);
+  priority += Math.min(3, game.checkedRoyals.length * 2);
+  priority += Math.max(0, activeTimelines.length - 1);
+  priority += Math.max(0, game.timelines.length - 2);
+  priority += royalExposure(game);
+  priority += temporalPowerPieceCount(game) > 1 ? 1 : 0;
+  return priority;
+}
+
+function royalExposure(game: GameSnapshot): number {
+  let exposed = 0;
+  for (const timeline of game.timelines) {
+    const board = latestBoard(timeline);
+    for (const row of board?.board ?? []) {
+      for (const piece of row) {
+        if (piece && ["king", "royalQueen"].includes(piece.type)) {
+          exposed += timeline.active === false ? 0 : 1;
+        }
+      }
+    }
+  }
+  return Math.min(2, exposed);
+}
+
+function temporalPowerPieceCount(game: GameSnapshot): number {
+  let count = 0;
+  for (const timeline of game.timelines) {
+    const board = latestBoard(timeline);
+    for (const row of board?.board ?? []) {
+      for (const piece of row) {
+        if (piece && ["queen", "royalQueen", "unicorn", "dragon"].includes(piece.type)) {
+          count += 1;
+        }
+      }
+    }
+  }
+  return count;
+}
+
+function activePresentTime(game: GameSnapshot): number {
+  if (Number.isFinite(game.presentTime)) {
+    return game.presentTime ?? 0;
+  }
+  const times = game.timelines
+    .filter((timeline) => timeline.active !== false)
+    .map((timeline) => latestBoard(timeline)?.time)
+    .filter((time): time is number => typeof time === "number");
+  return times.length ? Math.min(...times) : 0;
 }
 
 async function applyWorkerTurn(
@@ -2006,96 +2114,6 @@ function movesKey(moves: Move[] | undefined): string {
   ).join("|");
 }
 
-async function fetchActiveModel(): Promise<CompactValueModel | null> {
-  try {
-    const response = await withTimeout(
-      fetch("/api/training/model"),
-      TRAINING_IO_TIMEOUT_MS,
-      "Timed out loading active model."
-    );
-    if (!response.ok) {
-      return null;
-    }
-    const buffer = await response.arrayBuffer();
-    const model = decodeCompactModel(buffer);
-    if (model) {
-      model.bytes = new Uint8Array(buffer);
-    }
-    return model;
-  } catch {
-    return null;
-  }
-}
-
-async function fetchCpuParameters(): Promise<CpuParameters> {
-  const response = await withTimeout(
-    fetch("/api/training/cpu-parameters"),
-    TRAINING_IO_TIMEOUT_MS,
-    "Timed out loading CPU parameters."
-  );
-  if (!response.ok) {
-    throw new Error("No active CPU parameters are available.");
-  }
-  const value = await response.json() as Record<string, unknown>;
-  const parameters: CpuParameters = {};
-  for (const [key, raw] of Object.entries(value)) {
-    if (typeof raw === "number" && Number.isFinite(raw)) {
-      parameters[key] = raw;
-    }
-  }
-  return parameters;
-}
-
-async function loadReplayBuffer(): Promise<TrainingSample[]> {
-  let db: ReplayDb | null = null;
-  try {
-    db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
-    return (await withTimeout(idbGet(db, BUFFER_KEY), TRAINING_IO_TIMEOUT_MS, "Timed out reading replay buffer.")) ?? [];
-  } catch {
-    return [];
-  } finally {
-    db?.close();
-  }
-}
-
-async function saveReplayBuffer(samples: TrainingSample[]): Promise<void> {
-  let db: ReplayDb | null = null;
-  try {
-    db = await withTimeout(openReplayDb(), TRAINING_IO_TIMEOUT_MS, "Timed out opening replay buffer.");
-    await withTimeout(idbPut(db, BUFFER_KEY, samples), TRAINING_IO_TIMEOUT_MS, "Timed out saving replay buffer.");
-  } catch {
-    // IndexedDB is an optimization; an in-memory run still works without it.
-  } finally {
-    db?.close();
-  }
-}
-
-function openReplayDb(): Promise<ReplayDb> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open("chronofish-training", 1);
-    request.onupgradeneeded = () => request.result.createObjectStore("buffers");
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function idbGet(db: ReplayDb, key: string): Promise<TrainingSample[] | undefined> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("buffers", "readonly");
-    const request = tx.objectStore("buffers").get(key);
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-}
-
-function idbPut(db: ReplayDb, key: string, value: TrainingSample[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction("buffers", "readwrite");
-    tx.objectStore("buffers").put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
 function autoLabelWorkers(): number {
   const cores = navigator.hardwareConcurrency ?? 4;
   return Math.max(1, Math.min(cores - 1, 16));

@@ -197,12 +197,14 @@
         <div class="training-tab-panel" id="training-gpu-panel" data-training-panel="gpu">
           <label>
             Mode
-            <select id="training-mode" multiple size="4"
+            <select id="training-mode" multiple size="6"
               title="Select one or more GPU model label modes. Multiple modes split the label budget across sources."
               aria-describedby="training-mode-help">
               <option value="vsGpu" selected title="Samples positions, runs GPU search, and trains from the selected move and search score.">vs GPU search</option>
               <option value="vsCpu" title="Uses CPU heuristic bot search labels.">vs CPU heuristic</option>
               <option value="self" selected title="Runs bounded GPU self-play from the current position and backfills discounted outcome labels.">vs Self</option>
+              <option value="curriculum" selected title="Generates simplified single-timeline and limited-history positions before full search labels.">Curriculum</option>
+              <option value="tactical" title="Oversamples check, royal pressure, branching, and temporal power-piece positions.">Tactics</option>
               <option value="distill" title="Uses the current neural model as a low-weight bootstrap label source. Fast, but it cannot discover better play by itself.">Distill</option>
             </select>
             <span id="training-mode-help" class="field-help field-help-wide">Choose one or more label modes. Distill is available only for GPU model training.</span>

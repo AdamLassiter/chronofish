@@ -19,10 +19,26 @@ const usage: BufferUsageConstants = (globalThis as unknown as { GPUBufferUsage?:
 
 interface ModelBuffers {
   model: CompactValueModel;
-  hiddenWeights: GPUBuffer[];
-  outputWeights: GPUBuffer;
-  policyWeights: GPUBuffer | null;
+  inferencePrecision: InferencePrecision;
+  sharedBoardEncoder: GPUBuffer[];
+  fastNet: {
+    policyWeights: GPUBuffer | null;
+    inputSize: number;
+    policyQuantization: PolicyQuantizationStats | null;
+  };
+  bigNet: {
+    outputWeights: GPUBuffer;
+    auxiliaryValueWeights: GPUBuffer | null;
+  };
 }
+
+interface PolicyQuantizationStats {
+  format: "int8-dequantized-upload" | "int8-to-fp16-upload";
+  scale: number;
+  maxAbsError: number;
+}
+
+type InferencePrecision = "fp32" | "fp16";
 
 interface NeuralWorkspace {
   capacity: number;
@@ -50,6 +66,7 @@ export class FrontierNeuralEvaluator {
   #workspace: NeuralWorkspace | null = null;
   #currentPolicyFeatures: { buffer: GPUBuffer; capacity: number; count: number } | null = null;
   #nextPolicyFeatures: { buffer: GPUBuffer; capacity: number; count: number } | null = null;
+  #cacheStats = { hits: 0, misses: 0, stores: 0 };
   #temporaries: GPUBuffer[] = [];
 
   constructor(device: GPUDevice, modelBytes: ArrayBuffer | null = null) {
@@ -65,6 +82,30 @@ export class FrontierNeuralEvaluator {
 
   beginSearch(): void {
     this.destroyPolicyFeatures();
+    this.#cacheStats = { hits: 0, misses: 0, stores: 0 };
+  }
+
+  cacheStats(): { hits: number; misses: number; stores: number; hitRate: number } {
+    const lookups = this.#cacheStats.hits + this.#cacheStats.misses;
+    return {
+      ...this.#cacheStats,
+      hitRate: lookups > 0 ? Math.round((this.#cacheStats.hits / lookups) * 1000) / 1000 : 0
+    };
+  }
+
+  async quantizationStats(): Promise<{ inferencePrecision: InferencePrecision | null; fastNetPolicy: PolicyQuantizationStats | null }> {
+    const modelBuffers = await this.model();
+    return {
+      inferencePrecision: modelBuffers?.inferencePrecision ?? null,
+      fastNetPolicy: modelBuffers?.fastNet.policyQuantization ?? null
+    };
+  }
+
+  networkRoles(): { fastNet: string; bigNet: string } {
+    return {
+      fastNet: "policy-prior-candidate-pruning",
+      bigNet: "retained-state-value-and-auxiliary-heads"
+    };
   }
 
   async encode(
@@ -86,7 +127,7 @@ export class FrontierNeuralEvaluator {
     const pipelines = await this.pipelines();
     const effectiveBatchSize = Math.max(1, Math.min(stateCount, Math.floor(batchSize)));
     const workspace = this.workspace(effectiveBatchSize, modelBuffers.model);
-    const nextPolicyFeatures = modelBuffers.policyWeights
+    const nextPolicyFeatures = modelBuffers.fastNet.policyWeights
       ? this.policyFeatureBuffer("next", stateCount, outputLayerSize(modelBuffers.model))
       : null;
     if (nextPolicyFeatures) {
@@ -119,7 +160,7 @@ export class FrontierNeuralEvaluator {
         const layerParams = this.keep(uniformU32(this.device, [batchCount, inputSize, outputSize, 0]));
         encodeBindings(this.device, encoder, pipelines.forwardLayer, [
           [0, layer === 0 ? workspace.projected : workspace.activations[layer - 1]!],
-          [1, modelBuffers.hiddenWeights[layer]!],
+          [1, modelBuffers.sharedBoardEncoder[layer]!],
           [2, workspace.activations[layer]!],
           [3, layerParams],
           [4, workspace.activeStates]
@@ -133,6 +174,7 @@ export class FrontierNeuralEvaluator {
           stateOffset * outputLayerSize(modelBuffers.model) * Float32Array.BYTES_PER_ELEMENT,
           batchCount * outputLayerSize(modelBuffers.model) * Float32Array.BYTES_PER_ELEMENT
         );
+        this.#cacheStats.stores += batchCount;
       }
 
       const finalSize = modelBuffers.model.hiddenLayers.at(-1)!;
@@ -141,7 +183,7 @@ export class FrontierNeuralEvaluator {
         ? pipelines.forwardOutput
         : pipelines.forwardOutputLinear, [
         [0, workspace.activations.at(-1)!],
-        [1, modelBuffers.outputWeights],
+        [1, modelBuffers.bigNet.outputWeights],
         [2, workspace.predictions],
         [3, outputParams],
         [4, workspace.activeStates]
@@ -167,12 +209,13 @@ export class FrontierNeuralEvaluator {
     targetDepth: number
   ): Promise<boolean> {
     const modelBuffers = await this.model();
-    if (!modelBuffers?.policyWeights) {
+    if (!modelBuffers?.fastNet.policyWeights) {
       return false;
     }
     const pipelines = await this.pipelines();
-    const inputSize = outputLayerSize(modelBuffers.model);
+    const inputSize = modelBuffers.fastNet.inputSize;
     if (!this.#currentPolicyFeatures || this.#currentPolicyFeatures.count < stateCount) {
+      this.#cacheStats.misses += stateCount;
       const current = this.policyFeatureBuffer("current", stateCount, inputSize);
       encoder.clearBuffer(current);
       this.encodeHiddenFeatures(
@@ -188,12 +231,14 @@ export class FrontierNeuralEvaluator {
         modelBuffers,
         pipelines
       );
+    } else {
+      this.#cacheStats.hits += stateCount;
     }
     const params = this.keep(policyParams(this.device, candidateCount, candidateStride, inputSize, 25));
     encodeBindings(this.device, encoder, pipelines.applyPolicy, [
       [0, candidates],
       [1, this.#currentPolicyFeatures!.buffer],
-      [2, modelBuffers.policyWeights],
+      [2, modelBuffers.fastNet.policyWeights],
       [3, params]
     ], Math.ceil(candidateCount / 64));
     return true;
@@ -212,9 +257,10 @@ export class FrontierNeuralEvaluator {
     }
     this.#workspace = null;
     void this.#model?.then((buffers) => {
-      buffers?.hiddenWeights.forEach((buffer) => buffer.destroy());
-      buffers?.outputWeights.destroy();
-      buffers?.policyWeights?.destroy();
+      buffers?.sharedBoardEncoder.forEach((buffer) => buffer.destroy());
+      buffers?.bigNet.outputWeights.destroy();
+      buffers?.bigNet.auxiliaryValueWeights?.destroy();
+      buffers?.fastNet.policyWeights?.destroy();
     });
     this.#model = null;
     this.#pipelines = null;
@@ -304,7 +350,7 @@ export class FrontierNeuralEvaluator {
         const layerParams = this.keep(uniformU32(this.device, [batchCount, layerInputSize, outputSize, 0]));
         encodeBindings(this.device, encoder, pipelines.forwardLayer, [
           [0, layer === 0 ? workspace.projected : workspace.activations[layer - 1]!],
-          [1, modelBuffers.hiddenWeights[layer]!],
+          [1, modelBuffers.sharedBoardEncoder[layer]!],
           [2, workspace.activations[layer]!],
           [3, layerParams],
           [4, workspace.activeStates]
@@ -370,14 +416,57 @@ function modelBuffersFromBytes(device: GPUDevice, bytes: ArrayBuffer): ModelBuff
   if (!modelArchitectureMatches(model)) {
     return null;
   }
-  const hiddenWeights = splitHiddenWeights(model).map((weights) => initializedBuffer(device, weights));
+  const inferencePrecision = device.features?.has("shader-f16" as GPUFeatureName) ? "fp16" : "fp32";
+  const sharedBoardEncoder = splitHiddenWeights(model).map((weights) => initializedWeightBuffer(device, weights, inferencePrecision));
   const policyWeights = policyWeightsForModel(model);
+  const policyQuantization = policyWeights ? quantizePolicyWeights(policyWeights) : null;
   return {
     model,
-    hiddenWeights,
-    outputWeights: initializedBuffer(device, model.outputWeights),
-    policyWeights: policyWeights ? initializedBuffer(device, policyWeights) : null
+    inferencePrecision,
+    sharedBoardEncoder,
+    fastNet: {
+      policyWeights: policyQuantization ? initializedWeightBuffer(device, policyQuantization.dequantized, inferencePrecision) : null,
+      inputSize: outputLayerSize(model),
+      policyQuantization: policyQuantization
+        ? {
+          format: inferencePrecision === "fp16" ? "int8-to-fp16-upload" : "int8-dequantized-upload",
+          scale: policyQuantization.scale,
+          maxAbsError: policyQuantization.maxAbsError
+        }
+        : null
+    },
+    bigNet: {
+      outputWeights: initializedWeightBuffer(device, model.outputWeights, inferencePrecision),
+      auxiliaryValueWeights: model.auxiliaryValueWeights?.length
+        ? initializedWeightBuffer(device, model.auxiliaryValueWeights, inferencePrecision)
+        : null
+    }
   };
+}
+
+function quantizePolicyWeights(weights: Float32Array): {
+  quantized: Int8Array;
+  dequantized: Float32Array;
+  scale: number;
+  maxAbsError: number;
+} {
+  let maxAbs = 0;
+  for (const weight of weights) {
+    maxAbs = Math.max(maxAbs, Math.abs(weight));
+  }
+  const scale = maxAbs > 0 ? maxAbs / 127 : 1 / 127;
+  const quantized = new Int8Array(weights.length);
+  const dequantized = new Float32Array(weights.length);
+  let maxAbsError = 0;
+  for (let index = 0; index < weights.length; index += 1) {
+    const value = weights[index] ?? 0;
+    const packed = Math.max(-127, Math.min(127, Math.round(value / scale)));
+    quantized[index] = packed;
+    const restored = packed * scale;
+    dequantized[index] = restored;
+    maxAbsError = Math.max(maxAbsError, Math.abs(value - restored));
+  }
+  return { quantized, dequantized, scale, maxAbsError };
 }
 
 function outputLayerSize(model: CompactValueModel): number {
@@ -421,14 +510,18 @@ function splitHiddenWeights(model: CompactValueModel): Float32Array[] {
 }
 
 async function createPipelines(device: GPUDevice): Promise<Pipelines> {
+  const f16 = device.features?.has("shader-f16" as GPUFeatureName) ?? false;
+  const forwardShader = f16 ? frontierForwardF16 : frontierForward;
+  const policyShader = f16 ? frontierPolicyF16 : FRONTIER_POLICY_SHADER;
+  const suffix = f16 ? "_f16" : "";
   const [selectBoards, project, forwardLayer, forwardOutput, forwardOutputLinear, applyValues, applyPolicy] = await Promise.all([
     pipeline(device, "frontier_select_neural_boards", FRONTIER_NEURAL_SHADER, "select_neural_boards"),
     pipeline(device, "frontier_project", FRONTIER_NEURAL_SHADER, "project_neural_features"),
-    pipeline(device, "frontier_forward_layer", frontierForward, "forward_layer_masked"),
-    pipeline(device, "frontier_forward_output", frontierForward, "forward_output_masked"),
-    pipeline(device, "frontier_forward_output_linear", frontierForward, "forward_output_masked_linear"),
+    pipeline(device, `frontier_forward_layer${suffix}`, forwardShader, "forward_layer_masked"),
+    pipeline(device, `frontier_forward_output${suffix}`, forwardShader, "forward_output_masked"),
+    pipeline(device, `frontier_forward_output_linear${suffix}`, forwardShader, "forward_output_masked_linear"),
     pipeline(device, "frontier_apply_neural", FRONTIER_NEURAL_SHADER, "apply_neural_values"),
-    pipeline(device, "frontier_apply_policy", FRONTIER_POLICY_SHADER, "apply_policy_prior")
+    pipeline(device, `frontier_apply_policy${suffix}`, policyShader, "apply_policy_prior")
   ]);
   return { selectBoards, project, forwardLayer, forwardOutput, forwardOutputLinear, applyValues, applyPolicy };
 }
@@ -464,11 +557,61 @@ function gpuBuffer(device: GPUDevice, byteLength: number, extraUsage = 0): GPUBu
   });
 }
 
-function initializedBuffer(device: GPUDevice, values: Float32Array): GPUBuffer {
+function initializedBuffer(device: GPUDevice, values: ArrayBufferView): GPUBuffer {
   const buffer = gpuBuffer(device, values.byteLength);
   device.queue.writeBuffer(buffer, 0, values);
   return buffer;
 }
+
+function initializedWeightBuffer(device: GPUDevice, values: Float32Array, precision: InferencePrecision): GPUBuffer {
+  return initializedBuffer(device, precision === "fp16" ? float32ToFloat16Array(values) : values);
+}
+
+function float32ToFloat16Array(values: Float32Array): Uint16Array {
+  const halves = new Uint16Array(values.length);
+  for (let index = 0; index < values.length; index += 1) {
+    halves[index] = float32ToFloat16Bits(values[index] ?? 0);
+  }
+  return halves;
+}
+
+function float32ToFloat16Bits(value: number): number {
+  if (!Number.isFinite(value)) {
+    return value < 0 ? 0xfc00 : value > 0 ? 0x7c00 : 0x7e00;
+  }
+  const floatView = new Float32Array(1);
+  const intView = new Uint32Array(floatView.buffer);
+  floatView[0] = value;
+  const bits = intView[0]!;
+  const sign = (bits >>> 16) & 0x8000;
+  const exponent = ((bits >>> 23) & 0xff) - 127 + 15;
+  let mantissa = bits & 0x7fffff;
+  if (exponent <= 0) {
+    if (exponent < -10) {
+      return sign;
+    }
+    mantissa = (mantissa | 0x800000) >>> (1 - exponent);
+    return sign | ((mantissa + 0x1000) >>> 13);
+  }
+  if (exponent >= 31) {
+    return sign | 0x7c00;
+  }
+  return sign | (exponent << 10) | ((mantissa + 0x1000) >>> 13);
+}
+
+const frontierForwardF16 = `enable f16;
+${frontierForward
+  .replace("var<storage, read> weights: array<f32>;", "var<storage, read> weights: array<f16>;")
+  .replace(/var sum = weights\[row \+ layer_params\.input_size\];/g, "var sum = f32(weights[row + layer_params.input_size]);")
+  .replace(/var sum = weights\[layer_params\.input_size\];/g, "var sum = f32(weights[layer_params.input_size]);")
+  .replace(/weights\[row \+ input_index\]/g, "f32(weights[row + input_index])")
+  .replace(/weights\[input_index\]/g, "f32(weights[input_index])")}`;
+
+const frontierPolicyF16 = `enable f16;
+${FRONTIER_POLICY_SHADER
+  .replace("var<storage, read> policy_weights: array<f32>;", "var<storage, read> policy_weights: array<f16>;")
+  .replace(/var logit = policy_weights\[row \+ params\.input_size\];/g, "var logit = f32(policy_weights[row + params.input_size]);")
+  .replace(/policy_weights\[row \+ input\]/g, "f32(policy_weights[row + input])")}`;
 
 function uniformU32(device: GPUDevice, values: number[]): GPUBuffer {
   const data = new Uint32Array(values.map((value) => value >>> 0));

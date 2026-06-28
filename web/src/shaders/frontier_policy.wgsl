@@ -16,6 +16,8 @@ const CANDIDATE_STATUS: u32 = 5u;
 const CANDIDATE_MOVE: u32 = 8u;
 const CANDIDATE_CARRY: u32 = 19u;
 const CANDIDATE_POLICY_PRIOR: u32 = 21u;
+const CANDIDATE_TACTICAL_PRIORITY: u32 = 22u;
+const CANDIDATE_INTENT: u32 = 23u;
 const POLICY_BUCKETS: u32 = 257u;
 
 fn hash_value(hash: u32, value: i32) -> u32 {
@@ -39,6 +41,7 @@ fn policy_bucket(base: u32) -> u32 {
   hash = hash_value(hash, candidates[base + CANDIDATE_MOVE + 7u] - from_y);
   hash = hash_value(hash, from_x);
   hash = hash_value(hash, from_y);
+  hash = hash_value(hash, candidates[base + CANDIDATE_INTENT]);
   return hash % POLICY_BUCKETS;
 }
 
@@ -62,6 +65,9 @@ fn apply_policy_prior(@builtin(global_invocation_id) id: vec3<u32>) {
   logit = clamp(logit, -4.0, 4.0);
   let prior = i32(round(logit * params.policy_scale));
   candidates[base + CANDIDATE_POLICY_PRIOR] = prior;
+  if (candidates[base + CANDIDATE_TACTICAL_PRIORITY] > 0 && prior < 0) {
+    return;
+  }
   candidates[base + CANDIDATE_SCORE] =
     candidates[base + CANDIDATE_SCORE] + prior;
 }

@@ -180,7 +180,7 @@ const TRAINING_PRESETS: Record<TrainingPresetName, TrainingPreset> = {
     }
   },
   med: {
-    gpuModes: ["vsGpu", "self"],
+    gpuModes: ["vsGpu", "self", "curriculum"],
     cpuModes: ["vsCpu"],
     gpu: {
       samples: 2048,
@@ -224,7 +224,7 @@ const TRAINING_PRESETS: Record<TrainingPresetName, TrainingPreset> = {
     }
   },
   high: {
-    gpuModes: ["vsGpu", "vsCpu", "self", "distill"],
+    gpuModes: ["vsGpu", "vsCpu", "self", "curriculum", "tactical", "distill"],
     cpuModes: ["vsGpu", "vsCpu", "self"],
     gpu: {
       samples: 8192,
@@ -919,12 +919,14 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
   }
 
   function trainingProgressOrder(labelKind: LabelKind): number {
-    return { search: 0, cpu: 1, duel: 2, "cpu-positions": 3, "cpu-reference": 4, "cpu-screen": 5, "cpu-train": 6, outcome: 7, distilled: 8 }[labelKind] ?? 9;
+    return { curriculum: 0, search: 1, tactical: 2, cpu: 3, duel: 4, "cpu-positions": 5, "cpu-reference": 6, "cpu-screen": 7, "cpu-train": 8, outcome: 9, distilled: 10 }[labelKind] ?? 11;
   }
 
   function trainingProgressLabel(labelKind: LabelKind): string {
     return {
+      curriculum: "Curriculum",
       search: "GPU Search",
+      tactical: "Tactics",
       cpu: "CPU Heuristic",
       duel: "CPU vs GPU",
       "cpu-positions": "CPU Positions",

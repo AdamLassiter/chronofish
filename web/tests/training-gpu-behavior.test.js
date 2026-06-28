@@ -27,7 +27,8 @@ const {
   splitPolicyTrainingIndices,
   splitValidationSamples,
   trainHeadsOnCpu,
-  uniqueTrainingPositionCount
+  uniqueTrainingPositionCount,
+  AUXILIARY_VALUE_HEADS
 } = await import(modules.trainingGpu);
 const { appendReplaySamples, dedupeTrainingSamples } = await import(modules.trainingReplay);
 const { policyBucket } = await import(modules.trainingPolicy);
@@ -304,6 +305,67 @@ test("CPU position encoding preserves neural plane layout and perspective", () =
   assert.equal(encoded.values[plane(0, 31)], 0);
 });
 
+test("CPU position encoding exposes selected boards as a relative board graph", () => {
+  const originBoard = board(4, "white", pieceAt(4, 4, "white", "king"));
+  const branchBoard = {
+    ...board(5, "black", pieceAt(4, 5, "black", "royalQueen")),
+    origin: {
+      type: "branch",
+      from: { timelineId: 0, time: 4, x: 4, y: 4 },
+      to: { timelineId: 0, time: 4, x: 4, y: 5 }
+    }
+  };
+  const siblingPresent = board(5, "white", pieceAt(0, 0, "black", "pawn"));
+  const game = {
+    turn: "white",
+    presentTime: 5,
+    nextTimelineId: 2,
+    nextBlackTimelineId: -2,
+    checkedRoyals: [{ timelineId: 0, time: 4, x: 4, y: 4 }],
+    timelines: [
+      {
+        id: 0,
+        row: 0,
+        label: "0",
+        owner: "neutral",
+        active: true,
+        boards: [originBoard, branchBoard]
+      },
+      {
+        id: 1,
+        row: 1,
+        label: "1",
+        owner: "white",
+        active: true,
+        boards: [siblingPresent]
+      }
+    ]
+  };
+
+  const encoded = encodeNeuralPositionFeatures(game, "white");
+  const edgeKinds = encoded.graph.edges.map((edge) => edge.kind);
+  const nodeFor = (timelineId, time) =>
+    encoded.graph.nodes.find((node) => node.timelineId === timelineId && node.relativeTime === time - game.presentTime);
+  const originNode = nodeFor(0, 4);
+  const branchNode = nodeFor(0, 5);
+  const siblingNode = nodeFor(1, 5);
+  const boardStride = NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
+  const plane = (boardIndex, planeIndex) => boardIndex * boardStride + planeIndex * NEURAL_BOARD_SQUARES;
+
+  assert.ok(originNode);
+  assert.ok(branchNode);
+  assert.ok(siblingNode);
+  assert.ok(edgeKinds.includes("same-timeline"));
+  assert.ok(edgeKinds.includes("branch-origin"));
+  assert.ok(edgeKinds.includes("causal-origin"));
+  assert.ok(edgeKinds.includes("present-frontier"));
+  assert.equal(encoded.values[plane(originNode.index, 31)], 0.5);
+  assert.equal(encoded.values[plane(branchNode.index, 32)], 1);
+  assert.equal(encoded.values[plane(branchNode.index, 33)], 0.5);
+  assert.ok(encoded.values[plane(branchNode.index, 34)] > 0);
+  assert.equal(encoded.values[plane(originNode.index, 35)], 1);
+});
+
 test("CPU neural board selection prefers canonical structure before raw timeline ids", () => {
   const quietBoard = board(4, "white", pieceAt(7, 7, "black", "pawn"));
   const royalBoard = board(4, "white", pieceAt(0, 0, "white", "king"));
@@ -339,7 +401,7 @@ test("CPU neural board selection prefers canonical structure before raw timeline
   assert.equal(selected[1].timeline.id, -9);
 });
 
-test("CFNN v3 preserves position-conditioned policy weights and older versions remain readable", () => {
+test("CFNN v5 preserves auxiliary value heads while older versions remain readable", () => {
   const base = {
     projectionSize: 4,
     projectionSeed: 9,
@@ -355,12 +417,15 @@ test("CFNN v3 preserves position-conditioned policy weights and older versions r
   const policyWeights = Float32Array.from({ length: 257 * 3 }, (_, index) => index / 100);
   const v3 = encodeCompactModel({ ...base, policyWeights });
   const v4 = encodeCompactModel({ ...base, policyWeights, outputActivation: "tanh" });
+  const auxiliaryValueWeights = Float32Array.from({ length: AUXILIARY_VALUE_HEADS.length * 3 }, (_, index) => index / 50);
+  const v5 = encodeCompactModel({ ...base, policyWeights, auxiliaryValueWeights, outputActivation: "tanh" });
 
   assert.equal(v1.byteLength, 36 + 4 + (10 + 3) * 4);
   assert.equal(new DataView(v1.buffer).getUint32(4, true), 1);
   assert.equal(new DataView(v2.buffer).getUint32(4, true), 2);
   assert.equal(new DataView(v3.buffer).getUint32(4, true), 3);
   assert.equal(new DataView(v4.buffer).getUint32(4, true), 4);
+  assert.equal(new DataView(v5.buffer).getUint32(4, true), 5);
   assert.deepEqual(Array.from(decodeCompactModel(v1.buffer).policyLogits), []);
   assert.deepEqual(
     Array.from(decodeCompactModel(v2.buffer).policyLogits),
@@ -372,6 +437,11 @@ test("CFNN v3 preserves position-conditioned policy weights and older versions r
   );
   assert.equal(decodeCompactModel(v3.buffer).outputActivation, "linear");
   assert.equal(decodeCompactModel(v4.buffer).outputActivation, "tanh");
+  assert.equal(decodeCompactModel(v5.buffer).outputActivation, "tanh");
+  assert.deepEqual(
+    Array.from(decodeCompactModel(v5.buffer).auxiliaryValueWeights),
+    Array.from(auxiliaryValueWeights)
+  );
 });
 
 test("CFNN decoding rejects non-finite checkpoints and the bundled model is finite", async () => {
@@ -411,10 +481,14 @@ test("small-replay CPU head training emits finite losses and a valid checkpoint"
   assert.ok(Number.isFinite(trained.trainingLoss));
   assert.ok(Number.isFinite(trained.initialValidationLoss));
   assert.ok(Number.isFinite(trained.bestValidationLoss));
+  assert.ok(Number.isFinite(trained.auxiliaryValidationLoss));
+  assert.equal(trained.auxiliaryHeadCount, AUXILIARY_VALUE_HEADS.length);
   assert.equal(trained.hiddenLayersTrained, false);
-  assert.ok(decodeCompactModel(
+  const checkpoint = decodeCompactModel(
     trained.buffer.slice(trained.byteOffset, trained.byteOffset + trained.byteLength)
-  ));
+  );
+  assert.ok(checkpoint);
+  assert.equal(checkpoint.auxiliaryValueWeights.length, AUXILIARY_VALUE_HEADS.length * (checkpoint.hiddenLayers.at(-1) + 1));
 });
 
 test("policy buckets describe move geometry rather than absolute time coordinates", () => {
@@ -424,6 +498,7 @@ test("policy buckets describe move geometry rather than absolute time coordinate
 
   assert.equal(policyBucket(first), policyBucket(translated));
   assert.notEqual(policyBucket(first), policyBucket(differentGeometry));
+  assert.notEqual(policyBucket(first, 1), policyBucket(first, 6));
 });
 
 test("validation split is stable for equivalent sample identities", () => {

@@ -1,4 +1,4 @@
-import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_OK, GPU_MUTATION_STATUS_ROYAL_CAPTURE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET, GPU_FRONTIER_HEADER_DEPTH, GPU_FRONTIER_HEADER_PLAN_LENGTH, GPU_FRONTIER_HEADER_SCORE, GPU_FRONTIER_MAX_PLAN_MOVES, GPU_FRONTIER_MOVE_STRIDE, GPU_FRONTIER_PLAN_OFFSET } from "./ai-layout.js";
+import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_OK, GPU_MUTATION_STATUS_ROYAL_CAPTURE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET, GPU_FRONTIER_HEADER_DEPTH, GPU_FRONTIER_HEADER_PLAN_LENGTH, GPU_FRONTIER_HEADER_SCORE, GPU_FRONTIER_HEADER_TERMINAL, GPU_FRONTIER_MAX_PLAN_MOVES, GPU_FRONTIER_MOVE_STRIDE, GPU_FRONTIER_PLAN_OFFSET } from "./ai-layout.js";
 import { readGpuSnapshot, buildGpuCandidateInputsFromSnapshot, snapshotWithGpuChildBoards, originForGpuChild, gpuMutationBoardRecordToSnapshot, gpuSnapshotToGame, gpuBoardToGameBoard, squaresToGameBoard, pieceFromCode, buildGpuCandidateInputs, squareCodesForBoard, pushGpuBoardRecord, pushGpuMutationBoardRecord, colorFromCode, ownerCode, moveFromCandidateRecord, oppositeColor, sortedTimelines, latestBoard, presentTimeForSnapshot, capitalize, pieceTypeCode, pieceTypeFromCode, colorCode } from "./ai-snapshot.js";
 import { GPU_TURN_STATUS_SHADER, GPU_MOVEGEN_SHADER, GPU_REPLY_SHADER, GPU_MUTATE_SHADER } from "./ai-shaders.js";
 import { autotuneFrontier, encodeFrontierRoot, frontierStateBytes, frontierStateStride, FrontierGpuPipeline } from "./ai-frontier.js";
@@ -6,160 +6,14 @@ import type { FrontierBufferSet, FrontierTuning } from "./ai-frontier.js";
 import { FrontierNeuralEvaluator } from "./ai-frontier-neural.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { readWasmString, writeWasmString } from "./engine-io.js";
+import { GPUBufferUsage, GPUMapMode } from "./ai-worker-types.js";
+import { align4, clearComputePipelineCache, createComputePipelineChecked, requestHighLimitDevice, storageBuffer } from "./ai-gpu-device.js";
 import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, Position, Timeline } from "./types.js";
 import type { GpuCandidateInputs, GpuSnapshot, GpuTimeline } from "./ai-snapshot.js";
-
-interface GpuBufferUsageConstants {
-  MAP_READ: number;
-  COPY_SRC: number;
-  COPY_DST: number;
-  UNIFORM: number;
-  STORAGE: number;
-}
-
-interface GpuMapModeConstants {
-  READ: number;
-}
-
-const GPUBufferUsage: GpuBufferUsageConstants = (globalThis as unknown as { GPUBufferUsage?: GpuBufferUsageConstants }).GPUBufferUsage ?? {
-  MAP_READ: 1,
-  COPY_SRC: 4,
-  COPY_DST: 8,
-  UNIFORM: 64,
-  STORAGE: 128
-};
-const GPUMapMode: GpuMapModeConstants = (globalThis as unknown as { GPUMapMode?: GpuMapModeConstants }).GPUMapMode ?? {
-  READ: 1
-};
-
-type GpuMode = "full" | "hybrid";
-
-interface GpuSearchOptions {
-  depth?: number | undefined;
-  nodes?: number | undefined;
-  timeMs?: number | undefined;
-  gpuMode?: GpuMode | undefined;
-  disableNeural?: boolean | undefined;
-  snapshotOverride?: GpuSnapshot | null | undefined;
-  temperature?: number | undefined;
-  randomSeed?: number | undefined;
-}
-
-interface TurnStatus {
-  complete: boolean;
-  terminal?: boolean;
-  winner?: Color;
-  nextTurn: Color;
-  presentTime: number;
-  pendingPresentBoardCount: number;
-  message?: string;
-}
-
-interface RankedCandidate {
-  move: Move;
-  index: number;
-  score: number;
-}
-
-interface MutatedCandidate extends RankedCandidate {
-  mutationStatus: number;
-  childBoards: Int32Array | null;
-}
-
-interface ScoredCandidates {
-  records: Int32Array;
-  scores: Int32Array;
-}
-
-interface SearchChoice {
-  rank?: number;
-  score?: number | undefined;
-  moves?: Move[] | undefined;
-  move?: Move | undefined;
-  principalVariation?: Move[][] | undefined;
-  depth?: number | undefined;
-  nodes?: number | undefined;
-  gpuSearch?: string | undefined;
-}
-
-type SearchResultReason = "royal-capture" | "threefold-repetition" | "stalemate";
-
-interface SearchResult {
-  status: string;
-  moves: Move[];
-  score?: number | undefined;
-  choices?: SearchChoice[] | undefined;
-  principalVariation?: Move[][] | undefined;
-  depth?: number | undefined;
-  nodes?: number | undefined;
-  terminal?: boolean | undefined;
-  winner?: Color | undefined;
-  resultReason?: SearchResultReason | undefined;
-  gpu?: boolean | undefined;
-  gpuMode?: GpuMode | undefined;
-  gpuTerminal?: boolean | undefined;
-  gpuSnapshot?: string | undefined;
-  gpuSearch?: string | undefined;
-  gpuDiagnostics?: GpuSearchDiagnostics | undefined;
-  authoritativeReplay?: boolean | undefined;
-  incompleteMoves?: Move[] | undefined;
-  pendingPresentBoardCount?: number | undefined;
-}
-
-interface GpuSearchDiagnostics {
-  frontierWidth?: number;
-  candidateCapacity?: number;
-  selectedCount?: number;
-  maxBoards?: number;
-  dispatchCandidateLimit?: number;
-  cycles?: number;
-  completedDepth?: number;
-  nodes?: number;
-  readbacks?: number;
-  candidateOverflow?: number;
-  model?: "neural" | "heuristic";
-  latencyMs?: number;
-  nodesPerSecond?: number;
-  candidateWorkgroupSize?: number;
-  mutationTileSize?: number;
-  neuralBatchSize?: number;
-}
-
-interface ReplySearchResult {
-  score: number;
-  move?: Move | undefined;
-}
-
-interface LegalTargetSelection {
-  source: { piece: Piece; position: Position } | null;
-  targets: Position[];
-}
-
-interface WorkerRequest {
-  id: number | string;
-  type?: "search" | "legalTargets" | "applyMove" | "submitTurn" | "debugLoseDevice" | "setModel";
-  modelBytes?: ArrayBuffer;
-  game?: GameSnapshot;
-  position?: Position;
-  move?: Move;
-  depth?: number;
-  minDepth?: number;
-  nodes?: number;
-  timeMs?: number;
-  partitionIndex?: number;
-  partitionCount?: number;
-  temperature?: number;
-  randomSeed?: number;
-  gpuMode?: GpuMode;
-  disableNeural?: boolean;
-  notation?: string;
-  turns?: Move[][];
-  stagedMoves?: Move[];
-}
+import type { GpuMode, GpuSearchOptions, LegalTargetSelection, MutatedCandidate, RankedCandidate, ReplySearchResult, ScoredCandidates, SearchChoice, SearchResult, TurnStatus, WorkerRequest } from "./ai-worker-types.js";
 
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
-const pipelineCache = new Map<string, GPUComputePipeline>();
 let frontierRuntime: { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } | null = null;
 let validationEnginePromise: Promise<ChronofishEngine> | null = null;
 let activeSearchGeneration = 0;
@@ -383,6 +237,9 @@ async function tryGpuResidentFrontierSearch(
       throw new Error("GPU frontier produced no authoritative legal turn.");
     }
     const latencyMs = Math.max(0, performance.now() - startedAt);
+    const neuralCache = runtime.neural.cacheStats();
+    const networkRoles = runtime.neural.networkRoles();
+    const quantization = await runtime.neural.quantizationStats();
     return {
       ...selected,
       status: "ok",
@@ -402,6 +259,33 @@ async function tryGpuResidentFrontierSearch(
         nodes: readback.nodes,
         readbacks: 1,
         candidateOverflow: readback.candidateOverflow ? 1 : 0,
+        tacticalCandidates: readback.tacticalCandidates,
+        selectedTacticalCandidates: readback.selectedTacticalCandidates,
+        candidateSelectionRate: ratio(readback.selectedCount, readback.nodes),
+        tacticalSelectionRate: ratio(readback.selectedTacticalCandidates, readback.tacticalCandidates),
+        effectiveBranchingFactor: cyclesCompleted > 0
+          ? Math.round((readback.selectedCount / cyclesCompleted) * 100) / 100
+          : readback.selectedCount,
+        searchController: "puct-frontier-graph",
+        progressiveWideningLimit: Math.max(2, Math.min(16, Math.ceil(tuning.frontierWidth / 8))),
+        graphDeduplication: 1,
+        nnCacheHits: neuralCache.hits,
+        nnCacheMisses: neuralCache.misses,
+        nnCacheStores: neuralCache.stores,
+        nnCacheHitRate: neuralCache.hitRate,
+        inferencePrecision: quantization.inferencePrecision ?? undefined,
+        fastNetPolicyFormat: quantization.fastNetPolicy?.format,
+        fastNetPolicyScale: quantization.fastNetPolicy?.scale,
+        fastNetPolicyMaxAbsError: quantization.fastNetPolicy?.maxAbsError,
+        fastNet: networkRoles.fastNet,
+        bigNet: networkRoles.bigNet,
+        legalChoiceCount: selected.choices.length,
+        legalTacticalChoiceCount: selected.choices.filter((choice) => choice.tactical).length,
+        topPolicyChoiceAgreement: choiceAgreement(selected, selected.choices, 1),
+        top5PolicyChoiceAgreement: choiceAgreement(selected, selected.choices, 5),
+        top20PolicyChoiceAgreement: choiceAgreement(selected, selected.choices, 20),
+        selectedMovePrunedRisk: selected.tactical ? 0 : 1,
+        selectedMoveTactical: selected.tactical ? 1 : 0,
         model: modelUsed ? "neural" : "heuristic",
         latencyMs: Math.round(latencyMs),
         nodesPerSecond: latencyMs > 0 ? Math.round((readback.nodes * 1000) / latencyMs) : readback.nodes,
@@ -462,9 +346,16 @@ async function readFrontierOnce(
   device: GPUDevice,
   buffers: FrontierBufferSet,
   tuning: FrontierTuning
-): Promise<{ states: Int32Array; nodes: number; selectedCount: number; candidateOverflow: boolean }> {
+): Promise<{
+  states: Int32Array;
+  nodes: number;
+  selectedCount: number;
+  candidateOverflow: boolean;
+  tacticalCandidates: number;
+  selectedTacticalCandidates: number;
+}> {
   const stateByteLength = frontierStateBytes(tuning.maxBoards) * tuning.frontierWidth;
-  const counterByteLength = 16;
+  const counterByteLength = 24;
   const staging = device.createBuffer({
     size: align4(stateByteLength + counterByteLength),
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
@@ -486,13 +377,22 @@ async function readFrontierOnce(
       states,
       nodes: counters[3] ?? 0,
       selectedCount: counters[1] ?? 0,
-      candidateOverflow: (counters[2] ?? 0) !== 0
+      candidateOverflow: (counters[2] ?? 0) !== 0,
+      tacticalCandidates: counters[4] ?? 0,
+      selectedTacticalCandidates: counters[5] ?? 0
     };
   } catch (error) {
     staging.destroy();
     clearCachedGpuState();
     throw error;
   }
+}
+
+function ratio(numerator: number, denominator: number): number {
+  if (!Number.isFinite(numerator) || !Number.isFinite(denominator) || denominator <= 0) {
+    return 0;
+  }
+  return Math.round((numerator / denominator) * 1000) / 1000;
 }
 
 async function validatedFrontierChoices(
@@ -509,6 +409,7 @@ async function validatedFrontierChoices(
       index,
       depth: states[base + GPU_FRONTIER_HEADER_DEPTH] ?? 0,
       score: states[base + GPU_FRONTIER_HEADER_SCORE] ?? -2147483647,
+      terminal: (states[base + GPU_FRONTIER_HEADER_TERMINAL] ?? 0) !== 0,
       planLength: Math.min(GPU_FRONTIER_MAX_PLAN_MOVES, Math.max(0, states[base + GPU_FRONTIER_HEADER_PLAN_LENGTH] ?? 0))
     };
   })
@@ -538,7 +439,9 @@ async function validatedFrontierChoices(
       principalVariation: [moves],
       gpu: true,
       gpuMode: "full",
-      gpuSearch
+      gpuTerminal: entry.terminal,
+      gpuSearch,
+      tactical: entry.terminal
     });
     if (choices.length >= 12) {
       break;
@@ -1323,6 +1226,14 @@ function withSearchChoices<T extends SearchChoice>(selected: T, candidates: Sear
   };
 }
 
+function choiceAgreement(selected: SearchChoice, choices: SearchChoice[], limit: number): number {
+  const selectedKey = turnPlanKey(choiceMoves(selected));
+  if (!selectedKey) {
+    return 0;
+  }
+  return choices.slice(0, limit).some((choice) => turnPlanKey(choiceMoves(choice)) === selectedKey) ? 1 : 0;
+}
+
 function summarizeSearchChoices(candidates: SearchChoice[]): SearchChoice[] {
   return candidates
     .slice(0, 12)
@@ -1333,7 +1244,9 @@ function summarizeSearchChoices(candidates: SearchChoice[]): SearchChoice[] {
       principalVariation: candidate.principalVariation,
       depth: candidate.depth,
       nodes: candidate.nodes,
-      gpuSearch: candidate.gpuSearch
+      gpuSearch: candidate.gpuSearch,
+      gpuTerminal: candidate.gpuTerminal,
+      tactical: candidate.tactical
     }));
 }
 
@@ -1572,18 +1485,6 @@ function pickCandidateRecords(records: Int32Array, indices: number[]): Int32Arra
   return picked;
 }
 
-function storageBuffer(device: GPUDevice, data: ArrayBuffer | ArrayBufferView, usage: number): GPUBuffer {
-  const bytes = data instanceof ArrayBuffer
-    ? data
-    : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
-  const buffer = device.createBuffer({
-    size: align4(bytes.byteLength),
-    usage: usage | GPUBufferUsage.COPY_DST
-  });
-  device.queue.writeBuffer(buffer, 0, bytes);
-  return buffer;
-}
-
 async function getGpuDevice(): Promise<GPUDevice | null> {
   if (!navigator.gpu) {
     return null;
@@ -1608,7 +1509,7 @@ function clearCachedGpuState(): void {
   frontierRuntime = null;
   cachedGpuDevice = null;
   cachedGpuAdapter = null;
-  pipelineCache.clear();
+  clearComputePipelineCache();
 }
 
 async function destroyCachedGpuDeviceForSmoke(): Promise<boolean> {
@@ -1625,57 +1526,6 @@ async function destroyCachedGpuDeviceForSmoke(): Promise<boolean> {
   }
   clearCachedGpuState();
   return true;
-}
-
-async function requestHighLimitDevice(adapter: GPUAdapter): Promise<GPUDevice> {
-  const requiredLimits: Record<string, number> = {};
-  const requiredFeatures: GPUFeatureName[] = [];
-  for (const key of ["maxStorageBufferBindingSize", "maxBufferSize"] as const) {
-    const value = adapter.limits[key];
-    if (Number.isFinite(value) && value > 0) {
-      requiredLimits[key] = value;
-    }
-  }
-  if (adapter.features?.has("timestamp-query" as GPUFeatureName)) {
-    requiredFeatures.push("timestamp-query" as GPUFeatureName);
-  }
-  if (Object.keys(requiredLimits).length === 0 && requiredFeatures.length === 0) {
-    return adapter.requestDevice();
-  }
-  try {
-    return await adapter.requestDevice({ requiredLimits, requiredFeatures });
-  } catch {
-    return adapter.requestDevice();
-  }
-}
-
-async function createComputePipelineChecked(device: GPUDevice, label: string, code: string, entryPoint: string): Promise<GPUComputePipeline> {
-  const cacheKey = `${label}:${entryPoint}`;
-  const cached = pipelineCache.get(cacheKey);
-  if (cached) {
-    return cached;
-  }
-  const module = device.createShaderModule({ label: `${label}.module`, code });
-  if (module.getCompilationInfo) {
-    const info = await module.getCompilationInfo();
-    const errors = info.messages.filter((message: GPUCompilationMessage) => message.type === "error");
-    if (errors.length > 0) {
-      throw new Error(formatShaderErrors(label, errors));
-    }
-  }
-  const pipeline = device.createComputePipeline({
-    label,
-    layout: "auto",
-    compute: { module, entryPoint }
-  });
-  pipelineCache.set(cacheKey, pipeline);
-  return pipeline;
-}
-
-function formatShaderErrors(label: string, errors: GPUCompilationMessage[]): string {
-  return `${label} shader compilation failed: ${errors.map((error) =>
-    `line ${error.lineNum ?? "?"}, column ${error.linePos ?? "?"}: ${error.message}`
-  ).join("; ")}`;
 }
 
 async function readInts(device: GPUDevice, buffer: GPUBuffer, byteLength: number): Promise<Int32Array> {
@@ -1697,10 +1547,6 @@ async function readInts(device: GPUDevice, buffer: GPUBuffer, byteLength: number
     clearCachedGpuState();
     throw error;
   }
-}
-
-function align4(value: number): number {
-  return Math.ceil(value / 4) * 4;
 }
 
 self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {

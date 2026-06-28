@@ -300,8 +300,8 @@ export class FrontierGpuPipeline {
       selectionCapacity,
       stateStride,
       GPU_FRONTIER_DELTA_STRIDE,
-      0,
-      0
+      options.cycleIndex,
+      100
     ]);
     const selectParamsBuffer = this.temporaryUniform(selectParams);
     const inertSortBuffer = this.temporaryUniform(new Uint32Array(4));

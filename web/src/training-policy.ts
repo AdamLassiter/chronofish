@@ -2,7 +2,7 @@ import type { Move } from "./types.js";
 
 export const POLICY_BUCKETS = 257;
 
-export function policyBucket(move: Move | null | undefined): number | null {
+export function policyBucket(move: Move | null | undefined, intent = 0): number | null {
   if (!move) {
     return null;
   }
@@ -12,7 +12,8 @@ export function policyBucket(move: Move | null | undefined): number | null {
     (move.to?.x ?? 0) - (move.from?.x ?? 0),
     (move.to?.y ?? 0) - (move.from?.y ?? 0),
     move.from?.x ?? 0,
-    move.from?.y ?? 0
+    move.from?.y ?? 0,
+    intent
   ];
   let hash = 2166136261;
   for (const value of values) {

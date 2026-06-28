@@ -554,7 +554,7 @@ fn validate_training_model(model: &[u8]) -> Result<(), String> {
         return Err("Model must use the compact CFNN binary format.".to_string());
     }
     let version = u32::from_le_bytes(model[4..8].try_into().expect("slice length checked"));
-    if !(1..=4).contains(&version) {
+    if !(1..=5).contains(&version) {
         return Err("Unsupported compact model version.".to_string());
     }
     if model.len() > 64 * 1024 * 1024 {
@@ -566,6 +566,11 @@ fn validate_training_model(model: &[u8]) -> Result<(), String> {
     let layer_count = read_model_u32(model, &mut cursor)? as usize;
     let output_size = read_model_u32(model, &mut cursor)? as usize;
     let policy_size = if version >= 2 {
+        read_model_u32(model, &mut cursor)? as usize
+    } else {
+        0
+    };
+    let auxiliary_value_size = if version >= 5 {
         read_model_u32(model, &mut cursor)? as usize
     } else {
         0
@@ -601,6 +606,7 @@ fn validate_training_model(model: &[u8]) -> Result<(), String> {
     let float_count = hidden_count
         .checked_add(output_size)
         .and_then(|count| count.checked_add(policy_size))
+        .and_then(|count| count.checked_add(auxiliary_value_size))
         .ok_or_else(|| "Compact model size overflow.".to_string())?;
     let data_end = cursor
         .checked_add(
@@ -687,8 +693,8 @@ mod training_model_tests {
     use super::validate_training_model;
 
     #[test]
-    fn compact_model_validation_accepts_v3_and_rejects_non_finite_weights() {
-        let mut model = compact_model(4);
+    fn compact_model_validation_accepts_v5_and_rejects_non_finite_weights() {
+        let mut model = compact_model(5);
         assert_eq!(validate_training_model(&model), Ok(()));
 
         let last = model.len() - 4;
@@ -711,6 +717,7 @@ mod training_model_tests {
 
     fn compact_model(version: u32) -> Vec<u8> {
         let policy_size: u32 = if version >= 2 { 6 } else { 0 };
+        let auxiliary_value_size: u32 = if version >= 5 { 9 } else { 0 };
         let mut model = Vec::new();
         model.extend_from_slice(b"CFNN");
         for value in [version, 4, 9, 1, 3] {
@@ -719,11 +726,14 @@ mod training_model_tests {
         if version >= 2 {
             model.extend_from_slice(&policy_size.to_le_bytes());
         }
+        if version >= 5 {
+            model.extend_from_slice(&auxiliary_value_size.to_le_bytes());
+        }
         model.extend_from_slice(&1.0_f32.to_le_bytes());
         model.extend_from_slice(&0.0_f32.to_le_bytes());
         model.extend_from_slice(&2_u32.to_le_bytes());
         model.extend_from_slice(&10_u32.to_le_bytes());
-        for _ in 0..(10 + 3 + policy_size as usize) {
+        for _ in 0..(10 + 3 + policy_size as usize + auxiliary_value_size as usize) {
             model.extend_from_slice(&0.0_f32.to_le_bytes());
         }
         model

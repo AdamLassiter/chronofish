@@ -4,6 +4,7 @@ export interface CompactValueModel {
   hiddenLayers: number[];
   hiddenWeights: Float32Array;
   outputWeights: Float32Array;
+  auxiliaryValueWeights?: Float32Array;
   policyWeights?: Float32Array;
   policyLogits?: Float32Array;
   policy_logits?: ArrayLike<number> & { slice?: (start?: number, end?: number) => ArrayLike<number> };
@@ -21,6 +22,8 @@ export interface EncodedCompactModel extends Uint8Array {
   initialPolicyValidationLoss?: number;
   policyValidationLoss?: number;
   bestPolicyValidationLoss?: number;
+  auxiliaryValidationLoss?: number;
+  auxiliaryHeadCount?: number;
   valueCheckpointImproved?: boolean;
   policyCheckpointImproved?: boolean;
   modelChanged?: boolean;
@@ -40,6 +43,7 @@ export interface EncodableCompactModel {
   hiddenLayers: number[];
   hiddenWeights: ArrayLike<number>;
   outputWeights: ArrayLike<number>;
+  auxiliaryValueWeights?: ArrayLike<number>;
   policyWeights?: ArrayLike<number>;
   policyLogits?: ArrayLike<number>;
   scale?: number;
@@ -56,6 +60,7 @@ export function compactModelIsFinite(model: CompactValueModel): boolean {
   }
   const finite = finiteArray(model.hiddenWeights)
     && finiteArray(model.outputWeights)
+    && finiteArray(model.auxiliaryValueWeights ?? [])
     && finiteArray(model.policyWeights ?? [])
     && finiteArray(model.policyLogits ?? [])
     && Number.isFinite(model.scale ?? 1)
@@ -76,11 +81,14 @@ function finiteArray(values: ArrayLike<number>): boolean {
 export function encodeCompactModel(model: EncodableCompactModel): EncodedCompactModel {
   const hiddenWeights = Array.from(model.hiddenWeights);
   const outputWeights = Array.from(model.outputWeights);
+  const auxiliaryValueWeights = Array.from(model.auxiliaryValueWeights ?? []);
   const policyWeights = Array.from(model.policyWeights ?? []);
   const policyLogits = Array.from(model.policyLogits ?? []);
   const scale = model.scale ?? 1;
   const bias = model.bias ?? 0;
-  const version = model.outputActivation === "tanh"
+  const version = auxiliaryValueWeights.length
+    ? 5
+    : model.outputActivation === "tanh"
     ? 4
     : policyWeights.length
       ? 3
@@ -88,10 +96,11 @@ export function encodeCompactModel(model: EncodableCompactModel): EncodedCompact
         ? 2
         : 1;
   const policyValues = version >= 3 ? policyWeights : policyLogits;
-  const floats = [scale, bias, ...hiddenWeights, ...outputWeights, ...policyValues];
+  const floats = [scale, bias, ...hiddenWeights, ...outputWeights, ...policyValues, ...auxiliaryValueWeights];
   const byteLength = 4
     + 4 * 6
     + (version >= 2 ? 4 : 0)
+    + (version >= 5 ? 4 : 0)
     + 4 * model.hiddenLayers.length
     + 4 * floats.length;
   const buffer = new ArrayBuffer(byteLength);
@@ -107,6 +116,9 @@ export function encodeCompactModel(model: EncodableCompactModel): EncodedCompact
   if (version >= 2) {
     cursor = writeU32(view, cursor, policyValues.length);
   }
+  if (version >= 5) {
+    cursor = writeU32(view, cursor, auxiliaryValueWeights.length);
+  }
   cursor = writeF32(view, cursor, scale);
   cursor = writeF32(view, cursor, bias);
   for (const layer of model.hiddenLayers) {
@@ -120,6 +132,9 @@ export function encodeCompactModel(model: EncodableCompactModel): EncodedCompact
     cursor = writeF32(view, cursor, value);
   }
   for (const value of policyValues) {
+    cursor = writeF32(view, cursor, value);
+  }
+  for (const value of auxiliaryValueWeights) {
     cursor = writeF32(view, cursor, value);
   }
   return new Uint8Array(buffer) as EncodedCompactModel;
@@ -168,7 +183,7 @@ export function decodeCompactModel(buffer: ArrayBuffer): CompactValueModel | nul
   }
   const version = view.getUint32(cursor, true);
   cursor += 4;
-  if (version < 1 || version > 4) {
+  if (version < 1 || version > 5) {
     return null;
   }
   const projectionSize = view.getUint32(cursor, true);
@@ -181,6 +196,8 @@ export function decodeCompactModel(buffer: ArrayBuffer): CompactValueModel | nul
   cursor += 4;
   const policySize = version >= 2 ? view.getUint32(cursor, true) : 0;
   cursor += version >= 2 ? 4 : 0;
+  const auxiliaryValueSize = version >= 5 ? view.getUint32(cursor, true) : 0;
+  cursor += version >= 5 ? 4 : 0;
   const scale = view.getFloat32(cursor, true);
   cursor += 4;
   const bias = view.getFloat32(cursor, true);
@@ -207,17 +224,23 @@ export function decodeCompactModel(buffer: ArrayBuffer): CompactValueModel | nul
     policyValues[index] = view.getFloat32(cursor, true);
     cursor += 4;
   }
+  const auxiliaryValueWeights = new Float32Array(auxiliaryValueSize);
+  for (let index = 0; index < auxiliaryValueSize; index += 1) {
+    auxiliaryValueWeights[index] = view.getFloat32(cursor, true);
+    cursor += 4;
+  }
   const model: CompactValueModel = {
     projectionSize,
     projectionSeed,
     hiddenLayers,
     hiddenWeights,
     outputWeights,
+    auxiliaryValueWeights,
     policyLogits: version === 2 ? policyValues : new Float32Array(),
     policyWeights: version >= 3 ? policyValues : new Float32Array(),
     scale,
     bias,
-    outputActivation: version === 4 ? "tanh" : "linear"
+    outputActivation: version >= 4 ? "tanh" : "linear"
   };
   return compactModelIsFinite(model) ? model : null;
 }
