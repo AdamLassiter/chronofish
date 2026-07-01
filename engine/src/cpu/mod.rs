@@ -17,3 +17,8 @@ mod staged_search;
 pub(crate) use search_support::*;
 mod json;
 pub mod search;
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod training;
+#[cfg(not(target_arch = "wasm32"))]
+pub use training::run_training_cli;

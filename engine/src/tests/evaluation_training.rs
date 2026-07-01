@@ -1,5 +1,5 @@
 use super::*;
-use crate::{cpu::*, training::*};
+use crate::{cpu::*, cpu::training::*};
 
 fn trainer_test_config() -> TrainerConfig {
     TrainerConfig {

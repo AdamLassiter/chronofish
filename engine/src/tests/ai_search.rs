@@ -1,6 +1,6 @@
 use super::*;
-use crate::{
-    cpu::{effort::ai_effort_config, *},
+use crate::cpu::{
+    effort::ai_effort_config,
     training::{
         default_hall_of_fame_path,
         train_weights,
@@ -9,6 +9,7 @@ use crate::{
         TrainerConfig,
         TrainingSearchStrategy,
     },
+    *,
 };
 
 #[test]
