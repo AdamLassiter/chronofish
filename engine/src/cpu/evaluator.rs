@@ -24,9 +24,16 @@ pub(crate) struct HybridEvaluator {
 }
 
 #[derive(Clone)]
+pub(crate) struct CompactValueEvaluator {
+    pub(crate) model_path: Option<String>,
+    pub(crate) model: crate::gpu::training::CompactValueModel,
+}
+
+#[derive(Clone)]
 pub(crate) enum ValueEvaluator {
     Heuristic(HeuristicEvaluator),
     Neural(NeuralEvaluator),
+    CompactValue(CompactValueEvaluator),
     Hybrid(HybridEvaluator),
 }
 
@@ -153,6 +160,39 @@ impl HybridEvaluator {
     }
 }
 
+impl CompactValueEvaluator {
+    #[allow(dead_code)]
+    pub(crate) fn from_model(model: crate::gpu::training::CompactValueModel) -> Self {
+        Self {
+            model_path: None,
+            model,
+        }
+    }
+
+    pub(crate) fn from_model_path(
+        model_path: impl Into<String>,
+        model: crate::gpu::training::CompactValueModel,
+    ) -> Self {
+        Self {
+            model_path: Some(model_path.into()),
+            model,
+        }
+    }
+
+    pub(crate) fn predict(&self, game: &Game, color: Color) -> i32 {
+        let evaluation_game = game.pruned_for_evaluation();
+        let encoded = evaluation_game.encode_neural_position(color);
+        let value = self.model.predict_value(&encoded.values);
+        (value * crate::gpu::training::VALUE_SCORE_SCALE)
+            .round()
+            .clamp(-(CHECKMATE_SCORE as f32), CHECKMATE_SCORE as f32) as i32
+    }
+
+    pub(crate) fn model_path(&self) -> Option<&str> {
+        self.model_path.as_deref()
+    }
+}
+
 impl ValueEvaluator {
     pub(crate) fn heuristic() -> Self {
         Self::Heuristic(HeuristicEvaluator)
@@ -161,6 +201,18 @@ impl ValueEvaluator {
     #[allow(dead_code)]
     pub(crate) fn neural(model_path: Option<String>) -> Self {
         Self::Neural(NeuralEvaluator::missing_model(model_path))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn compact_value_model(model: crate::gpu::training::CompactValueModel) -> Self {
+        Self::CompactValue(CompactValueEvaluator::from_model(model))
+    }
+
+    pub(crate) fn compact_value_model_from_path(
+        path: impl Into<String>,
+        model: crate::gpu::training::CompactValueModel,
+    ) -> Self {
+        Self::CompactValue(CompactValueEvaluator::from_model_path(path, model))
     }
 
     #[allow(dead_code)]
@@ -201,6 +253,7 @@ impl ValueEvaluator {
         match self {
             Self::Heuristic(evaluator) => evaluator.evaluate(game, color, weights),
             Self::Neural(evaluator) => evaluator.evaluate(game, color, weights),
+            Self::CompactValue(evaluator) => evaluator.predict(game, color),
             Self::Hybrid(evaluator) => evaluator.evaluate(game, color, weights),
         }
     }
@@ -220,6 +273,7 @@ impl ValueEvaluator {
             Self::Neural(evaluator) => evaluator.predict(game, color).unwrap_or_else(|| {
                 HeuristicEvaluator.evaluate_with_limits(game, color, weights, limits, stats)
             }),
+            Self::CompactValue(evaluator) => evaluator.predict(game, color),
             Self::Hybrid(evaluator) => {
                 let heuristic =
                     HeuristicEvaluator.evaluate_with_limits(game, color, weights, limits, stats);
@@ -238,6 +292,7 @@ impl ValueEvaluator {
         match self {
             Self::Heuristic(_) => false,
             Self::Neural(evaluator) => evaluator.is_available(),
+            Self::CompactValue(_) => true,
             Self::Hybrid(evaluator) => evaluator.neural.is_available(),
         }
     }
@@ -247,6 +302,7 @@ impl ValueEvaluator {
         match self {
             Self::Heuristic(_) => None,
             Self::Neural(evaluator) => evaluator.model_path(),
+            Self::CompactValue(evaluator) => evaluator.model_path(),
             Self::Hybrid(evaluator) => evaluator.neural.model_path(),
         }
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::training::*;
+use crate::{cpu::*, training::*};
 
 fn trainer_test_config() -> TrainerConfig {
     TrainerConfig {
@@ -12,6 +12,32 @@ fn trainer_test_config() -> TrainerConfig {
         out: None,
         score: None,
         score_default: false,
+        gpu_backend_info: false,
+        gpu_compile_shaders: false,
+        gpu_compile_kernels: false,
+        gpu_dispatch_smoke: false,
+        gpu_training_dispatch_smoke: false,
+        gpu_shader_info: false,
+        gpu_value_model_path: crate::gpu::training::DEFAULT_VALUE_MODEL_PATH.to_string(),
+        gpu_model_info: None,
+        gpu_model_probe_zero: None,
+        gpu_project_samples: None,
+        gpu_predict_samples: None,
+        gpu_distill_samples: None,
+        gpu_replay_buffer: None,
+        gpu_replay_append: None,
+        gpu_replay_max: crate::gpu::training::MAX_GPU_TRAINING_SAMPLES,
+        gpu_search_snapshot: None,
+        gpu_search_depth: None,
+        gpu_search_min_depth: None,
+        gpu_sample_search_snapshot: None,
+        gpu_sample_mode: crate::gpu::training::SearchLabelMode::Search,
+        gpu_sample_count: crate::gpu::training::DEFAULT_SEARCH_SAMPLE_COUNT,
+        gpu_sample_max_plies: crate::gpu::training::DEFAULT_SEARCH_SAMPLE_MAX_PLIES,
+        gpu_train_search_snapshot: None,
+        gpu_train_samples: None,
+        gpu_train_projected_samples: None,
+        cpu_search_snapshot: None,
         train_cycle: false,
         training_strategy: CpuTrainingStrategy::Sweep,
         compare_seeds: vec![101, 202],
@@ -146,6 +172,213 @@ fn trainer_parses_sweep_and_genetic_strategy_options() {
             SweepParameterGroup::ClassicBasic,
             SweepParameterGroup::AlternateBasic
         ]
+    );
+}
+
+#[test]
+fn trainer_parses_gpu_model_info_mode() {
+    let default_info = TrainerConfig::from_env(vec!["--gpu-model-info".to_string()]);
+    assert_eq!(
+        default_info.gpu_model_info.as_deref(),
+        Some(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
+    );
+
+    let backend_info = TrainerConfig::from_env(vec!["--gpu-backend-info".to_string()]);
+    assert!(backend_info.gpu_backend_info);
+
+    let compile_shaders = TrainerConfig::from_env(vec!["--gpu-compile-shaders".to_string()]);
+    assert!(compile_shaders.gpu_compile_shaders);
+
+    let compile_kernels = TrainerConfig::from_env(vec!["--gpu-compile-kernels".to_string()]);
+    assert!(compile_kernels.gpu_compile_kernels);
+
+    let dispatch_smoke = TrainerConfig::from_env(vec!["--gpu-dispatch-smoke".to_string()]);
+    assert!(dispatch_smoke.gpu_dispatch_smoke);
+
+    let training_dispatch_smoke =
+        TrainerConfig::from_env(vec!["--gpu-training-dispatch-smoke".to_string()]);
+    assert!(training_dispatch_smoke.gpu_training_dispatch_smoke);
+
+    let shader_info = TrainerConfig::from_env(vec!["--gpu-shader-info".to_string()]);
+    assert!(shader_info.gpu_shader_info);
+
+    let custom_model = TrainerConfig::from_env(vec![
+        "--gpu-model".to_string(),
+        "custom-value.cfnn".to_string(),
+    ]);
+    assert_eq!(custom_model.gpu_value_model_path, "custom-value.cfnn");
+
+    let custom_info = TrainerConfig::from_env(vec![
+        "--gpu-model-info".to_string(),
+        "custom-model.cfnn".to_string(),
+    ]);
+    assert_eq!(
+        custom_info.gpu_model_info.as_deref(),
+        Some("custom-model.cfnn")
+    );
+
+    let probe_zero = TrainerConfig::from_env(vec!["--gpu-model-probe-zero".to_string()]);
+    assert_eq!(
+        probe_zero.gpu_model_probe_zero.as_deref(),
+        Some(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
+    );
+
+    let gpu_project_samples = TrainerConfig::from_env(vec![
+        "--gpu-project-samples".to_string(),
+        "samples.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_project_samples.gpu_project_samples.as_deref(),
+        Some("samples.json")
+    );
+
+    let gpu_predict_samples = TrainerConfig::from_env(vec![
+        "--gpu-predict-samples".to_string(),
+        "samples.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_predict_samples.gpu_predict_samples.as_deref(),
+        Some("samples.json")
+    );
+
+    let gpu_distill_samples = TrainerConfig::from_env(vec![
+        "--gpu-distill-samples".to_string(),
+        "samples.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_distill_samples.gpu_distill_samples.as_deref(),
+        Some("samples.json")
+    );
+
+    let gpu_replay_append = TrainerConfig::from_env(vec![
+        "--gpu-replay-buffer".to_string(),
+        "buffer.json".to_string(),
+        "--gpu-replay-append".to_string(),
+        "samples.json".to_string(),
+        "--gpu-replay-max".to_string(),
+        "17".to_string(),
+    ]);
+    assert_eq!(
+        gpu_replay_append.gpu_replay_buffer.as_deref(),
+        Some("buffer.json")
+    );
+    assert_eq!(
+        gpu_replay_append.gpu_replay_append.as_deref(),
+        Some("samples.json")
+    );
+    assert_eq!(gpu_replay_append.gpu_replay_max, 17);
+
+    let gpu_search = TrainerConfig::from_env(vec!["--gpu-search".to_string()]);
+    assert_eq!(gpu_search.gpu_search_snapshot.as_deref(), Some(""));
+
+    let gpu_search_file = TrainerConfig::from_env(vec![
+        "--gpu-search".to_string(),
+        "snapshot.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_search_file.gpu_search_snapshot.as_deref(),
+        Some("snapshot.json")
+    );
+
+    let gpu_search_depth = TrainerConfig::from_env(vec![
+        "--gpu-search".to_string(),
+        "--gpu-search-depth".to_string(),
+        "1".to_string(),
+        "--gpu-search-min-depth".to_string(),
+        "1".to_string(),
+    ]);
+    assert_eq!(gpu_search_depth.gpu_search_snapshot.as_deref(), Some(""));
+    assert_eq!(gpu_search_depth.gpu_search_depth, Some(1));
+    assert_eq!(gpu_search_depth.gpu_search_min_depth, Some(1));
+
+    let gpu_train_samples = TrainerConfig::from_env(vec![
+        "--gpu-train-samples".to_string(),
+        "samples.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_train_samples.gpu_train_samples.as_deref(),
+        Some("samples.json")
+    );
+
+    let gpu_train_projected_samples = TrainerConfig::from_env(vec![
+        "--gpu-train-projected-samples".to_string(),
+        "samples.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_train_projected_samples
+            .gpu_train_projected_samples
+            .as_deref(),
+        Some("samples.json")
+    );
+
+    let gpu_train_search = TrainerConfig::from_env(vec!["--gpu-train-search".to_string()]);
+    assert_eq!(
+        gpu_train_search.gpu_train_search_snapshot.as_deref(),
+        Some("")
+    );
+
+    let gpu_train_search_file = TrainerConfig::from_env(vec![
+        "--gpu-train-search".to_string(),
+        "snapshot.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_train_search_file.gpu_train_search_snapshot.as_deref(),
+        Some("snapshot.json")
+    );
+
+    let gpu_sample_search = TrainerConfig::from_env(vec!["--gpu-sample-search".to_string()]);
+    assert_eq!(
+        gpu_sample_search.gpu_sample_search_snapshot.as_deref(),
+        Some("")
+    );
+
+    let gpu_sample_search_file = TrainerConfig::from_env(vec![
+        "--gpu-sample-search".to_string(),
+        "snapshot.json".to_string(),
+    ]);
+    assert_eq!(
+        gpu_sample_search_file.gpu_sample_search_snapshot.as_deref(),
+        Some("snapshot.json")
+    );
+
+    let gpu_sample_batch = TrainerConfig::from_env(vec![
+        "--gpu-sample-search".to_string(),
+        "--gpu-sample-count".to_string(),
+        "7".to_string(),
+        "--gpu-sample-mode".to_string(),
+        "cpu".to_string(),
+        "--gpu-sample-plies".to_string(),
+        "3".to_string(),
+    ]);
+    assert_eq!(gpu_sample_batch.gpu_sample_count, 7);
+    assert_eq!(
+        gpu_sample_batch.gpu_sample_mode,
+        crate::gpu::training::SearchLabelMode::Cpu
+    );
+    assert_eq!(gpu_sample_batch.gpu_sample_max_plies, 3);
+    assert_eq!(
+        gpu_sample_search.gpu_sample_mode,
+        crate::gpu::training::SearchLabelMode::Search
+    );
+    assert_eq!(
+        crate::gpu::training::SearchLabelMode::parse("duel").expect("duel sample mode"),
+        crate::gpu::training::SearchLabelMode::Duel
+    );
+    assert_eq!(
+        crate::gpu::training::SearchLabelMode::parse("distilled").expect("distilled sample mode"),
+        crate::gpu::training::SearchLabelMode::Distilled
+    );
+
+    let cpu_search = TrainerConfig::from_env(vec!["--cpu-search".to_string()]);
+    assert_eq!(cpu_search.cpu_search_snapshot.as_deref(), Some(""));
+
+    let cpu_search_file = TrainerConfig::from_env(vec![
+        "--cpu-search".to_string(),
+        "snapshot.json".to_string(),
+    ]);
+    assert_eq!(
+        cpu_search_file.cpu_search_snapshot.as_deref(),
+        Some("snapshot.json")
     );
 }
 

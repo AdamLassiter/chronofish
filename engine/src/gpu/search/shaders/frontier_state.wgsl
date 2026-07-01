@@ -124,7 +124,21 @@ fn recompute_turn_status(state_base: u32) {
   next_states[state_base + HEADER_COMPLETE] = select(0, 1, pending == 0);
   if (pending == 0 && next_states[state_base + HEADER_TERMINAL] == 0) {
     next_states[state_base + HEADER_DEPTH] = next_states[state_base + HEADER_DEPTH] + 1;
-    next_states[state_base + HEADER_TURN] = 1 - turn;
+    let next_turn = 1 - turn;
+    next_states[state_base + HEADER_TURN] = next_turn;
+    var next_pending = 0;
+    for (var index = 0u; index < board_count; index = index + 1u) {
+      let base = board_base(state_base, index);
+      let time = next_states[base + BOARD_TIME];
+      let side = next_states[base + BOARD_SIDE];
+      let board_pending = next_states[base + BOARD_ACTIVE] != 0 && time == next_states[state_base + HEADER_PRESENT] && side == next_turn;
+      next_states[base + BOARD_PENDING] = select(0, 1, board_pending);
+      if (board_pending) {
+        next_pending = next_pending + 1;
+      }
+    }
+    next_states[state_base + HEADER_PENDING] = next_pending;
+    next_states[state_base + HEADER_COMPLETE] = select(0, 1, next_pending == 0);
   }
 }
 

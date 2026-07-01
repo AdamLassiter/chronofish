@@ -1,5 +1,5 @@
 use super::parser::{strip_notation_comments, ParsedMove};
-use crate::*;
+use crate::{notation::next_branch_timeline_id, *};
 
 impl Game {
     pub(crate) fn load_notation(&mut self, notation: &str) -> Result<(), String> {

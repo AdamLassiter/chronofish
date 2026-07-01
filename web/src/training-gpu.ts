@@ -1,11 +1,8 @@
 import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SHADER, FORWARD_OUTPUT_SHADER, OUTPUT_DELTA_SHADER, HIDDEN_DELTA_SHADER, HIDDEN3_DELTA_SHADER, APPLY_LAYER_SHADER, APPLY_INDEXED_LAYER_SHADER, APPLY_OUTPUT_SHADER, POLICY_SHADER, POLICY_LOSS_SHADER, REDUCE_LOSS_SHADER } from "./training-shaders.js";
-import { POLICY_BUCKETS } from "./training-policy.js";
-import { trainingLabelPriority } from "./training-replay.js";
-import { NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES } from "./training-encoding.js";
-import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, OPTIMIZER_MOMENTUM, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, TILED_TRAINING_MIN_BATCH, VALUE_EPOCHS_PER_SUBMIT, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
+import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES, OPTIMIZER_MOMENTUM, POLICY_BUCKETS, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, TILED_TRAINING_MIN_BATCH, VALUE_EPOCHS_PER_SUBMIT, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
 import { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
-import { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, moveOrCollapseValidationGroup, movePositionGroupToValidation, shuffledIndices, splitValidationSamples, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
+import { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, moveOrCollapseValidationGroup, movePositionGroupToValidation, shuffledIndices, splitValidationSamples, trainingLabelPriority, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
 import type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
 import type { SparseProjectionFeatures, TrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
 import type { ValidationSplit } from "./training-gpu-samples.js";
@@ -153,12 +150,8 @@ function isPromiseLike<T>(value: T | Promise<T>): value is Promise<T> {
   return Boolean(value && typeof (value as Promise<T>).then === "function");
 }
 
-function labelSourceCounts(samples: TrainingSample[]): Record<string, number> {
-  return samples.reduce<Record<string, number>>((counts, sample) => {
-    const key = sample.labelKind ?? (sample.pseudo ? "distilled" : "unknown");
-    counts[key] = (counts[key] ?? 0) + 1;
-    return counts;
-  }, {});
+function configuredLabelCounts(config: TrainingConfig): Record<string, number> {
+  return config.labelCounts ?? {};
 }
 
 export async function train(
@@ -228,7 +221,7 @@ export async function train(
     model.policyCheckpointImproved = policy.checkpointImproved;
     model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
     model.earlyStopReason = value.earlyStopReason;
-    model.labelCounts = labelSourceCounts(trainingSamples);
+    model.labelCounts = configuredLabelCounts(config);
     model.nonZeroWeights = countNonZero(value.weights) + countNonZero(auxiliary.weights) + countNonZero(value.hiddenWeights) + countNonZero(policy.weights);
     model.replayBufferSize = samples.length;
     model.trainingSampleCount = trainingSamples.length;
@@ -320,7 +313,7 @@ export function trainHeadsOnCpu(
       replaySize: samples.length,
       hiddenLayersTrained: false,
       trainingBackend: "cpu-heads",
-      labelCounts: labelSourceCounts(samples)
+      labelCounts: configuredLabelCounts(config)
     });
     if (epochsWithoutImprovement >= config.patience) {
       earlyStopReason = `validation did not improve for ${config.patience} checks`;
@@ -355,7 +348,7 @@ export function trainHeadsOnCpu(
   model.policyCheckpointImproved = policy.checkpointImproved;
   model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
   model.earlyStopReason = earlyStopReason;
-  model.labelCounts = labelSourceCounts(samples);
+  model.labelCounts = configuredLabelCounts(config);
   model.nonZeroWeights = countNonZero(bestOutputWeights) + countNonZero(auxiliary.weights) + countNonZero(hiddenWeights) + countNonZero(policy.weights);
   model.replayBufferSize = samples.length;
   model.trainingSampleCount = samples.length;
@@ -753,7 +746,7 @@ export async function trainValue(
       validationInterval,
       replaySize: sampleCount,
       hiddenLayersTrained,
-      labelCounts: labelSourceCounts(samples)
+      labelCounts: configuredLabelCounts(config)
     });
     if (epochsWithoutImprovement >= config.patience) {
       earlyStopReason = `validation did not improve for ${config.patience} checks`;
@@ -1771,7 +1764,7 @@ function auxiliaryValueTargets(sample: TrainingSample): number[] {
     const base = board * boardStride;
     const active = features[base + 25 * NEURAL_BOARD_SQUARES] ?? 0;
     const present = features[base + 27 * NEURAL_BOARD_SQUARES] ?? 0;
-    const royal = features[base + 35 * NEURAL_BOARD_SQUARES] ?? 0;
+    const royal = features[base + 31 * NEURAL_BOARD_SQUARES] ?? 0;
     activeBoards += active > 0 ? 1 : 0;
     presentBoards += present > 0 ? 1 : 0;
     royalDanger = Math.max(royalDanger, royal);

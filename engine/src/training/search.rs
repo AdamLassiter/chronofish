@@ -1,4 +1,14 @@
 use super::*;
+use crate::cpu::{
+    EvalWeights,
+    EvaluationLimits,
+    SearchContext,
+    SearchInstant,
+    SearchOptions,
+    TurnPlan,
+    ASPIRATION_WINDOW,
+    CHECKMATE_SCORE,
+};
 
 pub(crate) struct TrainingSearchOutcome {
     pub(crate) plan: TurnPlan,

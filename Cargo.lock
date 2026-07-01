@@ -764,12 +764,14 @@ name = "chronofish-engine"
 version = "0.5.0"
 dependencies = [
  "burn",
+ "futures-lite",
  "naga",
  "pretty-log",
  "rayon",
  "serde",
  "serde_json",
  "wasm-timer",
+ "wgpu",
 ]
 
 [[package]]

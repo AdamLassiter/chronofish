@@ -1,5 +1,5 @@
 use super::*;
-use crate::wasm_api::parse_game_snapshot;
+use crate::{cpu::*, gpu_snapshot::*, wasm_api::parse_game_snapshot};
 
 fn wasm_output(pointer: *const u8) -> String {
     let bytes =
@@ -7,6 +7,15 @@ fn wasm_output(pointer: *const u8) -> String {
     std::str::from_utf8(bytes)
         .expect("WASM output is UTF-8")
         .to_string()
+}
+
+fn wasm_output_i32s(pointer: *const u8) -> Vec<i32> {
+    let bytes =
+        unsafe { std::slice::from_raw_parts(pointer, crate::wasm_api::chronofish_output_len()) };
+    bytes
+        .chunks_exact(4)
+        .map(|chunk| i32::from_le_bytes(chunk.try_into().expect("i32 chunk")))
+        .collect()
 }
 
 #[test]
@@ -69,6 +78,64 @@ fn browser_wasm_contract_round_trips_engine_behavior() {
             .expect("evaluation JSON");
     assert!(evaluation["score"].is_i64());
     assert_eq!(evaluation["source"], "engine heuristic");
+
+    let gpu_snapshot = wasm_output_i32s(crate::wasm_api::chronofish_gpu_snapshot_bytes());
+    assert_eq!(gpu_snapshot[0], GPU_SNAPSHOT_MAGIC);
+    assert_eq!(gpu_snapshot[1], GPU_SNAPSHOT_VERSION);
+    assert_eq!(gpu_snapshot[2], 0);
+    assert_eq!(gpu_snapshot[3], 1);
+    assert_eq!(gpu_snapshot[4], 2);
+    assert_eq!(gpu_snapshot[9], GPU_TIMELINE_RECORD_I32S);
+    assert_eq!(gpu_snapshot[10], GPU_BOARD_RECORD_I32S);
+    assert_eq!(gpu_snapshot[11], GPU_BOARD_SQUARE_I32S);
+
+    let gpu_candidate_inputs: serde_json::Value = serde_json::from_str(&wasm_output(
+        crate::wasm_api::chronofish_gpu_candidate_inputs_json(),
+    ))
+    .expect("GPU candidate inputs JSON");
+    assert_eq!(gpu_candidate_inputs["sourceCount"], 64);
+    assert_eq!(gpu_candidate_inputs["targetCount"], 128);
+    assert_eq!(gpu_candidate_inputs["boardCount"], 2);
+    assert_eq!(
+        gpu_candidate_inputs["sources"].as_array().map(Vec::len),
+        Some(64 * crate::gpu::search::GPU_SOURCE_STRIDE)
+    );
+    assert_eq!(
+        gpu_candidate_inputs["targets"].as_array().map(Vec::len),
+        Some(128 * crate::gpu::search::GPU_TARGET_STRIDE)
+    );
+    let gpu_candidate_input_words =
+        wasm_output_i32s(crate::wasm_api::chronofish_gpu_candidate_inputs_bytes());
+    assert_eq!(gpu_candidate_input_words[0], 64);
+    assert_eq!(gpu_candidate_input_words[1], 128);
+    assert_eq!(gpu_candidate_input_words[2], 2);
+    assert_eq!(
+        gpu_candidate_input_words[3],
+        (64 * crate::gpu::search::GPU_SOURCE_STRIDE) as i32
+    );
+    assert_eq!(
+        gpu_candidate_input_words[4],
+        (128 * crate::gpu::search::GPU_TARGET_STRIDE) as i32
+    );
+
+    let frontier_root = wasm_output_i32s(crate::wasm_api::chronofish_frontier_root_bytes(4));
+    assert_eq!(
+        frontier_root[crate::gpu::search::FRONTIER_HEADER_PARENT],
+        -1
+    );
+    assert_eq!(frontier_root[crate::gpu::search::FRONTIER_HEADER_TURN], 0);
+    assert_eq!(
+        frontier_root[crate::gpu::search::FRONTIER_HEADER_BOARD_COUNT],
+        2
+    );
+    assert_eq!(
+        frontier_root[crate::gpu::search::FRONTIER_HEADER_PLAN_LENGTH],
+        0
+    );
+    assert_eq!(
+        frontier_root[crate::gpu::search::FRONTIER_HEADER_PENDING_BOARDS],
+        0
+    );
 
     assert_eq!(crate::wasm_api::chronofish_submit_turn(), 1);
     let submitted: serde_json::Value =

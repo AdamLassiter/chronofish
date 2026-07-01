@@ -1,5 +1,5 @@
 use super::*;
-use crate::gpu_snapshot::*;
+use crate::{cpu::*, gpu_snapshot::*};
 
 #[test]
 fn neural_encoder_shape_mask_and_order_are_stable() {

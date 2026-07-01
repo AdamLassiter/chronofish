@@ -1,6 +1,10 @@
 export const PROJECTION_SIZE = 2048;
 export const PROJECTION_SEED = 2166136261;
 export const VALUE_SCORE_SCALE = 20_000;
+export const POLICY_BUCKETS = 257;
+export const NEURAL_BOARD_PLANES = 32;
+export const NEURAL_BOARD_SQUARES = 64;
+export const MAX_PLAYOUT_PLIES = 10;
 export const HIDDEN_LAYERS = [1024, 512, 256];
 export const VALUE_EPOCHS_PER_SUBMIT = 64;
 export const POLICY_STEPS_PER_SUBMIT = 64;
@@ -12,3 +16,4 @@ export const OPTIMIZER_MOMENTUM = 0.9;
 export const MIN_POLICY_WORKING_SET_FRACTION = 0.25;
 export const PROJECTION_CHUNK_SIZE = 256;
 export const PROJECTION_TEMPORARY_BUDGET = 128 * 1024 * 1024;
+export const TRAINING_IO_TIMEOUT_MS = 15_000;

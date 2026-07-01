@@ -31,11 +31,19 @@ test("frontend loads GPU effort separately from CPU effort", async () => {
 
 test("bot timeout preserves minimum depth and a completed legal result", async () => {
   const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
   assert.match(controller, /const targetDepth = searchDepthAtLeastOne\(effort\.depth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
   assert.match(controller, /searchDepthAtLeastOne\(effort\.minDepth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
   assert.match(controller, /const nextDepth = nextBotSearchDepth\(pending\.currentDepth, pending\.targetDepth\)/);
-  assert.match(controller, /return currentDepth <= 0 \? Math\.min\(2, targetDepth\) : Math\.min\(targetDepth, currentDepth \+ 2\)/);
+  assert.match(controller, /chronofish_bot_next_search_depth\(currentDepth, targetDepth\)/);
+  assert.match(controller, /chronofish_bot_search_depth_at_least_one\(depth\)/);
+  assert.match(controller, /chronofish_bot_worker_search_time_ms\(timeMs\)/);
+  assert.match(controller, /chronofish_bot_completed_search_depth/);
+  assert.doesNotMatch(controller, /return currentDepth <= 0 \? Math\.min\(2, targetDepth\) : Math\.min\(targetDepth, currentDepth \+ 2\)/);
+  assert.doesNotMatch(controller, /const margin = Math\.min\(1000, Math\.max\(100, Math\.floor\(timeMs \* 0\.05\)\)\)/);
   assert.match(controller, /minDepth: Math\.min\(nextDepth, pending\.minDepth\)/);
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth && pending\.depthReceived < pending\.depthExpected/);
   assert.match(controller, /function completedSearchDepth/);
@@ -43,8 +51,8 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth/);
   assert.match(controller, /completedDepth >= pending\.minDepth/);
   assert.match(controller, /if \(bestResult && \(bestResult\.depth \?\? 0\) >= pending\.minDepth\)/);
-  assert.match(controller, /completedDepth >= 2 && completedDepth % 2 === 0/);
-  assert.match(controller, /resultEndsInRoyalCapture\(result\) \? completedDepth : null/);
+  assert.doesNotMatch(controller, /completedDepth >= 2 && completedDepth % 2 === 0/);
+  assert.match(controller, /resultEndsInRoyalCapture\(result\) \? 1 : 0/);
   assert.match(controller, /pending\.incompleteDepthAttempt = true/);
   assert.match(controller, /pending\.incompleteDepthAttempt && pending\.currentDepth >= pending\.minDepth/);
   assert.match(controller, /is completing depth/);
@@ -54,6 +62,18 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /minDepth: pending\.minDepth/);
   assert.match(controller, /pending\.bestByDepth\.set\(entry\.depth, depthBest\)/);
   assert.match(controller, /\(bestResult\?\.depth \?\? 0\) >= pending\.targetDepth/);
+  assert.match(engineSearch, /pub fn bot_search_depth_at_least_one/);
+  assert.match(engineSearch, /pub fn bot_next_search_depth/);
+  assert.match(engineSearch, /pub fn bot_worker_search_time_ms/);
+  assert.match(engineSearch, /pub fn bot_completed_search_depth/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_bot_search_depth_at_least_one/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_bot_next_search_depth/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_bot_worker_search_time_ms/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_bot_completed_search_depth/);
+  assert.match(engineTypes, /chronofish_bot_search_depth_at_least_one\(depth: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_next_search_depth\(currentDepth: number, targetDepth: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_worker_search_time_ms\(timeMs: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_completed_search_depth\(resultDepth: number, requestedDepth: number, resultEndsInRoyalCapture: number\): number/);
 });
 
 test("bot countdown switches to overtime after the nominal deadline", async () => {
@@ -80,15 +100,16 @@ test("bot search result ranking prefers deeper completed searches before score",
 
 test("GPU worker honors minimum depth before applying its internal deadline", async () => {
   const worker = await readFile(path.join(webRoot, "src/ai-worker.ts"), "utf8");
+  const workerTypes = await readFile(path.join(webRoot, "src/ai-worker-types.ts"), "utf8");
   const cpuWorker = await readFile(path.join(webRoot, "src/cpu-ai-worker.ts"), "utf8");
 
-  assert.match(worker, /minDepth\?: number/);
+  assert.match(workerTypes, /minDepth\?: number/);
   assert.match(worker, /const requestedDepth = Math\.max\(1, depth \?\? 1\)/);
   assert.match(worker, /const minimumDepth = Math\.min\(requestedDepth, Math\.max\(1, Math\.floor\(minDepth \?\? 1\)\)\)/);
   assert.match(worker, /gpuDeadlineAt = minimumDepth >= requestedDepth/);
   assert.match(worker, /Number\.POSITIVE_INFINITY/);
   assert.match(worker, /depth: requestedDepth/);
-  assert.match(worker, /resultReason\?: SearchResultReason/);
+  assert.match(workerTypes, /resultReason\?: SearchResultReason/);
   assert.match(worker, /resultReason: replayed\.result\?\.reason/);
   assert.match(worker, /gpuTerminal: result\.gpuTerminal === true \|\| replayed\.result\?\.reason === "royal-capture"/);
   assert.match(cpuWorker, /resultReason\?: "royal-capture" \| "threefold-repetition" \| "stalemate" \| null/);
@@ -102,7 +123,7 @@ test("bot move choice logging includes full principal variation plans", async ()
   assert.match(controller, /function formatBotPlan/);
   assert.match(controller, /principalVariation: normalizePrincipalVariation\(choice\.principalVariation \?\? result\.principalVariation, moves\)/);
   assert.match(controller, /principalVariation: normalizePrincipalVariation\(choice\.principalVariation, choice\.moves\)/);
-  assert.match(worker, /principalVariation\?: Move\[\]\[\] \| undefined/);
+  assert.match(await readFile(path.join(webRoot, "src/ai-worker-types.ts"), "utf8"), /principalVariation\?: Move\[\]\[\] \| undefined/);
   assert.match(worker, /principalVariation,/);
   assert.match(worker, /principalVariation: candidate\.principalVariation/);
 });

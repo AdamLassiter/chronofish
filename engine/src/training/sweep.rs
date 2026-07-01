@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use super::*;
+use crate::cpu::{EvalWeights, SearchInstant};
 
 pub(crate) fn run_sweep_training_cycle(config: &TrainerConfig) {
     if ai_source_is_dirty(&config.ai_src) {

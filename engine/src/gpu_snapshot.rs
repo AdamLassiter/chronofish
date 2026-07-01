@@ -1,4 +1,7 @@
-use crate::*;
+use crate::{
+    cpu::{MAX_MOVES_PER_NODE, MAX_QUIESCENCE_DEPTH, MAX_TURN_PLANS, REQUIRED_MOVES_PER_BOARD},
+    *,
+};
 
 pub(crate) const GPU_SNAPSHOT_MAGIC: i32 = 0x4346_4750;
 pub(crate) const GPU_SNAPSHOT_VERSION: i32 = 1;

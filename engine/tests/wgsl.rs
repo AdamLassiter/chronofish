@@ -1,22 +1,54 @@
-use std::{fs, path::PathBuf};
+use std::collections::HashMap;
+
+use chronofish_engine::gpu::{search, training, GpuKernel, WgslShader};
 
 #[test]
-fn frontend_wgsl_shaders_parse() {
-    let shader_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../web/src/shaders");
-    let entries = fs::read_dir(&shader_root).expect("read shader directory");
-    for entry in entries {
-        let path = entry.expect("read shader entry").path();
-        if path.extension().and_then(|value| value.to_str()) != Some("wgsl") {
-            continue;
-        }
-        let source = fs::read_to_string(&path).expect("read WGSL shader");
-        let module = naga::front::wgsl::parse_str(&source)
-            .unwrap_or_else(|error| panic!("{} failed to parse: {error}", path.display()));
-        naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::all(),
-        )
-        .validate(&module)
-        .unwrap_or_else(|error| panic!("{} failed validation: {error:?}", path.display()));
+fn engine_gpu_wgsl_shaders_parse() {
+    for shader in search::SHADERS.iter().chain(training::SHADERS.iter()) {
+        validate_shader(shader);
     }
+}
+
+#[test]
+fn engine_gpu_kernel_descriptors_match_wgsl_entrypoints() {
+    let shaders = search::SHADERS
+        .iter()
+        .chain(training::SHADERS.iter())
+        .map(|shader| (shader.name, *shader))
+        .collect::<HashMap<_, _>>();
+    for kernel in search::KERNELS.iter().chain(training::KERNELS.iter()) {
+        validate_kernel(kernel, &shaders);
+    }
+}
+
+fn validate_shader(shader: &WgslShader) {
+    let module = naga::front::wgsl::parse_str(shader.source)
+        .unwrap_or_else(|error| panic!("{} failed to parse: {error}", shader.name));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("{} failed validation: {error:?}", shader.name));
+}
+
+fn validate_kernel(kernel: &GpuKernel, shaders: &HashMap<&'static str, WgslShader>) {
+    let shader = shaders.get(kernel.shader).unwrap_or_else(|| {
+        panic!(
+            "{} references missing shader {}",
+            kernel.label, kernel.shader
+        )
+    });
+    let module = naga::front::wgsl::parse_str(shader.source)
+        .unwrap_or_else(|error| panic!("{} failed to parse: {error}", shader.name));
+    assert!(
+        module
+            .entry_points
+            .iter()
+            .any(|entry| entry.name == kernel.entry_point),
+        "{} references missing entry point {} in {}",
+        kernel.label,
+        kernel.entry_point,
+        kernel.shader
+    );
 }

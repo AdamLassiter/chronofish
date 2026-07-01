@@ -195,9 +195,9 @@ fn path_clear_after_move(state: u32, piece: i32, color: i32, row: i32, time: i32
 fn move_checks_royal_after_move(state: u32, source_board: u32, target_board: u32, from_x: i32, from_y: i32, to_x: i32, to_y: i32, piece: i32, color: i32) -> bool {
   let board_count = u32(max(0, states[state_base(state) + HEADER_BOARD_COUNT]));
   let source = board_base(state, source_board);
-  let target = board_base(state, target_board);
-  let target_row = states[target + BOARD_ROW];
-  let target_time = states[target + BOARD_TIME];
+  let target_base = board_base(state, target_board);
+  let target_row = states[target_base + BOARD_ROW];
+  let target_time = states[target_base + BOARD_TIME];
   let vacated_row = states[source + BOARD_ROW];
   let vacated_time = states[source + BOARD_TIME];
   for (var board = 0u; board < board_count; board = board + 1u) {
@@ -219,7 +219,7 @@ fn move_checks_royal_after_move(state: u32, source_board: u32, target_board: u32
       var dt = raw_dt;
       if (!same_board && dt % 2 == 0) { dt = dt / 2; }
       let dl = states[royal_board + BOARD_ROW] - target_row;
-      if (!legal_shape(piece, color, to_y, royal_x, royal_y, dx, dy, dt, dl, same_board, occupant_piece, occupant_color, states[target + BOARD_CASTLING], states[target + BOARD_EP], states[target + BOARD_EP + 1u])) { continue; }
+      if (!legal_shape(piece, color, to_y, royal_x, royal_y, dx, dy, dt, dl, same_board, occupant_piece, occupant_color, states[target_base + BOARD_CASTLING], states[target_base + BOARD_EP], states[target_base + BOARD_EP + 1u])) { continue; }
       if (path_clear_after_move(state, piece, color, target_row, target_time, to_x, to_y, vacated_row, vacated_time, from_x, from_y, dx, dy, raw_dt, dt, dl)) {
         return true;
       }
@@ -294,9 +294,9 @@ fn board_relevance(state: u32, board: u32) -> i32 {
 }
 
 fn prune_low_relevance_quiet_target(state: u32, target_board: u32, tactical_priority: i32) -> bool {
-  let target = board_base(state, target_board);
-  let inactive = states[target + BOARD_ACTIVE] == 0;
-  let non_present = states[target + BOARD_TIME] != states[state_base(state) + HEADER_PRESENT];
+  let target_base = board_base(state, target_board);
+  let inactive = states[target_base + BOARD_ACTIVE] == 0;
+  let non_present = states[target_base + BOARD_TIME] != states[state_base(state) + HEADER_PRESENT];
   return tactical_priority == 0 && inactive && non_present && board_relevance(state, target_board) < 4;
 }
 

@@ -1,5 +1,12 @@
 use crate::{
     hash::{board_position_hash, timeline_position_hash},
+    notation::{
+        en_passant_after_move,
+        piece_json,
+        position_json,
+        promote_if_needed,
+        update_castling_rights,
+    },
     *,
 };
 
@@ -65,6 +72,14 @@ impl Game {
         };
         game.position_hash = game.recompute_position_hash();
         game
+    }
+
+    pub(crate) fn turn_color(&self) -> Color {
+        self.turn
+    }
+
+    pub(crate) fn position_key(&self) -> String {
+        format!("{:016x}", self.position_hash)
     }
 
     pub(crate) fn timeline(&self, timeline_id: i32) -> Option<&Timeline> {

@@ -95,7 +95,7 @@ pub(crate) struct Position {
 // the current unsubmitted turn; the frontend separately tracks submitted turns
 // for replay and multiplayer sync.
 #[derive(Clone)]
-pub(crate) struct Game {
+pub struct Game {
     pub(crate) turn: Color,
     pub(crate) timelines: Vec<Timeline>,
     pub(crate) next_timeline_id: i32,

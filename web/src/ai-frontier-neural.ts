@@ -1,7 +1,7 @@
 import { decodeCompactModel, modelArchitectureMatches } from "./training-gpu.js";
 import type { CompactValueModel } from "./training-gpu.js";
 import { FRONTIER_NEURAL_SHADER, FRONTIER_POLICY_SHADER } from "./training-shaders.js";
-import frontierForward from "./shaders/frontier_forward.wgsl";
+import frontierForward from "../../engine/src/gpu/search/shaders/frontier_forward.wgsl";
 
 interface BufferUsageConstants {
   COPY_SRC: number;

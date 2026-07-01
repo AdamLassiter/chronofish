@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 #[derive(Clone)]
 pub(crate) struct BaselineFitnessCache {

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 pub(crate) fn unique_weights(weights: &[EvalWeights]) -> Vec<EvalWeights> {
     let mut unique = Vec::with_capacity(weights.len());

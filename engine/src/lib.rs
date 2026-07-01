@@ -1,18 +1,16 @@
-mod model;
+pub mod cpu;
+pub mod gpu;
+pub mod model;
 pub(crate) use model::*;
 
+pub(crate) mod wasm_api;
+
 mod game;
+mod gpu_snapshot;
 mod hash;
 mod movegen;
 mod movegen_piece;
 mod notation;
-pub(crate) use notation::*;
-mod ai;
-pub(crate) use ai::*;
-mod wasm_api;
-
-#[cfg(test)]
-mod gpu_snapshot;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod training;

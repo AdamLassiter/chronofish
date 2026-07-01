@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::{EvalWeights, SearchContext, SearchInstant};
 
 pub(crate) fn seeded_start_position(
     seed: u64,

@@ -4,9 +4,11 @@ import path from "node:path";
 import test from "node:test";
 
 const root = path.resolve(import.meta.dirname, "..");
+const repoRoot = path.resolve(root, "..");
+const searchShaderRoot = path.join(repoRoot, "engine/src/gpu/search/shaders");
 
 test("GPU move generation permits historical branch mutation", async () => {
-  const shader = await readFile(path.join(root, "src/shaders/mutate.wgsl"), "utf8");
+  const shader = await readFile(path.join(searchShaderRoot, "mutate.wgsl"), "utf8");
 
   assert.doesNotMatch(shader, /STATUS_UNSUPPORTED_HISTORICAL_BRANCH/);
   assert.doesNotMatch(shader, /!same_board\s*&&\s*!target_latest/);
@@ -16,7 +18,7 @@ test("GPU move generation permits historical branch mutation", async () => {
 test("legacy GPU move generation carries en-passant board metadata", async () => {
   const layout = await readFile(path.join(root, "src/ai-layout.ts"), "utf8");
   const snapshot = await readFile(path.join(root, "src/ai-snapshot.ts"), "utf8");
-  const shader = await readFile(path.join(root, "src/shaders/movegen.wgsl"), "utf8");
+  const shader = await readFile(path.join(searchShaderRoot, "movegen.wgsl"), "utf8");
 
   assert.match(layout, /GPU_BOARD_STRIDE = 73/);
   assert.match(snapshot, /board\.enPassant\?\.x \?\? -1/);
@@ -40,19 +42,53 @@ test("full GPU mode uses the resident frontier for parallel timelines", async ()
 
 test("GPU search returns complete turn plans for post-match review", async () => {
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
   assert.match(worker, /const principalVariation = \[moves\]/);
   assert.match(worker, /completedGpuReplyTurn\(device, current/);
   assert.match(worker, /principalVariation\.push\(reply\)/);
   assert.match(worker, /depth:\s*1,[\s\S]*gpuSearch:\s*"projected-reply"/);
   assert.match(worker, /principalVariation:\s*Move\[\]\[\]/);
-  assert.match(worker, /let best = -2147483647/);
+  assert.match(worker, /const \[best\] = await engineRankedCandidates\(scored, \{\s*pendingBoards,\s*requirePending: true,\s*limit: 1/s);
+  assert.match(worker, /engine\.chronofish_gpu_reply_pressure_ranked_roots_bytes\(ptr, byteLength\)/);
+  assert.match(worker, /return engineReplyPressureRankedRoots\(rankedRoots, pairScores, rankedReplies\.length\)/);
+  assert.match(engineTypes, /chronofish_gpu_reply_pressure_ranked_roots_bytes\(ptr: number, length: number\): number/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_reply_pressure_ranked_roots_bytes/);
+  assert.match(engineSearch, /pub fn gpu_reply_pressure_ranked_roots_from_i32s/);
 });
 
 test("GPU turn completion only spends moves on pending present boards", async () => {
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
-  assert.match(worker, /moveStartsOnPendingBoard\(entry\.move, pendingBoards\)/);
+  assert.match(worker, /engineRankedCandidates\(scored, \{\s*pendingBoards,\s*requirePending: true/s);
+  assert.match(worker, /engine\.chronofish_gpu_ranked_candidate_indexes_bytes\(ptr, byteLength\)/);
+  assert.match(worker, /await engineGpuScoringSummary\(scored, pendingBoards\)/);
+  assert.match(worker, /engine\.chronofish_gpu_scoring_summary_bytes\(ptr, byteLength\)/);
+  assert.match(worker, /await engineGpuMutationSummary\(mutated\)/);
+  assert.match(worker, /engine\.chronofish_gpu_mutation_summary_bytes\(ptr, byteLength\)/);
+  assert.match(worker, /await engineGpuTurnCompletionKey\(pendingBoards\)/);
+  assert.match(worker, /engine\.chronofish_gpu_turn_completion_key_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /function gpuScoringSummary/);
+  assert.doesNotMatch(worker, /function moveStartsOnPendingBoard/);
+  assert.doesNotMatch(worker, /function gpuMutationSummary/);
+  assert.doesNotMatch(worker, /function gpuTurnCompletionKey/);
+  assert.match(engineTypes, /chronofish_gpu_ranked_candidate_indexes_bytes\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_scoring_summary_bytes\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_mutation_summary_bytes\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_turn_completion_key_json\(ptr: number, length: number\): number/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_ranked_candidate_indexes_bytes/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_scoring_summary_bytes/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_mutation_summary_bytes/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_turn_completion_key_json/);
+  assert.match(engineSearch, /pub fn gpu_ranked_candidate_indexes_from_i32s/);
+  assert.match(engineSearch, /pub fn gpu_scoring_summary_from_i32s/);
+  assert.match(engineSearch, /pub fn gpu_mutation_summary_from_i32s/);
+  assert.match(engineSearch, /pub fn gpu_turn_completion_key_json/);
   assert.match(worker, /findCompleteGpuTurn\(device, snapshot, rootTurn/);
   assert.match(worker, /`\$\{result\.gpuSearch \?\? "gpu"\}-turn-fallback`/);
   assert.match(worker, /choices: \[\]/);
@@ -64,19 +100,23 @@ test("GPU reply sentinel is never used as an evaluation", async () => {
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
 
   assert.match(worker, /if \(reply\.move\) \{\s*score -= reply\.score/);
-  assert.match(worker, /return bestMove \? \{ score: best, move: bestMove \} : \{ score: 0 \}/);
+  assert.match(worker, /return best \? \{ score: best\.score, move: best\.move \} : \{ score: 0 \}/);
 });
 
-test("GPU pending-board filters use numeric color normalization", async () => {
+test("GPU pending-board filters use engine numeric color normalization", async () => {
   const snapshot = await readFile(path.join(root, "src/ai-snapshot.ts"), "utf8");
   const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
   const frontier = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
   assert.match(snapshot, /export function colorCode\(color: Color \| string \| number \| null \| undefined\)/);
   assert.match(snapshot, /typeof color === "number"/);
-  assert.match(worker, /colorCode\(board\.sideToMove\) === colorCode\(color\)/);
-  assert.match(frontier, /const rootColor = colorCode\(snapshot\.turn\)/);
-  assert.match(frontier, /colorCode\(board\.sideToMove\) === rootColor/);
+  assert.match(worker, /const pendingBoards = await enginePendingPresentBoards\(snapshot, snapshot\.turn\)/);
+  assert.match(worker, /engineFrontierRootFromSnapshot\(\{ \.\.\.snapshot, turn: color \}, boardCount\)/);
+  assert.match(worker, /root\.words\[base \+ GPU_FRONTIER_BOARD_PENDING\]/);
+  assert.match(worker, /engineFrontierRootFromSnapshot\(snapshot, tuning\.maxBoards\)/);
+  assert.match(engineSearch, /board\.side_to_move == root_color/);
+  assert.match(engineSearch, /let turn = gpu_search_color_code\(&snapshot\.turn\)/);
   assert.doesNotMatch(frontier, /board\.sideToMove === snapshot\.turn/);
 });
 

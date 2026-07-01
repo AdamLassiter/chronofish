@@ -1,5 +1,6 @@
-import { encodeNeuralPositionFeatures } from "./training-encoding.js";
-import type { Color, GameSnapshot } from "./types.js";
+import { readWasmString, writeWasmString } from "./engine-io.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
+import type { ChronofishEngine, Color, GameSnapshot } from "./types.js";
 
 interface WorkerScope {
   addEventListener(type: "message", listener: (event: MessageEvent<TrainingLabelRequest>) => void | Promise<void>): void;
@@ -23,10 +24,11 @@ interface NeuralSample {
   sideToMove: Color;
   boardCount: number;
   positionKey: string;
-  features: Float32Array;
+  features: number[] | Float32Array;
 }
 
 const workerSelf = self as unknown as WorkerScope;
+let enginePromise: Promise<ChronofishEngine> | null = null;
 
 workerSelf.addEventListener("message", async (event) => {
   const { id, type, game, games, encodeOnly } = event.data;
@@ -35,17 +37,13 @@ workerSelf.addEventListener("message", async (event) => {
       if (!Array.isArray(games)) {
         throw new Error("Batch training position encoding requires game snapshots.");
       }
-      const samples: NeuralSample[] = [];
       for (const snapshot of games) {
         if (!snapshot.timelines.length) {
           throw new Error("Training position encoding requires a client game snapshot.");
         }
-        samples.push(neuralPosition(snapshot));
       }
-      workerSelf.postMessage(
-        { id, ok: true, samples },
-        samples.map((sample) => sample.features.buffer)
-      );
+      const samples = await neuralPositions(games);
+      workerSelf.postMessage({ id, ok: true, samples });
       return;
     }
     if (type === "selfPlay" || !encodeOnly) {
@@ -54,31 +52,35 @@ workerSelf.addEventListener("message", async (event) => {
     if (!game?.timelines.length) {
       throw new Error("Training position encoding requires a client game snapshot.");
     }
-    const sample = neuralPosition(game);
-    workerSelf.postMessage({ id, ok: true, sample }, [sample.features.buffer]);
+    const sample = await neuralPosition(game);
+    workerSelf.postMessage({ id, ok: true, sample });
   } catch (error: unknown) {
     workerSelf.postMessage({ id, ok: false, error: errorMessage(error) });
   }
 });
 
-function neuralPosition(game: GameSnapshot): NeuralSample {
-  const encoded = encodeNeuralPositionFeatures(game, game.turn);
-  return {
-    sideToMove: game.turn,
-    boardCount: encoded.boardCount,
-    positionKey: positionKey(game),
-    features: encoded.values
-  };
+async function neuralPosition(game: GameSnapshot): Promise<NeuralSample> {
+  return (await neuralPositions([game]))[0]!;
 }
 
-function positionKey(game: GameSnapshot): string {
-  const text = JSON.stringify(game);
-  let hash = 2166136261;
-  for (let index = 0; index < text.length; index += 1) {
-    hash ^= text.charCodeAt(index);
-    hash = Math.imul(hash, 16777619) >>> 0;
+async function neuralPositions(games: GameSnapshot[]): Promise<NeuralSample[]> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(games));
+  try {
+    const output = engine.chronofish_training_samples_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as NeuralSample[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
   }
-  return hash.toString(16).padStart(8, "0");
+}
+
+async function engineInstance() {
+  enginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
+    .then((instance) => instance.exports as unknown as ChronofishEngine);
+  return enginePromise;
 }
 
 function errorMessage(error: unknown): string {

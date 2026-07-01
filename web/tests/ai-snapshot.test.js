@@ -9,7 +9,7 @@ import * as esbuild from "esbuild";
 const root = path.resolve(import.meta.dirname, "..");
 const modules = await buildTestModules();
 const { GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK } = await import(modules.aiLayout);
-const { buildGpuCandidateInputs, colorCode, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
+const { buildGpuCandidateInputs, colorCode, parseGpuSnapshotBytes, snapshotWithGpuChildBoards } = await import(modules.aiSnapshot);
 
 test("initial position encodes GPU move candidates", () => {
   const inputs = buildGpuCandidateInputs(initialGame(), "white");
@@ -35,6 +35,21 @@ test("GPU snapshot encoding normalizes numeric and cased colors", () => {
   assert.equal(colorCode(1), 1);
   assert.equal(inputs.targets[7], 0);
   assert.equal(inputs.sources[1], 1);
+});
+
+test("engine GPU snapshot bytes parse into GPU candidate inputs", () => {
+  const snapshot = parseGpuSnapshotBytes(initialEngineGpuSnapshotBytes());
+  const inputs = buildGpuCandidateInputs(snapshot, "white");
+
+  assert.equal(snapshot.format, "engine-gpu-snapshot-v1");
+  assert.equal(snapshot.turn, "white");
+  assert.equal(snapshot.timelines.length, 1);
+  assert.equal(snapshot.timelines[0].id, 0);
+  assert.equal(snapshot.timelines[0].boards.length, 1);
+  assert.equal(snapshot.timelines[0].boards[0].latest, true);
+  assert.equal(inputs.sourceCount, 32);
+  assert.equal(inputs.targetCount, 64);
+  assert.equal(inputs.boardCount, 1);
 });
 
 test("historical GPU branch creates a new owned timeline", () => {
@@ -118,6 +133,50 @@ function writeMutationBoard(records, offset, { timelineId, time, sideToMove }) {
   records[offset + 7] = -1;
   records[offset + 8] = -1;
   records[offset + 9] = 1;
+}
+
+function initialEngineGpuSnapshotBytes() {
+  const words = [];
+  const push = (...values) => words.push(...values);
+  push(
+    0x4346_4750,
+    1,
+    0,
+    1,
+    1,
+    1,
+    -1,
+    -1,
+    0,
+    8,
+    12,
+    64,
+    128,
+    64,
+    1,
+    0
+  );
+  push(0, 0, 0, 0, 1, 1, 0, 0);
+  push(0, 0, 0, 0, 15, -1, -1, -1, -1, 1, 0, 0);
+  const backRank = [6, 10, 7, 3, 1, 7, 10, 6];
+  for (let index = 0; index < 64; index += 1) {
+    const y = Math.floor(index / 8);
+    const x = index % 8;
+    if (y === 0) {
+      words.push(backRank[x]);
+    } else if (y === 1) {
+      words.push(11);
+    } else if (y === 6) {
+      words.push(11 | (1 << 8));
+    } else if (y === 7) {
+      words.push(backRank[x] | (1 << 8));
+    } else {
+      words.push(0);
+    }
+  }
+  const bytes = new Uint8Array(words.length * Int32Array.BYTES_PER_ELEMENT);
+  new Int32Array(bytes.buffer).set(words);
+  return bytes;
 }
 
 async function buildTestModules() {

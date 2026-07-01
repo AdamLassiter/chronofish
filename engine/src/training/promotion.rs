@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use super::*;
+use crate::cpu::{EvalWeights, SearchInstant};
 
 pub(crate) fn compare_and_maybe_promote(
     candidate: EvalWeights,

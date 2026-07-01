@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use super::*;
+use crate::cpu::{EvalWeights, SearchInstant};
 
 pub(crate) fn run_training_cycle(config: &TrainerConfig) {
     // Promotion rewrites the parameter include file, so refuse to continue when

@@ -49,13 +49,91 @@ export interface GpuCandidateInputs {
   mutationBoards: Int32Array;
 }
 
+const GPU_SNAPSHOT_MAGIC = 0x4346_4750;
+const GPU_SNAPSHOT_VERSION = 1;
+const GPU_SNAPSHOT_HEADER_I32S = 16;
+const GPU_TIMELINE_RECORD_I32S = 8;
+const GPU_BOARD_RECORD_I32S = 12;
+const GPU_BOARD_SQUARE_I32S = 64;
+
 interface SnapshotChildOptions {
   move?: Move | null;
   advanceTurn?: boolean;
 }
 
-export function readGpuSnapshot(): GpuSnapshot | null {
-  return null;
+export function parseGpuSnapshotBytes(bytes: Uint8Array): GpuSnapshot {
+  if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Engine GPU snapshot byte length is not i32-aligned.");
+  }
+  const words = new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT);
+  if ((words[0] ?? 0) !== GPU_SNAPSHOT_MAGIC) {
+    throw new Error("Engine GPU snapshot has an invalid magic header.");
+  }
+  if ((words[1] ?? 0) !== GPU_SNAPSHOT_VERSION) {
+    throw new Error(`Unsupported engine GPU snapshot version: ${words[1] ?? "missing"}.`);
+  }
+  const timelineCount = words[3] ?? 0;
+  const boardCount = words[4] ?? 0;
+  const timelineStride = words[9] ?? GPU_TIMELINE_RECORD_I32S;
+  const boardStride = words[10] ?? GPU_BOARD_RECORD_I32S;
+  const squareStride = words[11] ?? GPU_BOARD_SQUARE_I32S;
+  if (timelineStride < GPU_TIMELINE_RECORD_I32S || boardStride < GPU_BOARD_RECORD_I32S || squareStride < GPU_BOARD_SQUARE_I32S) {
+    throw new Error("Engine GPU snapshot has unsupported record strides.");
+  }
+  const timelineStart = GPU_SNAPSHOT_HEADER_I32S;
+  const boardStart = timelineStart + timelineCount * timelineStride;
+  const requiredWords = boardStart + boardCount * (boardStride + squareStride);
+  if (timelineCount < 0 || boardCount < 0 || requiredWords > words.length) {
+    throw new Error("Engine GPU snapshot is truncated.");
+  }
+
+  const timelines: GpuTimeline[] = [];
+  const boardRecords: GpuBoardSnapshot[] = [];
+  for (let index = 0; index < timelineCount; index += 1) {
+    const base = timelineStart + index * timelineStride;
+    timelines.push({
+      id: words[base] ?? 0,
+      row: words[base + 1] ?? 0,
+      owner: ownerFromCode(words[base + 2] ?? 0),
+      boardCount: words[base + 4] ?? 0,
+      latestTime: words[base + 6] ?? 0,
+      boards: []
+    });
+  }
+
+  for (let index = 0; index < boardCount; index += 1) {
+    const base = boardStart + index * (boardStride + squareStride);
+    const timelineIndex = words[base] ?? 0;
+    const squaresStart = base + boardStride;
+    const board: GpuBoardSnapshot = {
+      timelineIndex,
+      timelineId: words[base + 1] ?? timelines[timelineIndex]?.id ?? 0,
+      time: words[base + 2] ?? 0,
+      sideToMove: colorFromCode(words[base + 3] ?? 0),
+      castling: words[base + 4] ?? 0,
+      enPassant: (words[base + 5] ?? -1) >= 0 ? {
+        x: words[base + 5] ?? -1,
+        y: words[base + 6] ?? -1,
+        capturedX: words[base + 7] ?? -1,
+        capturedY: words[base + 8] ?? -1
+      } : null,
+      latest: (words[base + 9] ?? 0) !== 0,
+      originKind: words[base + 10] ?? 0,
+      squares: words.slice(squaresStart, squaresStart + squareStride)
+    };
+    boardRecords.push(board);
+    timelines[timelineIndex]?.boards.push(board);
+  }
+
+  return {
+    format: "engine-gpu-snapshot-v1",
+    turn: colorFromCode(words[2] ?? 0),
+    nextTimelineId: words[5] ?? 1,
+    nextBlackTimelineId: words[6] ?? -1,
+    royalCaptureBy: (words[7] ?? -1) >= 0 ? colorFromCode(words[7] ?? 0) : null,
+    timelines,
+    boards: boardRecords
+  };
 }
 
 export function buildGpuCandidateInputsFromSnapshot(snapshot: GpuSnapshot, color: Color): GpuCandidateInputs {
@@ -164,7 +242,7 @@ export function snapshotWithGpuChildBoards(
   };
 }
 
-export function originForGpuChild(child: GpuBoardSnapshot, move: Move): MoveOrigin {
+function originForGpuChild(child: GpuBoardSnapshot, move: Move): MoveOrigin {
   const sourceAdvance = isSourceAdvanceChild(child, move);
   return {
     type: sourceAdvance ? "source-advance" : "cross-board",
@@ -192,7 +270,7 @@ function nextBranchRow(timelines: GpuTimeline[], sourceRow: number, owner: Color
   return row;
 }
 
-export function gpuMutationBoardRecordToSnapshot(record: Int32Array): GpuBoardSnapshot {
+function gpuMutationBoardRecordToSnapshot(record: Int32Array): GpuBoardSnapshot {
   return {
     timelineIndex: record[0] ?? 0,
     timelineId: record[1] ?? 0,
@@ -230,7 +308,7 @@ export function gpuSnapshotToGame(snapshot: GpuSnapshot): GameSnapshot {
   };
 }
 
-export function gpuBoardToGameBoard(board: GpuBoardSnapshot): BoardSnapshot {
+function gpuBoardToGameBoard(board: GpuBoardSnapshot): BoardSnapshot {
   if (board.board) {
     return {
       time: board.time,
@@ -251,7 +329,7 @@ export function gpuBoardToGameBoard(board: GpuBoardSnapshot): BoardSnapshot {
   };
 }
 
-export function squaresToGameBoard(squares: ArrayLike<number> | undefined): BoardSquares {
+function squaresToGameBoard(squares: ArrayLike<number> | undefined): BoardSquares {
   const board: BoardSquares = [];
   for (let y = 0; y < 8; y += 1) {
     const row: Array<Piece | null> = [];
@@ -263,7 +341,7 @@ export function squaresToGameBoard(squares: ArrayLike<number> | undefined): Boar
   return board;
 }
 
-export function pieceFromCode(code: number): Piece | null {
+function pieceFromCode(code: number): Piece | null {
   const type = pieceTypeFromCode(code & 255);
   if (!type) {
     return null;
@@ -365,7 +443,7 @@ export function squareCodesForBoard(board: GpuBoardSnapshot | BoardSnapshot): Ar
   return (board.board ?? []).flat().map((piece) => piece ? pieceTypeCode(piece.type) | (colorCode(piece.color) << 8) : 0);
 }
 
-export function pushGpuBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: Pick<GpuBoardSnapshot, "time" | "sideToMove" | "castling" | "enPassant" | "squares">): void {
+function pushGpuBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: Pick<GpuBoardSnapshot, "time" | "sideToMove" | "castling" | "enPassant" | "squares">): void {
   out.push(
     timeline.id,
     timeline.row,
@@ -382,7 +460,7 @@ export function pushGpuBoardRecord(out: number[], timeline: GpuTimeline | Timeli
   }
 }
 
-export function pushGpuMutationBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: GpuBoardSnapshot): void {
+function pushGpuMutationBoardRecord(out: number[], timeline: GpuTimeline | Timeline, board: GpuBoardSnapshot): void {
   out.push(
     board.timelineIndex ?? 0,
     timeline.id,
@@ -414,6 +492,16 @@ export function ownerCode(owner: TimelineOwner): number {
     return 2;
   }
   return 0;
+}
+
+function ownerFromCode(code: number): TimelineOwner {
+  if (code === 1) {
+    return "white";
+  }
+  if (code === 2) {
+    return "black";
+  }
+  return "neutral";
 }
 
 export function moveFromCandidateRecord(records: Int32Array, index: number): Move {
@@ -461,11 +549,7 @@ export function presentTimeForSnapshot(snapshot: GpuSnapshot | GameSnapshot): nu
   return present;
 }
 
-export function capitalize(value: string): string {
-  return value ? `${value.charAt(0).toUpperCase()}${value.slice(1)}` : "";
-}
-
-export function pieceTypeCode(type: PieceType): number {
+function pieceTypeCode(type: PieceType): number {
   const pieceCodes: Record<PieceType, number> = {
     king: 1,
     commonKing: 2,
@@ -483,7 +567,7 @@ export function pieceTypeCode(type: PieceType): number {
   return pieceCodes[type] ?? 0;
 }
 
-export function pieceTypeFromCode(code: number): PieceType | null {
+function pieceTypeFromCode(code: number): PieceType | null {
   const pieceTypes: Record<number, PieceType> = {
     1: "king",
     2: "commonKing",

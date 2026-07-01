@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 impl EvalWeights {
     pub(crate) fn to_json(self) -> String {

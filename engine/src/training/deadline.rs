@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::SearchInstant;
 
 pub(crate) fn training_deadline(config: &TrainerConfig) -> Option<SearchInstant> {
     config

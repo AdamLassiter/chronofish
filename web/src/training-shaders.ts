@@ -1,18 +1,18 @@
-import project_features from "./shaders/project_features.wgsl";
-import forward_layer from "./shaders/forward_layer.wgsl";
-import forward_indexed_layer from "./shaders/forward_indexed_layer.wgsl";
-import forward_output from "./shaders/forward_output.wgsl";
-import output_delta from "./shaders/output_delta.wgsl";
-import hidden_delta from "./shaders/hidden_delta.wgsl";
-import hidden3_delta from "./shaders/hidden3_delta.wgsl";
-import apply_layer from "./shaders/apply_layer.wgsl";
-import apply_indexed_layer from "./shaders/apply_indexed_layer.wgsl";
-import apply_output from "./shaders/apply_output.wgsl";
-import policy from "./shaders/policy.wgsl";
-import policy_loss from "./shaders/policy_loss.wgsl";
-import reduce_loss from "./shaders/reduce_loss.wgsl";
-import frontier_policy from "./shaders/frontier_policy.wgsl";
-import frontier_neural from "./shaders/frontier_neural.wgsl";
+import project_features from "../../engine/src/gpu/training/shaders/project_features.wgsl";
+import forward_layer from "../../engine/src/gpu/training/shaders/forward_layer.wgsl";
+import forward_indexed_layer from "../../engine/src/gpu/training/shaders/forward_indexed_layer.wgsl";
+import forward_output from "../../engine/src/gpu/training/shaders/forward_output.wgsl";
+import output_delta from "../../engine/src/gpu/training/shaders/output_delta.wgsl";
+import hidden_delta from "../../engine/src/gpu/training/shaders/hidden_delta.wgsl";
+import hidden3_delta from "../../engine/src/gpu/training/shaders/hidden3_delta.wgsl";
+import apply_layer from "../../engine/src/gpu/training/shaders/apply_layer.wgsl";
+import apply_indexed_layer from "../../engine/src/gpu/training/shaders/apply_indexed_layer.wgsl";
+import apply_output from "../../engine/src/gpu/training/shaders/apply_output.wgsl";
+import policy from "../../engine/src/gpu/training/shaders/policy.wgsl";
+import policy_loss from "../../engine/src/gpu/training/shaders/policy_loss.wgsl";
+import reduce_loss from "../../engine/src/gpu/training/shaders/reduce_loss.wgsl";
+import frontier_policy from "../../engine/src/gpu/search/shaders/frontier_policy.wgsl";
+import frontier_neural from "../../engine/src/gpu/search/shaders/frontier_neural.wgsl";
 
 export const PROJECT_FEATURES_SHADER = project_features;
 

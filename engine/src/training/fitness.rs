@@ -1,6 +1,7 @@
 use rayon::prelude::*;
 
 use super::*;
+use crate::cpu::{EvalWeights, SearchInstant};
 
 pub(crate) fn fitness(weights: EvalWeights, config: &TrainerConfig) -> FitnessReport {
     fitness_until_named(

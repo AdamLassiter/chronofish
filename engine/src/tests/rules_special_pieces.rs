@@ -1,5 +1,5 @@
 use super::*;
-use crate::wasm_api::parse_game_snapshot;
+use crate::{cpu::*, wasm_api::parse_game_snapshot};
 
 #[test]
 fn browser_snapshot_round_trip_preserves_castling_and_pawn_targets() {

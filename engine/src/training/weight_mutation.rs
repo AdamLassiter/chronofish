@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 impl EvalWeights {
     pub(crate) fn mutate(self, rng: &mut Lcg) -> Self {

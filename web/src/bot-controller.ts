@@ -1,5 +1,5 @@
 import { elements } from "./dom.js";
-import type { Color, GameSnapshot, Move, Piece, PieceType, Position } from "./types.js";
+import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, PieceType, Position } from "./types.js";
 
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
 const DEFAULT_MIN_BOT_SEARCH_DEPTH = 2;
@@ -133,7 +133,7 @@ interface RoomJoinPayload {
 }
 
 interface BotControllerOptions {
-  getEngine(): unknown;
+  getEngine(): ChronofishEngine | null;
   getPhase(): string;
   getAssignments(): Record<BotColor, unknown>;
   getGame(): GameSnapshot;
@@ -431,31 +431,25 @@ export function createBotController({
   }
 
   function botWorkerSearchTimeMs(timeMs: number): number {
-    const margin = Math.min(1000, Math.max(100, Math.floor(timeMs * 0.05)));
-    return Math.max(1, timeMs - margin);
+    return loadedEngine().chronofish_bot_worker_search_time_ms(timeMs);
   }
 
   function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
-    return currentDepth <= 0 ? Math.min(2, targetDepth) : Math.min(targetDepth, currentDepth + 2);
+    return loadedEngine().chronofish_bot_next_search_depth(currentDepth, targetDepth);
   }
 
   function searchDepthAtLeastOne(depth: number): number {
-    return Math.max(1, Math.floor(depth));
+    return loadedEngine().chronofish_bot_search_depth_at_least_one(depth);
   }
 
   function completedSearchDepth(result: AiSearchResult, requestedDepth: number): number | null {
     const depth = result.depth ?? requestedDepth;
-    if (!Number.isFinite(depth)) {
-      return null;
-    }
-    const completedDepth = Math.min(requestedDepth, Math.floor(depth ?? 0));
-    if (completedDepth !== requestedDepth) {
-      return null;
-    }
-    if (completedDepth >= 2 && completedDepth % 2 === 0) {
-      return completedDepth;
-    }
-    return completedDepth >= 1 && resultEndsInRoyalCapture(result) ? completedDepth : null;
+    const completedDepth = loadedEngine().chronofish_bot_completed_search_depth(
+      depth,
+      requestedDepth,
+      resultEndsInRoyalCapture(result) ? 1 : 0
+    );
+    return completedDepth > 0 ? completedDepth : null;
   }
 
   function resultEndsInRoyalCapture(result: AiSearchResult): boolean {
@@ -468,6 +462,14 @@ export function createBotController({
 
   function botBackend(value: unknown): BotBackend {
     return typeof value === "string" && value.startsWith("bot-cpu-") ? "cpu" : "gpu";
+  }
+
+  function loadedEngine(): ChronofishEngine {
+    const engine = getEngine();
+    if (!engine) {
+      throw new Error("WASM engine is not loaded.");
+    }
+    return engine;
   }
 
   function handleBotTimeout(id: number, botColor: BotColor, timeMs: number): void {

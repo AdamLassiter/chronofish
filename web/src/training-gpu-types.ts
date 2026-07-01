@@ -30,6 +30,7 @@ export interface TrainingConfig {
   validationInterval?: number;
   patience: number;
   weightDecay: number;
+  labelCounts?: Record<string, number>;
   metrics?: TrainingMetrics | null;
 }
 

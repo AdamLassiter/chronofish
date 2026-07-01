@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 pub(crate) fn host_parallelism() -> usize {
     std::thread::available_parallelism()
@@ -40,14 +41,14 @@ pub(crate) fn default_compare_seeds(seed: u64) -> Vec<u64> {
 }
 
 pub(crate) fn default_hall_of_fame_path() -> String {
-    crate::ai::cpu_model_dir()
+    crate::cpu::cpu_model_dir()
         .join("hall_of_fame.jsonl")
         .to_string_lossy()
         .into_owned()
 }
 
 pub(crate) fn load_training_parameters() -> TrainingParameters {
-    let path = crate::ai::cpu_model_dir().join("training.json");
+    let path = crate::cpu::cpu_model_dir().join("training.json");
     let raw = std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
     serde_json::from_str(&raw).unwrap_or_else(|error| {

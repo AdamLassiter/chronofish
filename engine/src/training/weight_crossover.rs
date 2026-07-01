@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 impl EvalWeights {
     pub(crate) fn crossover(left: Self, right: Self, rng: &mut Lcg) -> Self {

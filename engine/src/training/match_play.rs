@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::*;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn play_match_until(
@@ -453,6 +454,8 @@ pub(crate) fn turn_plan_notation(start: &Game, plan: &TurnPlan) -> String {
                 .moves
                 .iter()
                 .map(|movement| {
+                    use crate::notation::{position_prefix, square_name};
+
                     format!(
                         "{}{} -> {}{}",
                         position_prefix(movement.from),

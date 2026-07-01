@@ -1,10 +1,10 @@
-import turn_status from "./shaders/turn_status.wgsl";
-import frontier_select from "./shaders/frontier_select.wgsl";
-import frontier_state from "./shaders/frontier_state.wgsl";
-import frontier_expand from "./shaders/frontier_expand.wgsl";
-import movegen from "./shaders/movegen.wgsl";
-import reply from "./shaders/reply.wgsl";
-import mutate from "./shaders/mutate.wgsl";
+import turn_status from "../../engine/src/gpu/search/shaders/turn_status.wgsl";
+import frontier_select from "../../engine/src/gpu/search/shaders/frontier_select.wgsl";
+import frontier_state from "../../engine/src/gpu/search/shaders/frontier_state.wgsl";
+import frontier_expand from "../../engine/src/gpu/search/shaders/frontier_expand.wgsl";
+import movegen from "../../engine/src/gpu/search/shaders/movegen.wgsl";
+import reply from "../../engine/src/gpu/search/shaders/reply.wgsl";
+import mutate from "../../engine/src/gpu/search/shaders/mutate.wgsl";
 
 export const GPU_TURN_STATUS_SHADER = turn_status;
 export const GPU_FRONTIER_SELECT_SHADER = frontier_select;

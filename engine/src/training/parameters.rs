@@ -1,4 +1,5 @@
 use super::*;
+use crate::cpu::EvalWeights;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct WeightParameter {

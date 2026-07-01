@@ -1,16 +1,18 @@
-import { train, predictValues, normalizedSearchScore } from "./training-gpu.js";
-import { policyBucket } from "./training-policy.js";
-import { breedCpuPopulation, cpuParametersKey, cpuReferenceWorkerCount, uniqueCpuParameters } from "./training-cpu.js";
-import type { CpuParameters } from "./training-cpu.js";
-import { appendReplaySamples, dedupeTrainingSamples } from "./training-replay.js";
+import { train, predictValues } from "./training-gpu.js";
+import { readWasmString, writeWasmString } from "./engine-io.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
 import { fetchActiveModel, fetchCpuParameters, loadReplayBuffer, saveReplayBuffer } from "./training-worker-storage.js";
-import type { Color, GameSnapshot, Move, BoardSnapshot, Timeline } from "./types.js";
+import type { ChronofishEngine, Color, GameSnapshot, Move } from "./types.js";
 import type { CompactValueModel, EncodedCompactModel, TrainingConfig as GpuTrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu.js";
-import { DEFAULT_BATCH_SIZE, DEFAULT_PATIENCE, DEFAULT_VALIDATION_SPLIT, DEFAULT_WEIGHT_DECAY, HIDDEN_LAYERS, LABEL_REQUEST_MAX_TIMEOUT_MS, LABEL_REQUEST_MIN_TIMEOUT_MS, LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS, MAX_GPU_TRAINING_BATCH, MAX_GPU_TRAINING_SAMPLES, MAX_GPU_VALIDATION_INTERVAL, MAX_PARALLEL_GPU_TRAINING_WORKERS, MAX_PLAYOUT_PLIES, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, TRAINING_IO_TIMEOUT_MS, VALUE_EPOCHS_PER_SUBMIT } from "./training-worker-types.js";
-import type { AiWorkerResponse, AppliedWorkerTurn, CpuReferenceScore, CpuTrainingResult, EncodedPosition, LabelJob, LabelWorkerSample, LossLog, LossLogValidation, LossLogValidationExample, MetricsSummary, NormalizedTrainingConfig, ProgressCallback, TrainingLabelKind, TrainingMode, TrainingRunMetrics, TrainingSubject, TrainingWorkerRequest, TrainingWorkerResponse, WorkerRequestPayload, WorkerScope } from "./training-worker-types.js";
+import { HIDDEN_LAYERS, MAX_PLAYOUT_PLIES, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, TRAINING_IO_TIMEOUT_MS, VALUE_EPOCHS_PER_SUBMIT } from "./training-gpu-constants.js";
+import type { AiWorkerResponse, AppliedWorkerTurn, CpuParameters, CpuReferenceScore, CpuTrainingResult, EncodedPosition, LabelJob, LabelWorkerSample, LossLog, LossLogValidation, LossLogValidationExample, MetricsSummary, NormalizedTrainingConfig, ProgressCallback, TrainingLabelKind, TrainingMode, TrainingRunMetrics, TrainingSubject, TrainingWorkerRequest, TrainingWorkerResponse, WorkerRequestPayload, WorkerScope } from "./training-worker-types.js";
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
+let enginePromise: Promise<ChronofishEngine> | null = null;
+let trainingEngine: ChronofishEngine | null = null;
 const pipelineCache = new Map<string, GPUComputePipeline>();
+const trainingModePolicyCache = new Map<string, TrainingModePolicy>();
+let trainingLabelPolicyCache: TrainingLabelPolicy | null = null;
 
 const workerSelf = self as unknown as WorkerScope;
 
@@ -18,7 +20,7 @@ workerSelf.addEventListener("message", async (event) => {
   const { id, type = "train", game, config, candidateModel } = event.data;
   try {
     const metrics = createTrainingMetrics();
-    const normalizedConfig = normalizeTrainingConfig(config);
+    const normalizedConfig = await normalizeTrainingConfig(config);
     normalizedConfig.metrics = metrics;
     if (type === "validateLossLogs") {
       const validation = await timed(metrics, "lossLogValidation", () =>
@@ -57,11 +59,12 @@ workerSelf.addEventListener("message", async (event) => {
     const collectedSamples = await timed(metrics, "collect", () => collectTrainingSamples(game, normalizedConfig, activeModel, (message) => {
       workerSelf.postMessage({ id, ok: true, ...message });
     }, metrics));
-    const samples = dedupeTrainingSamples(collectedSamples);
-    metrics.sampleCounts = labelSourceCounts(samples);
-    buffer = appendReplaySamples(buffer, samples, normalizedConfig.maxBuffer);
+    const samples = await dedupeTrainingSamplesWithEngine(collectedSamples);
+    metrics.sampleCounts = await labelSourceCountsWithEngine(samples);
+    buffer = await appendReplaySamplesWithEngine(buffer, samples, normalizedConfig.maxBuffer);
     await timed(metrics, "saveReplay", () => saveReplayBuffer(buffer));
-    const labelCounts = labelSourceCounts(buffer);
+    const labelCounts = await labelSourceCountsWithEngine(buffer);
+    normalizedConfig.labelCounts = labelCounts;
     workerSelf.postMessage({
       id,
       ok: true,
@@ -104,50 +107,30 @@ workerSelf.addEventListener("message", async (event) => {
   }
 });
 
-function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {}): NormalizedTrainingConfig {
-  const trainingSubject = isTrainingSubject(config.trainingSubject) ? config.trainingSubject : legacyTrainingSubject(config);
+async function normalizeTrainingConfig(config: Partial<NormalizedTrainingConfig> = {}): Promise<NormalizedTrainingConfig> {
   return {
     ...config,
-    trainingSubject,
-    trainingModes: normalizeTrainingModes(config, trainingSubject),
-    runSeed: randomRunSeed(),
-    learningRate: clampNumber(config.learningRate, 0.0001, 0.1, 0.01),
-    samples: clampInteger(config.samples, 1, MAX_GPU_TRAINING_SAMPLES, 64),
-    selfPlayWorkers: clampInteger(config.selfPlayWorkers, 1, 16, 2),
-    searchWorkers: clampInteger(config.searchWorkers, 1, 16, 2),
-    explorationTemperature: clampNumber(config.explorationTemperature, 0, 2, 0.25),
-    depth: clampInteger(config.depth, 1, 8, 5),
-    nodes: clampInteger(config.nodes, 1, 131072, 16384),
-    epochs: clampInteger(config.epochs, 1, 65536, 8192),
-    maxBuffer: clampInteger(config.maxBuffer, 16, 16384, 4096),
-    batchSize: clampInteger(config.batchSize, 16, MAX_GPU_TRAINING_BATCH, DEFAULT_BATCH_SIZE),
-    validationSplit: clampNumber(config.validationSplit, 0, 0.3, DEFAULT_VALIDATION_SPLIT),
-    validationInterval: clampInteger(config.validationInterval, 16, MAX_GPU_VALIDATION_INTERVAL, 256),
-    patience: clampInteger(config.patience, 1, 64, DEFAULT_PATIENCE),
-    weightDecay: clampNumber(config.weightDecay, 0, 0.01, DEFAULT_WEIGHT_DECAY),
-    lossLogReplay: clampInteger(config.lossLogReplay, 0, 32, 4),
-    cpuDepth: clampInteger(config.cpuDepth, 1, 16, 4),
-    cpuNodes: clampInteger(config.cpuNodes, 1, 131072, 8192),
-    cpuTrainingTimeMs: clampInteger(config.cpuTrainingTimeMs, 1, 600000, 10000),
-    cpuCandidates: clampInteger(config.cpuCandidates, 1, 256, 8),
-    cpuFinalists: clampInteger(config.cpuFinalists, 1, 64, 1),
-    cpuPairBatch: clampInteger(config.cpuPairBatch, 1, 64, 4),
-    cpuOpponentVariants: clampInteger(config.cpuOpponentVariants, 1, 128, 8),
-    cpuScreeningOpponentVariants: clampInteger(config.cpuScreeningOpponentVariants, 1, 128, 2),
-    cpuRoundsPerVariant: clampInteger(config.cpuRoundsPerVariant, 1, 64, 1),
-    cpuHallOfFameEntries: clampInteger(config.cpuHallOfFameEntries, 0, 64, 1),
-    cpuLeagueContenders: clampInteger(config.cpuLeagueContenders, 1, 64, 2),
-    cpuLeagueHallOfFameEntries: clampInteger(config.cpuLeagueHallOfFameEntries, 0, 64, 2),
-    cpuMinPairs: clampInteger(config.cpuMinPairs, 1, 256, 2),
-    cpuMaxPairs: clampInteger(config.cpuMaxPairs, 1, 512, 8),
-    cpuDrawWindow: clampInteger(config.cpuDrawWindow, 1, 128, 4),
-    cpuDrawRateLimit: clampNumber(config.cpuDrawRateLimit, 0, 1, 0.8),
-    cpuMaxMatchPlies: clampInteger(config.cpuMaxMatchPlies, 1, 512, 40),
-    cpuMaxMatchTimeMs: clampInteger(config.cpuMaxMatchTimeMs, 0, 3600000, 0),
-    cpuMaxGenerationsWithoutCandidate: clampInteger(config.cpuMaxGenerationsWithoutCandidate, 1, 256, 2),
-    cpuWorkers: clampInteger(config.cpuWorkers, 1, 32, 16),
-    cpuTrainSeconds: clampInteger(config.cpuTrainSeconds, 1, 86400, 3600)
+    ...await normalizeTrainingConfigWithEngine(config),
+    runSeed: randomRunSeed()
   };
+}
+
+type EngineNormalizedTrainingConfig = Omit<NormalizedTrainingConfig, "runSeed" | "metrics">;
+
+async function normalizeTrainingConfigWithEngine(
+  config: Partial<NormalizedTrainingConfig>
+): Promise<EngineNormalizedTrainingConfig> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(config));
+  try {
+    const output = engine.chronofish_normalize_training_config_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as EngineNormalizedTrainingConfig;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 function createTrainingMetrics(): TrainingRunMetrics {
@@ -155,61 +138,6 @@ function createTrainingMetrics(): TrainingRunMetrics {
     startedAt: performance.now(),
     phases: Object.create(null)
   };
-}
-
-function isTrainingSubject(value: unknown): value is TrainingSubject {
-  return value === "gpu" || value === "cpu";
-}
-
-function isTrainingMode(value: unknown): value is TrainingMode {
-  return value === "vsGpu"
-    || value === "vsCpu"
-    || value === "self"
-    || value === "distill"
-    || value === "curriculum"
-    || value === "tactical";
-}
-
-function legacyTrainingSubject(config: Partial<NormalizedTrainingConfig>): TrainingSubject {
-  return (config as { trainingTarget?: unknown }).trainingTarget === "trainCpu" ? "cpu" : "gpu";
-}
-
-function normalizeTrainingModes(config: Partial<NormalizedTrainingConfig>, subject: TrainingSubject): TrainingMode[] {
-  const explicit = Array.isArray((config as { trainingModes?: unknown }).trainingModes)
-    ? (config as { trainingModes: unknown[] }).trainingModes.filter(isTrainingMode)
-    : [];
-  const legacy = explicit.length > 0 ? explicit : legacyTrainingModes(config, subject);
-  const filtered = subject === "cpu" ? legacy.filter((mode) => mode !== "distill") : legacy;
-  const deduped = Array.from(new Set(filtered));
-  return deduped.length > 0 ? deduped : subject === "cpu" ? ["vsCpu"] : ["vsGpu", "self"];
-}
-
-function legacyTrainingModes(config: Partial<NormalizedTrainingConfig>, subject: TrainingSubject): TrainingMode[] {
-  if (subject === "cpu") {
-    const target = (config as { cpuTrainingTarget?: unknown }).cpuTrainingTarget;
-    if (target === "vsGpu") return ["vsGpu"];
-    if (target === "vsBoth") return ["vsCpu", "vsGpu"];
-    return ["vsCpu"];
-  }
-  const target = (config as { trainingTarget?: unknown }).trainingTarget;
-  const labelMode = (config as { labelMode?: unknown }).labelMode;
-  const modes: TrainingMode[] = [];
-  if (target === "trainCpu" || target === "trainBoth") {
-    modes.push("vsCpu");
-  }
-  if (target !== "trainCpu" && (target === "trainBoth" || labelMode === "mixed" || labelMode === "search" || labelMode === undefined)) {
-    modes.push("vsGpu");
-  }
-  if (target !== "trainCpu" && (labelMode === "mixed" || labelMode === "selfPlay" || labelMode === undefined)) {
-    modes.push("self");
-  }
-  if (target !== "trainCpu" && (labelMode === "mixed" || labelMode === "distill" || labelMode === undefined)) {
-    modes.push("distill");
-  }
-  if (target !== "trainCpu" && labelMode === "mixed") {
-    modes.push("curriculum", "tactical");
-  }
-  return modes;
 }
 
 async function timed<T>(metrics: TrainingRunMetrics | null | undefined, name: string, fn: () => Promise<T> | T): Promise<T> {
@@ -255,6 +183,78 @@ function metricsSummary(metrics: TrainingRunMetrics | null | undefined): Metrics
     sampleRates,
     lossLogValidation: metrics.lossLogValidation ?? null
   };
+}
+
+async function dedupeTrainingSamplesWithEngine(samples: TrainingSample[]): Promise<TrainingSample[]> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(samplesForEngine(samples)));
+  try {
+    const output = engine.chronofish_dedupe_training_samples_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+async function appendReplaySamplesWithEngine(
+  buffer: TrainingSample[],
+  samples: TrainingSample[],
+  maxBuffer: number
+): Promise<TrainingSample[]> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+    buffer: samplesForEngine(buffer),
+    samples: samplesForEngine(samples)
+  }));
+  try {
+    const output = engine.chronofish_append_replay_samples_json(ptr, len, maxBuffer);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function samplesForEngine(samples: TrainingSample[]): TrainingSample[] {
+  return samples.map((sample) => ({
+    ...sample,
+    features: Array.from(sample.features ?? [])
+  }));
+}
+
+async function labelSourceCountsWithEngine(samples: TrainingSample[]): Promise<Record<string, number>> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(samplesForEngine(samples)));
+  try {
+    const output = engine.chronofish_label_source_counts_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as Record<string, number>;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+async function engineInstance(): Promise<ChronofishEngine> {
+  enginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
+    .then((instance) => {
+      trainingEngine = instance.exports as unknown as ChronofishEngine;
+      return trainingEngine;
+    });
+  return enginePromise;
+}
+
+function loadedEngine(): ChronofishEngine {
+  if (!trainingEngine) {
+    throw new Error("Training engine is not initialized.");
+  }
+  return trainingEngine;
 }
 
 async function collectTrainingSamples(
@@ -329,7 +329,7 @@ async function trainCpuParameters(
   if (!sampleGames.length) {
     throw new Error("CPU training could not sample positions.");
   }
-  const candidateCount = Math.max(1, Math.min(256, config.cpuCandidates));
+  const candidateCount = cpuTrainingCandidateCount(config);
   const deadlineAt = cpuTrainingDeadlineAt(config);
   const screeningGames = sampleGames.slice(0, Math.max(1, Math.min(sampleGames.length, config.cpuScreeningOpponentVariants)));
   const screeningConfig = cpuScreeningTrainingConfig(config);
@@ -359,10 +359,7 @@ async function trainCpuParameters(
         false
       )
     );
-    const finalistTarget = Math.min(
-      population.length,
-      Math.max(config.cpuFinalists, Math.min(config.cpuPairBatch, screened.length || population.length))
-    );
+    const finalistTarget = cpuTrainingFinalistTarget(config, population.length, screened.length);
     const finalistCandidates = uniqueCpuParameters([
       baseline,
       ...screened.slice(0, finalistTarget).map((entry) => entry.parameters)
@@ -405,7 +402,7 @@ async function trainCpuParameters(
     generation += 1;
     const elites = finalists
       .filter((entry) => cpuParametersKey(entry.parameters) !== cpuParametersKey(baseline))
-      .slice(0, Math.max(1, Math.min(4, config.cpuFinalists)))
+      .slice(0, cpuTrainingEliteCount(config))
       .map((entry) => entry.parameters);
     population = breedCpuPopulation(
       baseline,
@@ -438,7 +435,7 @@ async function trainCpuParameters(
     pairedMatches: boolean
   ): Promise<Array<{ parameters: CpuParameters; score: number }>> {
     const uniqueCandidates = uniqueCpuParameters(stageCandidates);
-    const workerCount = Math.min(uniqueCandidates.length, Math.max(1, stageConfig.cpuWorkers), Math.max(1, stageConfig.cpuPairBatch));
+    const workerCount = cpuCandidateWorkerCount(uniqueCandidates.length, stageConfig.cpuWorkers, stageConfig.cpuPairBatch);
     let nextCandidate = 0;
     let collected = 0;
     const scored: Array<{ parameters: CpuParameters; score: number }> = uniqueCandidates
@@ -500,7 +497,7 @@ async function collectCpuTrainingGames(
   progress: ProgressCallback
 ): Promise<GameSnapshot[]> {
   const games: Array<GameSnapshot | null> = new Array(target).fill(null);
-  const workerCount = Math.min(target, Math.max(1, config.cpuWorkers));
+  const workerCount = cpuTrainingPositionWorkerCount(target, config.cpuWorkers);
   const parametersJson = JSON.stringify(baseline);
   let nextIndex = 0;
   let collected = 0;
@@ -516,11 +513,12 @@ async function collectCpuTrainingGames(
         nextIndex += 1;
         let current = cloneGame(game);
         for (let ply = 0; ply < samplePlies(index, false); ply += 1) {
+          const searchConfig = cpuTrainingPositionSearchConfig(config);
           const response = await requestWorker(cpu, {
             type: "search",
             game: current,
-            depth: Math.max(1, Math.min(2, config.cpuDepth)),
-            nodes: Math.max(1, Math.min(512, config.cpuNodes)),
+            depth: searchConfig.depth,
+            nodes: searchConfig.nodes,
             timeMs: config.cpuTrainingTimeMs,
             parametersJson
           }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
@@ -548,14 +546,69 @@ async function collectCpuTrainingGames(
 }
 
 function cpuScreeningTrainingConfig(config: NormalizedTrainingConfig): NormalizedTrainingConfig {
+  const screening = cpuScreeningTrainingConfigWithEngine(config);
   return {
     ...config,
-    cpuDepth: Math.max(1, Math.min(config.cpuDepth, 2)),
-    depth: Math.max(1, Math.min(config.depth, 2)),
-    cpuNodes: Math.max(1, Math.min(config.cpuNodes, Math.ceil(config.cpuNodes / 4))),
-    nodes: Math.max(1, Math.min(config.nodes, Math.ceil(config.nodes / 4))),
-    cpuTrainingTimeMs: Math.max(1, Math.min(config.cpuTrainingTimeMs, Math.ceil(config.cpuTrainingTimeMs / 4)))
+    cpuDepth: screening.cpuDepth,
+    depth: screening.depth,
+    cpuNodes: screening.cpuNodes,
+    nodes: screening.nodes,
+    cpuTrainingTimeMs: screening.cpuTrainingTimeMs
   };
+}
+
+interface CpuTrainingPositionSearchConfig {
+  depth: number;
+  nodes: number;
+}
+
+interface CpuScreeningTrainingConfig {
+  cpuDepth: number;
+  depth: number;
+  cpuNodes: number;
+  nodes: number;
+  cpuTrainingTimeMs: number;
+}
+
+function cpuTrainingPositionSearchConfig(config: NormalizedTrainingConfig): CpuTrainingPositionSearchConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_cpu_training_position_search_config_json(
+    config.cpuDepth,
+    config.cpuNodes
+  );
+  return JSON.parse(readWasmString(engine, output)) as CpuTrainingPositionSearchConfig;
+}
+
+function cpuScreeningTrainingConfigWithEngine(config: NormalizedTrainingConfig): CpuScreeningTrainingConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_cpu_screening_training_config_json(
+    config.cpuDepth,
+    config.depth,
+    config.cpuNodes,
+    config.nodes,
+    config.cpuTrainingTimeMs
+  );
+  return JSON.parse(readWasmString(engine, output)) as CpuScreeningTrainingConfig;
+}
+
+function cpuTrainingPositionWorkerCount(target: number, cpuWorkers: number): number {
+  return loadedEngine().chronofish_cpu_training_position_worker_count(target, cpuWorkers);
+}
+
+function cpuReferenceWorkerCount(gameCount: number, requestedWorkers: number, pairBatch: number): number {
+  return loadedEngine().chronofish_cpu_reference_worker_count(gameCount, requestedWorkers, pairBatch);
+}
+
+function cpuCandidateWorkerCount(candidateCount: number, cpuWorkers: number, pairBatch: number): number {
+  return loadedEngine().chronofish_cpu_candidate_worker_count(candidateCount, cpuWorkers, pairBatch);
+}
+
+function cpuLabelWorkerCount(positionCount: number, cpuWorkers: number): number {
+  return loadedEngine().chronofish_cpu_label_worker_count(positionCount, cpuWorkers);
+}
+
+function cpuSearchLabelWeight(config: NormalizedTrainingConfig): number {
+  return loadedEngine().chronofish_cpu_search_label_weight(trainingModeCount(config));
 }
 
 async function precomputeCpuReferenceScores(
@@ -657,22 +710,30 @@ async function scoreCpuCandidate(
     const candidateScore = candidateResult.result?.score ?? 0;
     const reference = references[index] ?? {};
     if (cpuBaselineModeEnabled(config) && reference.baselineScore !== undefined) {
-      const delta = candidateScore - reference.baselineScore;
-      score += delta;
-      if (Math.abs(delta) <= config.cpuDrawWindow) {
+      const delta = cpuReferenceScoreDelta(
+        candidateScore,
+        reference.baselineScore,
+        candidateResult.result?.moves,
+        reference.baselineMoves,
+        config.cpuDrawWindow
+      );
+      score += delta.score;
+      if (delta.nearDraw) {
         nearDraws += 1;
       }
-      score += moveAgreementBonus(candidateResult.result?.moves, reference.baselineMoves);
     }
     if (trainingModeEnabled(config, "vsGpu") && reference.gpuScore !== undefined) {
-      score += candidateScore - reference.gpuScore;
-      score += moveAgreementBonus(candidateResult.result?.moves, reference.gpuMoves);
+      score += cpuReferenceScoreDelta(
+        candidateScore,
+        reference.gpuScore,
+        candidateResult.result?.moves,
+        reference.gpuMoves,
+        config.cpuDrawWindow
+      ).score;
     }
     compared += 1;
   }
-  const average = score / Math.max(1, compared);
-  const nearDrawRate = nearDraws / Math.max(1, compared);
-  return nearDrawRate > config.cpuDrawRateLimit ? average * 0.5 : average;
+  return cpuReferenceCandidateAverage(score, compared, nearDraws, config.cpuDrawRateLimit);
 }
 
 async function scoreCpuCandidateByPairedMatches(
@@ -750,7 +811,7 @@ async function playCpuTrainingMatch(
     }));
     const moves = response.result?.moves ?? [];
     if (!moves.length) {
-      return candidateTurn ? -100_000 : 100_000;
+      return cpuTrainingNoMoveScore(candidateTurn);
     }
     const applied = await applyCpuWorkerTurn(baselineWorker, current, moves, config);
     if (!applied) {
@@ -758,14 +819,10 @@ async function playCpuTrainingMatch(
     }
     current = applied.game;
     if (applied.winner) {
-      return applied.winner === candidateColor ? 100_000 : -100_000;
+      return cpuTrainingWinnerScore(applied.winner, candidateColor);
     }
     if (applied.status.terminal) {
-      return applied.status.winner === candidateColor
-        ? 100_000
-        : applied.status.winner
-          ? -100_000
-          : 0;
+      return cpuTrainingWinnerScore(applied.status.winner ?? null, candidateColor);
     }
   }
 
@@ -785,54 +842,148 @@ async function playCpuTrainingMatch(
     timeMs: adjudicationTimeMs
   }));
   const baselineScore = adjudication.result?.score ?? 0;
-  return current.turn === candidateColor ? baselineScore : -baselineScore;
+  return cpuTrainingAdjudicationScore(current.turn, candidateColor, baselineScore);
 }
 
 function cpuMatchTurnTimeMs(config: NormalizedTrainingConfig, deadlineAt: number, remainingSearches: number): number {
-  return Math.max(
-    1,
-    Math.min(
-      config.cpuTrainingTimeMs,
-      Math.floor((deadlineAt - performance.now()) / Math.max(1, remainingSearches))
-    )
+  return loadedEngine().chronofish_cpu_match_turn_time_ms(
+    config.cpuTrainingTimeMs,
+    performance.now(),
+    deadlineAt,
+    remainingSearches
   );
 }
 
 function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
-  const variantPairs = (config.cpuOpponentVariants + config.cpuScreeningOpponentVariants) * config.cpuRoundsPerVariant;
-  const leaguePairs = config.cpuLeagueContenders * Math.max(1, config.cpuLeagueHallOfFameEntries);
-  const hallPairs = Math.max(0, config.cpuHallOfFameEntries);
-  const requested = Math.max(config.cpuMinPairs, variantPairs + leaguePairs + hallPairs);
-  const cappedPairs = Math.min(Math.max(config.cpuMinPairs, config.cpuMaxPairs), requested, config.cpuMaxMatchPlies);
-  return modeLabelTarget(config, Math.max(1, cappedPairs));
+  return loadedEngine().chronofish_cpu_training_position_target(
+    config.samples,
+    trainingModeCount(config),
+    config.cpuOpponentVariants,
+    config.cpuScreeningOpponentVariants,
+    config.cpuRoundsPerVariant,
+    config.cpuLeagueContenders,
+    config.cpuLeagueHallOfFameEntries,
+    config.cpuHallOfFameEntries,
+    config.cpuMinPairs,
+    config.cpuMaxPairs,
+    config.cpuMaxMatchPlies
+  );
+}
+
+function cpuTrainingCandidateCount(config: NormalizedTrainingConfig): number {
+  return loadedEngine().chronofish_cpu_training_candidate_count(config.cpuCandidates);
+}
+
+function cpuTrainingFinalistTarget(config: NormalizedTrainingConfig, populationLength: number, screenedLength: number): number {
+  return loadedEngine().chronofish_cpu_training_finalist_target(
+    populationLength,
+    config.cpuFinalists,
+    config.cpuPairBatch,
+    screenedLength
+  );
+}
+
+function cpuTrainingEliteCount(config: NormalizedTrainingConfig): number {
+  return loadedEngine().chronofish_cpu_training_elite_count(config.cpuFinalists);
 }
 
 function cpuTrainingDeadlineAt(config: NormalizedTrainingConfig): number {
-  const fallbackMs = Math.min(
-    config.cpuTrainSeconds * 1000,
-    config.cpuTrainingTimeMs * Math.max(1, config.cpuMaxMatchPlies) * 60
+  const budgetMs = loadedEngine().chronofish_cpu_training_budget_ms(
+    config.cpuTrainSeconds,
+    config.cpuTrainingTimeMs,
+    config.cpuMaxMatchPlies,
+    config.cpuMaxMatchTimeMs
   );
-  const budgetMs = config.cpuMaxMatchTimeMs > 0 ? Math.min(config.cpuMaxMatchTimeMs, fallbackMs) : fallbackMs;
-  return performance.now() + Math.max(1000, budgetMs);
+  return performance.now() + budgetMs;
 }
 
-function moveAgreementBonus(left: Move[] | undefined, right: Move[] | undefined): number {
-  const leftKey = botTrainingMovesKey(left ?? []);
-  const rightKey = botTrainingMovesKey(right ?? []);
-  return leftKey && rightKey && leftKey === rightKey ? 25 : 0;
+interface CpuReferenceScoreDelta {
+  score: number;
+  nearDraw: boolean;
 }
 
-function botTrainingMovesKey(moves: Move[]): string {
-  return moves.map((move) => [
-    move.from?.timelineId,
-    move.from?.time,
-    move.from?.x,
-    move.from?.y,
-    move.to?.timelineId,
-    move.to?.time,
-    move.to?.x,
-    move.to?.y
-  ].join(",")).join("|");
+interface CpuTrainingMove {
+  fromTimelineId: number;
+  fromTime: number;
+  fromX: number;
+  fromY: number;
+  toTimelineId: number;
+  toTime: number;
+  toX: number;
+  toY: number;
+}
+
+function cpuReferenceScoreDelta(
+  candidateScore: number,
+  referenceScore: number,
+  candidateMoves: Move[] | undefined,
+  referenceMoves: Move[] | undefined,
+  drawWindow: number
+): CpuReferenceScoreDelta {
+  const engine = loadedEngine();
+  const request = {
+    candidateScore,
+    referenceScore,
+    candidateMoves: cpuTrainingMoves(candidateMoves ?? []),
+    referenceMoves: cpuTrainingMoves(referenceMoves ?? []),
+    drawWindow
+  };
+  const input = JSON.stringify(request);
+  const [ptr, len] = writeWasmString(engine, input);
+  try {
+    const output = engine.chronofish_cpu_reference_score_delta_json(ptr, len);
+    return JSON.parse(readWasmString(engine, output)) as CpuReferenceScoreDelta;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function cpuReferenceCandidateAverage(score: number, compared: number, nearDraws: number, drawRateLimit: number): number {
+  return loadedEngine().chronofish_cpu_reference_candidate_average(score, compared, nearDraws, drawRateLimit);
+}
+
+function cpuTrainingNoMoveScore(candidateTurn: boolean): number {
+  return loadedEngine().chronofish_cpu_training_no_move_score(candidateTurn ? 1 : 0);
+}
+
+function cpuTrainingWinnerScore(winner: Color | null, candidateColor: Color): number {
+  const engine = loadedEngine();
+  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+    winner,
+    candidateColor
+  }));
+  try {
+    return engine.chronofish_cpu_training_winner_score_json(ptr, len);
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function cpuTrainingAdjudicationScore(currentTurn: Color, candidateColor: Color, baselineScore: number): number {
+  const engine = loadedEngine();
+  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+    currentTurn,
+    candidateColor,
+    baselineScore
+  }));
+  try {
+    return engine.chronofish_cpu_training_adjudication_score_json(ptr, len);
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function cpuTrainingMoves(moves: Move[]): CpuTrainingMove[] {
+  return moves.map((move) => ({
+    fromTimelineId: move.from.timelineId,
+    fromTime: move.from.time,
+    fromX: move.from.x,
+    fromY: move.from.y,
+    toTimelineId: move.to.timelineId,
+    toTime: move.to.time,
+    toX: move.to.x,
+    toY: move.to.y
+  }));
 }
 
 async function collectSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
@@ -907,7 +1058,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
 async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
   const target = modeLabelTarget(config, trainingModeCount(config) > 1 ? 16 : 1);
   const positions = await timed(config.metrics, "cpuPositions", () => collectGpuPositions(game, config, target, progress, "cpu", config.searchWorkers));
-  const workerCount = Math.min(positions.length, Math.max(1, config.cpuWorkers ?? 1));
+  const workerCount = cpuLabelWorkerCount(positions.length, config.cpuWorkers);
   const samples: Array<TrainingSample | null> = new Array(positions.length).fill(null);
   let nextPosition = 0;
   let collected = 0;
@@ -954,7 +1105,7 @@ async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTra
         label: normalizeSearchScore(result.score ?? 0),
         policy: policyBucket(result.moves[0]),
         labelKind: "cpu",
-        labelWeight: trainingModeCount(config) > 1 ? 1.1 : 1.0,
+        labelWeight: cpuSearchLabelWeight(config),
         pseudo: false
       };
     } catch {
@@ -1082,6 +1233,7 @@ async function collectCpuGpuDuelRollout(
   const cpu = new Worker("./cpu-ai-worker.js", { type: "module" });
   const encoder = new Worker("./training-label-worker.js", { type: "module" });
   const samples: LabelWorkerSample[] = [];
+  const labelPolicy = trainingLabelPolicy();
   try {
     let current = cloneGame(game);
     current = await warmupSelfPlayPosition(gpu, current, config, workerIndex);
@@ -1111,7 +1263,7 @@ async function collectCpuGpuDuelRollout(
         label: normalizeSearchScore(result?.score ?? 0),
         policy: policyBucket(moves[0]),
         labelKind: "duel",
-        labelWeight: 1.35,
+        labelWeight: labelPolicy.duelLabelWeight,
         outcomeTurn: beforeTurn,
         ply: ply + workerIndex * MAX_PLAYOUT_PLIES
       });
@@ -1122,26 +1274,40 @@ async function collectCpuGpuDuelRollout(
       }
       current = applied.game;
       if (applied.winner) {
-        return backfillOutcomeLabels(samples, applied.winner).map((sample) => ({
-          ...sample,
+        return relabelOutcomeSamplesWithEngine(samples, {
+          kind: "outcome",
+          winner: applied.winner,
           labelKind: "duel",
-          labelWeight: 1.35
-        }));
+          labelWeight: labelPolicy.duelLabelWeight
+        });
       }
       if (applied.status.terminal && applied.status.winner) {
-        return backfillOutcomeLabels(samples, applied.status.winner).map((sample) => ({
-          ...sample,
+        return relabelOutcomeSamplesWithEngine(samples, {
+          kind: "outcome",
+          winner: applied.status.winner,
           labelKind: "duel",
-          labelWeight: 1.35
-        }));
+          labelWeight: labelPolicy.duelLabelWeight
+        });
       }
       if (applied.status.terminal) {
-        return backfillDrawLabels(samples, "duel", 1.1);
+        return relabelOutcomeSamplesWithEngine(samples, {
+          kind: "draw",
+          labelKind: "duel",
+          labelWeight: labelPolicy.duelDrawLabelWeight
+        });
       }
     }
-    return samplesFromPartialOutcome(samples, "duel-search", 1.0);
+    return relabelOutcomeSamplesWithEngine(samples, {
+      kind: "partial",
+      labelKind: "duel-search",
+      labelWeight: 1.0
+    });
   } catch {
-    return samplesFromPartialOutcome(samples, "duel-search", 1.0);
+    return relabelOutcomeSamplesWithEngine(samples, {
+      kind: "partial",
+      labelKind: "duel-search",
+      labelWeight: 1.0
+    });
   } finally {
     gpu.terminate();
     cpu.terminate();
@@ -1187,6 +1353,7 @@ async function collectOutcomeRollout(
   const ai = new Worker("./ai-worker.js", { type: "module" });
   const encoder = new Worker("./training-label-worker.js", { type: "module" });
   const samples: LabelWorkerSample[] = [];
+  const labelPolicy = trainingLabelPolicy();
   try {
     let current = cloneGame(game);
     current = await warmupSelfPlayPosition(ai, current, config, workerIndex);
@@ -1214,7 +1381,7 @@ async function collectOutcomeRollout(
         label: normalizeSearchScore(result?.score ?? 0),
         policy: policyBucket(moves[0]),
         labelKind: "outcome",
-        labelWeight: 1.25,
+        labelWeight: labelPolicy.outcomeLabelWeight,
         outcomeTurn: beforeTurn,
         ply: ply + workerIndex * MAX_PLAYOUT_PLIES
       });
@@ -1225,18 +1392,22 @@ async function collectOutcomeRollout(
       }
       current = applied.game;
       if (applied.winner) {
-        return backfillOutcomeLabels(samples, applied.winner);
+        return relabelOutcomeSamplesWithEngine(samples, { kind: "outcome", winner: applied.winner });
       }
       if (applied.status.terminal && applied.status.winner) {
-        return backfillOutcomeLabels(samples, applied.status.winner);
+        return relabelOutcomeSamplesWithEngine(samples, { kind: "outcome", winner: applied.status.winner });
       }
       if (applied.status.terminal) {
-        return backfillDrawLabels(samples, "outcome", 1.0);
+        return relabelOutcomeSamplesWithEngine(samples, {
+          kind: "draw",
+          labelKind: "outcome",
+          labelWeight: 1.0
+        });
       }
     }
-    return samplesFromPartialOutcome(samples);
+    return relabelOutcomeSamplesWithEngine(samples, { kind: "partial" });
   } catch {
-    return samplesFromPartialOutcome(samples);
+    return relabelOutcomeSamplesWithEngine(samples, { kind: "partial" });
   } finally {
     ai.terminate();
     encoder.terminate();
@@ -1244,33 +1415,31 @@ async function collectOutcomeRollout(
 }
 
 function splitWork(total: number, workers: number): number[] {
-  return Array.from({ length: workers }, (_, index) =>
-    Math.floor(total / workers) + (index < total % workers ? 1 : 0)
-  ).filter((count) => count > 0);
+  const engine = loadedEngine();
+  const output = engine.chronofish_training_split_work_json(total, workers);
+  return JSON.parse(readWasmString(engine, output)) as number[];
 }
 
 function gpuTrainingWorkerCount(total: number, requestedWorkers: number): number {
-  return Math.min(
-    Math.max(0, total),
-    Math.max(1, Math.min(MAX_PARALLEL_GPU_TRAINING_WORKERS, Math.floor(requestedWorkers) || 1))
-  );
+  return loadedEngine().chronofish_gpu_training_worker_count(total, requestedWorkers);
 }
 
 async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: NormalizedTrainingConfig, workerIndex: number): Promise<GameSnapshot> {
   let current = cloneGame(game);
-  const warmupPlies = workerIndex === 0 ? 0 : 1 + (workerIndex % Math.max(1, MAX_PLAYOUT_PLIES - 1));
+  const warmupPlies = gpuWarmupPlies(workerIndex);
   for (let ply = 0; ply < warmupPlies; ply += 1) {
     try {
+      const warmupConfig = gpuWarmupSearchConfig(config);
       const response = await requestWorker(ai, {
         type: "search",
         game: current,
-        depth: Math.max(1, Math.min(2, config.depth)),
-        nodes: Math.max(1, Math.min(1024, config.nodes)),
-        timeMs: Math.min(5000, workerSearchTimeMs(config)),
+        depth: warmupConfig.depth,
+        nodes: warmupConfig.nodes,
+        timeMs: warmupConfig.timeMs,
         gpuMode: "full",
         partitionIndex: workerIndex,
         partitionCount: config.selfPlayWorkers ?? 1,
-        temperature: config.explorationTemperature,
+        temperature: warmupConfig.explorationTemperature,
         randomSeed: sampleSeed("warmup", ply, config.runSeed ^ workerIndex ^ 0x0aa5_0001)
       }, workerRequestTimeout({ ...config, nodes: 1024 }));
       const moves = response.result?.moves ?? [];
@@ -1290,6 +1459,72 @@ async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: No
     }
   }
   return current;
+}
+
+interface TrainingWorkerSearchConfig {
+  depth: number;
+  nodes: number;
+  timeMs: number;
+  explorationTemperature: number;
+}
+
+interface TrainingSearchConfig {
+  depth: number;
+  nodes: number;
+  explorationTemperature: number;
+}
+
+function gpuWarmupPlies(workerIndex: number): number {
+  return loadedEngine().chronofish_gpu_warmup_plies(workerIndex);
+}
+
+function gpuWarmupSearchConfig(config: NormalizedTrainingConfig): TrainingWorkerSearchConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_gpu_warmup_search_config_json(
+    config.depth,
+    config.nodes,
+    workerSearchTimeMs(config),
+    config.explorationTemperature
+  );
+  return JSON.parse(readWasmString(engine, output)) as TrainingWorkerSearchConfig;
+}
+
+function gpuPositionGenerationSearchConfig(config: NormalizedTrainingConfig): TrainingWorkerSearchConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_gpu_position_generation_search_config_json(
+    config.depth,
+    config.nodes,
+    config.explorationTemperature
+  );
+  return JSON.parse(readWasmString(engine, output)) as TrainingWorkerSearchConfig;
+}
+
+function curriculumSearchConfig(config: NormalizedTrainingConfig, index: number): NormalizedTrainingConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_curriculum_search_config_json(
+    config.depth,
+    config.nodes,
+    config.explorationTemperature,
+    index
+  );
+  return {
+    ...config,
+    ...(JSON.parse(readWasmString(engine, output)) as TrainingSearchConfig)
+  };
+}
+
+function tacticalSearchConfig(config: NormalizedTrainingConfig, attempt: number): NormalizedTrainingConfig {
+  const engine = loadedEngine();
+  const output = engine.chronofish_tactical_search_config_json(
+    config.depth,
+    config.nodes,
+    config.explorationTemperature,
+    attempt
+  );
+  return {
+    ...config,
+    ...(JSON.parse(readWasmString(engine, output)) as TrainingSearchConfig)
+  };
 }
 
 async function collectDistilledSamples(
@@ -1316,7 +1551,7 @@ async function collectDistilledSamples(
     label: labels[index] ?? 0,
     policy: null,
     labelKind: "distilled",
-    labelWeight: 0.25,
+    labelWeight: trainingLabelPolicy().distilledLabelWeight,
     pseudo: true
   }));
 }
@@ -1395,17 +1630,17 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
   const plies = samplePlies(index, false);
   for (let ply = 0; ply < plies; ply += 1) {
     try {
-      const shallowConfig = { ...config, nodes: Math.max(1, Math.min(512, config.nodes)) };
+      const searchConfig = gpuPositionGenerationSearchConfig(config);
       const response = await requestWorker(ai, {
         type: "search",
         game: current,
-        depth: Math.max(1, Math.min(2, config.depth)),
-        nodes: shallowConfig.nodes,
-        timeMs: 3000,
+        depth: searchConfig.depth,
+        nodes: searchConfig.nodes,
+        timeMs: searchConfig.timeMs,
         gpuMode: "full",
-        temperature: config.explorationTemperature,
+        temperature: searchConfig.explorationTemperature,
         randomSeed: sampleSeed("position", index * MAX_PLAYOUT_PLIES + ply, config.runSeed ^ workerIndex ^ 0x9051_0001)
-      }, workerRequestTimeout(shallowConfig));
+      }, workerRequestTimeout(searchConfig));
       const moves = response.result?.moves ?? [];
       if (!moves.length) {
         break;
@@ -1466,157 +1701,25 @@ async function generateTacticalPositionGame(
   return best;
 }
 
-function curriculumSearchConfig(config: NormalizedTrainingConfig, index: number): NormalizedTrainingConfig {
-  const stage = index % 6;
-  return {
-    ...config,
-    depth: Math.max(1, Math.min(config.depth, 1 + Math.floor(stage / 2))),
-    nodes: Math.max(1, Math.min(config.nodes, 512 * (stage + 1))),
-    explorationTemperature: Math.min(0.6, Math.max(config.explorationTemperature, stage >= 3 ? 0.35 : 0.15))
-  };
-}
-
-function tacticalSearchConfig(config: NormalizedTrainingConfig, attempt: number): NormalizedTrainingConfig {
-  return {
-    ...config,
-    depth: Math.max(2, Math.min(config.depth, 3 + attempt)),
-    nodes: Math.max(1024, Math.min(config.nodes, 2048 * (attempt + 1))),
-    explorationTemperature: Math.min(0.8, Math.max(config.explorationTemperature, 0.4 + attempt * 0.1))
-  };
-}
-
 function curriculumGame(game: GameSnapshot, index: number): GameSnapshot {
-  const stage = index % 6;
-  const cloned = cloneGame(game);
-  const presentTime = activePresentTime(cloned);
-  let timelines = cloned.timelines
-    .map((timeline) => ({
-      ...timeline,
-      boards: curriculumBoards(timeline.boards, presentTime, stage)
-    }))
-    .filter((timeline) => timeline.boards.length > 0)
-    .sort((left, right) => curriculumTimelinePriority(right, presentTime) - curriculumTimelinePriority(left, presentTime));
-  const timelineLimit = stage <= 1 ? 1 : stage <= 3 ? 2 : Math.max(2, Math.min(timelines.length, 4));
-  timelines = timelines.slice(0, timelineLimit).map((timeline, row) => {
-    const next = { ...timeline, row };
-    if (stage < 4) {
-      next.active = row === 0;
-    }
-    return next;
-  });
-  const timelineIds = new Set(timelines.map((timeline) => timeline.id));
-  const boardTimes = new Map(timelines.map((timeline) => [
-    timeline.id,
-    new Set(timeline.boards.map((board) => board.time))
-  ]));
-  return {
-    ...cloned,
-    presentTime,
-    timelines,
-    checkedRoyals: cloned.checkedRoyals.filter((position) =>
-      timelineIds.has(position.timelineId) && boardTimes.get(position.timelineId)?.has(position.time)
-    )
-  };
-}
-
-function curriculumBoards(boards: BoardSnapshot[], presentTime: number, stage: number): BoardSnapshot[] {
-  if (!boards.length) {
-    return [];
+  const engine = loadedEngine();
+  const [ptr, len] = writeWasmString(engine, JSON.stringify(game));
+  try {
+    const output = engine.chronofish_curriculum_game_snapshot_json(ptr, len, index);
+    return JSON.parse(readWasmString(engine, output)) as GameSnapshot;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
   }
-  const latest = latestBoard({ id: 0, row: 0, label: "", owner: "neutral", boards });
-  const presentBoards = boards.filter((board) => board.time === presentTime);
-  const candidates = stage <= 1
-    ? [presentBoards.at(-1) ?? latest]
-    : stage <= 3
-      ? [...boards.slice(-2), presentBoards.at(-1)]
-      : boards.slice(Math.max(0, boards.length - (stage + 1)));
-  const unique = new Map<number, BoardSnapshot>();
-  for (const board of candidates) {
-    if (board) {
-      unique.set(board.time, curriculumBoard(board, stage));
-    }
-  }
-  return Array.from(unique.values()).sort((left, right) => left.time - right.time);
-}
-
-function curriculumBoard(board: BoardSnapshot, stage: number): BoardSnapshot {
-  if (stage !== 0) {
-    return board;
-  }
-  const classic = new Set(["king", "queen", "rook", "bishop", "knight", "pawn"]);
-  return {
-    ...board,
-    board: board.board.map((row) => row.map((piece) => {
-      if (!piece) {
-        return null;
-      }
-      if (classic.has(piece.type)) {
-        return piece;
-      }
-      return piece.type === "royalQueen"
-        ? { ...piece, type: "queen" }
-        : null;
-    }))
-  };
-}
-
-function curriculumTimelinePriority(timeline: Timeline, presentTime: number): number {
-  const hasPresent = timeline.boards.some((board) => board.time === presentTime) ? 4 : 0;
-  const active = timeline.active ? 2 : 0;
-  const latest = latestBoard(timeline)?.time ?? Number.NEGATIVE_INFINITY;
-  return hasPresent + active + latest / 1000;
 }
 
 function tacticalPositionPriority(game: GameSnapshot): number {
-  let priority = 0;
-  const activeTimelines = game.timelines.filter((timeline) => timeline.active !== false);
-  priority += Math.min(3, game.checkedRoyals.length * 2);
-  priority += Math.max(0, activeTimelines.length - 1);
-  priority += Math.max(0, game.timelines.length - 2);
-  priority += royalExposure(game);
-  priority += temporalPowerPieceCount(game) > 1 ? 1 : 0;
-  return priority;
-}
-
-function royalExposure(game: GameSnapshot): number {
-  let exposed = 0;
-  for (const timeline of game.timelines) {
-    const board = latestBoard(timeline);
-    for (const row of board?.board ?? []) {
-      for (const piece of row) {
-        if (piece && ["king", "royalQueen"].includes(piece.type)) {
-          exposed += timeline.active === false ? 0 : 1;
-        }
-      }
-    }
+  const engine = loadedEngine();
+  const [ptr, len] = writeWasmString(engine, JSON.stringify(game));
+  try {
+    return engine.chronofish_tactical_position_priority_snapshot_json(ptr, len);
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
   }
-  return Math.min(2, exposed);
-}
-
-function temporalPowerPieceCount(game: GameSnapshot): number {
-  let count = 0;
-  for (const timeline of game.timelines) {
-    const board = latestBoard(timeline);
-    for (const row of board?.board ?? []) {
-      for (const piece of row) {
-        if (piece && ["queen", "royalQueen", "unicorn", "dragon"].includes(piece.type)) {
-          count += 1;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-function activePresentTime(game: GameSnapshot): number {
-  if (Number.isFinite(game.presentTime)) {
-    return game.presentTime ?? 0;
-  }
-  const times = game.timelines
-    .filter((timeline) => timeline.active !== false)
-    .map((timeline) => latestBoard(timeline)?.time)
-    .filter((time): time is number => typeof time === "number");
-  return times.length ? Math.min(...times) : 0;
 }
 
 async function applyWorkerTurn(
@@ -1685,85 +1788,164 @@ async function applyCpuWorkerTurn(
   };
 }
 
-function samplesFromPartialOutcome(
+interface OutcomeRelabelRequest {
+  kind: "outcome" | "draw" | "partial";
+  winner?: Color;
+  labelKind?: TrainingLabelKind;
+  labelWeight?: number;
+}
+
+async function relabelOutcomeSamplesWithEngine(
   samples: LabelWorkerSample[],
-  labelKind: TrainingLabelKind = "search-bootstrap",
-  labelWeight = 0.5
-): TrainingSample[] {
-  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
-    ...sample,
-    labelKind,
-    labelWeight
+  request: OutcomeRelabelRequest
+): Promise<TrainingSample[]> {
+  const engine = await engineInstance();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+    ...request,
+    samples: samplesForEngine(samples)
   }));
+  try {
+    const output = engine.chronofish_relabel_outcome_samples_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function cpuParametersKey(parameters: CpuParameters): string {
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(parameters));
+  try {
+    const output = engine.chronofish_cpu_parameters_key_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return readWasmString(engine, output);
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function uniqueCpuParameters(values: CpuParameters[]): CpuParameters[] {
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(values));
+  try {
+    const output = engine.chronofish_unique_cpu_parameters_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function breedCpuPopulation(
+  baseline: CpuParameters,
+  elites: CpuParameters[],
+  target: number,
+  seed: number,
+  generation: number,
+  stagnation: number
+): CpuParameters[] {
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+    baseline,
+    elites,
+    target,
+    seed,
+    generation,
+    stagnation
+  }));
+  try {
+    const output = engine.chronofish_breed_cpu_population_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 function modeLabelTarget(config: NormalizedTrainingConfig, divisor: number): number {
-  if (trainingModeCount(config) <= 1) {
-    return config.samples;
-  }
-  return Math.max(1, Math.ceil(config.samples / divisor));
+  return loadedEngine().chronofish_mode_label_target(
+    config.samples,
+    trainingModeCount(config),
+    divisor
+  );
 }
 
 function trainingModeEnabled(config: NormalizedTrainingConfig, mode: TrainingMode): boolean {
-  return config.trainingModes.includes(mode);
+  return trainingModePolicy(config, mode).modeEnabled === true;
 }
 
 function cpuBaselineModeEnabled(config: NormalizedTrainingConfig): boolean {
-  return trainingModeEnabled(config, "vsCpu") || trainingModeEnabled(config, "self");
+  return trainingModePolicy(config).cpuBaselineModeEnabled;
 }
 
 function trainingModeCount(config: NormalizedTrainingConfig): number {
-  return config.trainingSubject === "cpu"
-    ? config.trainingModes.filter((mode) => mode !== "distill").length
-    : config.trainingModes.length;
+  return trainingModePolicy(config).trainingModeCount;
 }
 
-function backfillOutcomeLabels(samples: LabelWorkerSample[], winner: Color): TrainingSample[] {
-  const maxPly = samples.at(-1)?.ply ?? 0;
-  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
-    ...sample,
-    label: (outcomeTurn === winner ? 1 : -1) * Math.pow(0.96, maxPly - (ply ?? 0)),
-    labelKind: "outcome",
-    labelWeight: 1.25
-  }));
+interface TrainingModePolicy {
+  trainingModeCount: number;
+  cpuBaselineModeEnabled: boolean;
+  modeEnabled?: boolean;
 }
 
-function backfillDrawLabels(samples: LabelWorkerSample[], labelKind: TrainingLabelKind, labelWeight: number): TrainingSample[] {
-  return samples.map(({ outcomeTurn, ply, ...sample }) => ({
-    ...sample,
-    label: 0,
-    labelKind,
-    labelWeight
+function trainingModePolicy(config: NormalizedTrainingConfig, mode?: TrainingMode): TrainingModePolicy {
+  const key = JSON.stringify({
+    trainingSubject: config.trainingSubject,
+    trainingModes: config.trainingModes,
+    mode: mode ?? null
+  });
+  const cached = trainingModePolicyCache.get(key);
+  if (cached) {
+    return cached;
+  }
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+    trainingSubject: config.trainingSubject,
+    trainingModes: config.trainingModes,
+    mode: mode ?? null
   }));
+  try {
+    const output = engine.chronofish_training_mode_policy_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    const policy = JSON.parse(readWasmString(engine, output)) as TrainingModePolicy;
+    trainingModePolicyCache.set(key, policy);
+    return policy;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 function royalCaptureWinner(before: GameSnapshot, after: GameSnapshot, mover: Color): Color | null {
-  const opponent = mover === "white" ? "black" : "white";
-  return royalCount(after, opponent) < royalCount(before, opponent) ? mover : null;
+  const engine = loadedEngine();
+  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+    before: JSON.stringify(before),
+    after: JSON.stringify(after),
+    mover
+  }));
+  try {
+    const output = engine.chronofish_royal_capture_winner_snapshot_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as Color | null;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 function oppositeColor(color: Color): Color {
   return color === "white" ? "black" : "white";
-}
-
-function royalCount(game: GameSnapshot, color: Color): number {
-  let count = 0;
-  for (const timeline of game.timelines ?? []) {
-    const board = latestBoard(timeline);
-    for (const row of board?.board ?? []) {
-      for (const piece of row ?? []) {
-        if (piece?.color === color && ["king", "royalQueen"].includes(piece.type)) {
-          count += 1;
-        }
-      }
-    }
-  }
-  return count;
-}
-
-function latestBoard(timeline: Timeline): BoardSnapshot | null {
-  const first = timeline.boards[0];
-  return first ? timeline.boards.reduce((latest, board) => board.time > latest.time ? board : latest, first) : null;
 }
 
 async function encodePosition(worker: Worker, game: GameSnapshot): Promise<TrainingSample> {
@@ -1899,31 +2081,47 @@ function requestWorker(
 }
 
 function normalizeSearchScore(score: number): number {
-  return normalizedSearchScore(score);
+  return loadedEngine().chronofish_normalized_search_score(score);
+}
+
+function policyBucket(move: Move | null | undefined, intent = 0): number | null {
+  if (!move) {
+    return null;
+  }
+  return loadedEngine().chronofish_policy_bucket_from_move_values(
+    move.from.timelineId,
+    move.from.time,
+    move.from.x,
+    move.from.y,
+    move.to.timelineId,
+    move.to.time,
+    move.to.x,
+    move.to.y,
+    intent
+  );
+}
+
+interface TrainingLabelPolicy {
+  outcomeLabelWeight: number;
+  duelLabelWeight: number;
+  duelDrawLabelWeight: number;
+  distilledLabelWeight: number;
+  defaultPartialOutcomeLabelKind: string;
+  defaultPartialOutcomeLabelWeight: number;
+}
+
+function trainingLabelPolicy(): TrainingLabelPolicy {
+  if (trainingLabelPolicyCache) {
+    return trainingLabelPolicyCache;
+  }
+  const engine = loadedEngine();
+  const output = engine.chronofish_training_label_policy_json();
+  trainingLabelPolicyCache = JSON.parse(readWasmString(engine, output)) as TrainingLabelPolicy;
+  return trainingLabelPolicyCache;
 }
 
 function cloneGame(game: GameSnapshot): GameSnapshot {
   return JSON.parse(JSON.stringify(game));
-}
-
-function labelSourceCounts(samples: TrainingSample[]): Record<string, number> {
-  return samples.reduce<Record<string, number>>((counts, sample) => {
-    const key = sample.labelKind ?? (sample.pseudo ? "distilled" : "unknown");
-    counts[key] = (counts[key] ?? 0) + 1;
-    return counts;
-  }, {});
-}
-
-function clampInteger(value: unknown, min: number, max: number, fallback: number): number {
-  return Math.round(clampNumber(value, min, max, fallback));
-}
-
-function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return fallback;
-  }
-  return Math.min(max, Math.max(min, number));
 }
 
 function randomRunSeed(): number {
@@ -1933,21 +2131,17 @@ function randomRunSeed(): number {
 }
 
 function workerRequestTimeout(payload: { nodes?: unknown; timeMs?: unknown }): number {
-  const nodes = Math.max(1, Number(payload.nodes) || 1);
-  const timeMs = Math.max(0, Number(payload.timeMs) || 0);
-  return Math.min(
-    Math.max(LABEL_REQUEST_MAX_TIMEOUT_MS, timeMs + 5000),
-    Math.max(
-      LABEL_REQUEST_MIN_TIMEOUT_MS,
-      timeMs + 1000,
-      nodes * LABEL_REQUEST_NODE_TIMEOUT_FACTOR_MS
-    )
+  return loadedEngine().chronofish_training_worker_request_timeout_ms(
+    Number(payload.nodes) || 1,
+    Number(payload.timeMs) || 0
   );
 }
 
 function workerSearchTimeMs(payload: { nodes?: unknown; timeMs?: unknown }): number {
-  const timeout = workerRequestTimeout(payload);
-  return Math.max(1000, timeout - 1000);
+  return loadedEngine().chronofish_training_worker_search_time_ms(
+    Number(payload.nodes) || 1,
+    Number(payload.timeMs) || 0
+  );
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -1967,29 +2161,27 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 function samplePlies(index: number, encodeOnly: boolean): number {
-  const stride = encodeOnly ? 2 : 1;
-  return 1 + ((index * stride) % MAX_PLAYOUT_PLIES);
+  return loadedEngine().chronofish_training_sample_plies(index, encodeOnly ? 1 : 0);
 }
 
 function sampleSeed(prefix: string, index: number, salt: number): number {
-  let hash = salt >>> 0;
-  for (let offset = 0; offset < prefix.length; offset += 1) {
-    hash ^= prefix.charCodeAt(offset);
-    hash = Math.imul(hash, 16777619) >>> 0;
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, prefix);
+  try {
+    return engine.chronofish_training_sample_seed(ptr, len, index, salt) >>> 0;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
   }
-  hash ^= index;
-  hash = Math.imul(hash, 16777619) >>> 0;
-  return hash >>> 0;
 }
 
 function searchSeed(value: unknown, salt: number): number {
-  let hash = salt >>> 0;
-  const text = JSON.stringify(value ?? null);
-  for (let offset = 0; offset < text.length; offset += 1) {
-    hash ^= text.charCodeAt(offset);
-    hash = Math.imul(hash, 16777619) >>> 0;
+  const engine = loadedEngine();
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(value ?? null));
+  try {
+    return engine.chronofish_training_search_seed_json(ptr, len, salt) >>> 0;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
   }
-  return hash >>> 0;
 }
 
 async function validateLossLogs(

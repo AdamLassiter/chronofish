@@ -29,3 +29,5 @@ mod evaluation_neural_rules;
 mod evaluation_training;
 mod rules_foundation;
 mod rules_special_pieces;
+
+mod perf_tests;

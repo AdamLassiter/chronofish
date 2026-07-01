@@ -1,45 +1,20 @@
 import {
-  GPU_FRONTIER_BOARD_CASTLING,
   GPU_FRONTIER_BOARD_OFFSET,
-  GPU_FRONTIER_BOARD_EN_PASSANT,
-  GPU_FRONTIER_BOARD_LATEST,
-  GPU_FRONTIER_BOARD_ORIGIN,
-  GPU_FRONTIER_BOARD_OWNER,
-  GPU_FRONTIER_BOARD_ACTIVE,
-  GPU_FRONTIER_BOARD_PENDING,
-  GPU_FRONTIER_BOARD_ROW,
-  GPU_FRONTIER_BOARD_SIDE_TO_MOVE,
-  GPU_FRONTIER_BOARD_SQUARES,
   GPU_FRONTIER_BOARD_STRIDE,
-  GPU_FRONTIER_BOARD_TIME,
-  GPU_FRONTIER_BOARD_TIMELINE_ID,
   GPU_FRONTIER_CANDIDATE_STRIDE,
   GPU_FRONTIER_DELTA_STRIDE,
-  GPU_FRONTIER_HEADER_BOARD_COUNT,
-  GPU_FRONTIER_HEADER_COMPLETE,
-  GPU_FRONTIER_HEADER_DEPTH,
-  GPU_FRONTIER_HEADER_HASH_HIGH,
-  GPU_FRONTIER_HEADER_HASH_LOW,
-  GPU_FRONTIER_HEADER_NEXT_BLACK_TIMELINE,
-  GPU_FRONTIER_HEADER_NEXT_WHITE_TIMELINE,
-  GPU_FRONTIER_HEADER_PARENT,
-  GPU_FRONTIER_HEADER_PENDING_BOARDS,
   GPU_FRONTIER_HEADER_PLAN_LENGTH,
-  GPU_FRONTIER_HEADER_PRESENT_TIME,
-  GPU_FRONTIER_HEADER_ROOT,
-  GPU_FRONTIER_HEADER_SCORE,
   GPU_FRONTIER_HEADER_STRIDE,
-  GPU_FRONTIER_HEADER_TERMINAL,
-  GPU_FRONTIER_HEADER_TURN,
   GPU_FRONTIER_ANCESTRY_STRIDE,
   GPU_FRONTIER_MAX_PLAN_MOVES,
   GPU_FRONTIER_PLAN_STRIDE,
   GPU_FRONTIER_PLAN_OFFSET,
   GPU_FRONTIER_SUMMARY_STRIDE
 } from "./ai-layout.js";
-import { colorCode, latestBoard, ownerCode, sortedTimelines, squareCodesForBoard } from "./ai-snapshot.js";
-import type { GpuSnapshot } from "./ai-snapshot.js";
 import { GPU_FRONTIER_EXPAND_SHADER, GPU_FRONTIER_SELECT_SHADER, GPU_FRONTIER_STATE_SHADER } from "./ai-shaders.js";
+import { readWasmString } from "./engine-io.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
+import type { ChronofishEngine } from "./types.js";
 
 interface GpuBufferUsageConstants {
   MAP_READ: number;
@@ -72,12 +47,8 @@ const I32_BYTES = Int32Array.BYTES_PER_ELEMENT;
 const GPU_SHADER_STAGE_COMPUTE = 4;
 const DEFAULT_STORAGE_LIMIT = 128 * 1024 * 1024;
 const DEFAULT_BUFFER_LIMIT = 256 * 1024 * 1024;
-const MIN_FRONTIER_WIDTH = 8;
-const MAX_FRONTIER_WIDTH = 512;
-const MIN_CANDIDATES = 256;
-const MAX_CANDIDATES = 65_536;
-const MAX_SELECTION_SCAN = 2048;
 const tuningCache = new Map<string, Promise<FrontierTuning>>();
+let tuningEnginePromise: Promise<ChronofishEngine> | null = null;
 
 export interface FrontierTuning {
   maxBoards: number;
@@ -87,6 +58,11 @@ export interface FrontierTuning {
   candidateWorkgroupSize: 32 | 64 | 128 | 256;
   mutationTileSize: 32 | 64 | 128;
   dispatchCandidateLimit: number;
+}
+
+interface FrontierSelectionPlan {
+  candidateCapacity: number;
+  selectionCapacity: number;
 }
 
 export interface FrontierBufferSet {
@@ -246,12 +222,8 @@ export class FrontierGpuPipeline {
     scoreCandidates?: FrontierCandidateScorer
   ): Promise<void> {
     const pipelines = await this.pipelines();
-    const candidateCapacity = floorPowerOfTwo(this.tuning.candidateCapacity);
-    const selectionCapacity = floorPowerOfTwo(Math.min(
-      candidateCapacity,
-      MAX_SELECTION_SCAN,
-      options.maxSelectionScan ?? this.tuning.frontierWidth * 4
-    ));
+    const selectionPlan = await frontierSelectionPlan(this.tuning, options.maxSelectionScan);
+    const { candidateCapacity, selectionCapacity } = selectionPlan;
     const stateStride = frontierStateStride(this.tuning.maxBoards);
     const boardOffset = GPU_FRONTIER_BOARD_OFFSET;
     encoder.clearBuffer(buffers.counters, 0, 12);
@@ -436,48 +408,27 @@ export class FrontierGpuPipeline {
   }
 }
 
-export function deriveFrontierTuning(
+export async function deriveFrontierTuning(
   device: GPUDevice,
   requestedNodes: number,
   boardCount: number,
   additionalBoardCapacity = 0
-): FrontierTuning {
+): Promise<FrontierTuning> {
   const storageLimit = finiteLimit(device.limits?.maxStorageBufferBindingSize, DEFAULT_STORAGE_LIMIT);
   const bufferLimit = finiteLimit(device.limits?.maxBufferSize, DEFAULT_BUFFER_LIMIT);
   const maxInvocations = finiteLimit(device.limits?.maxComputeInvocationsPerWorkgroup, 256);
-  const maxBoardsByState = Math.max(1, Math.floor((storageLimit / MIN_FRONTIER_WIDTH / I32_BYTES - GPU_FRONTIER_HEADER_STRIDE - GPU_FRONTIER_PLAN_STRIDE) / GPU_FRONTIER_BOARD_STRIDE));
-  const desiredMaxBoards = Math.min(
-    64,
-    nextPowerOfTwo(Math.max(boardCount, boardCount + Math.max(0, additionalBoardCapacity)))
-  );
-  const maxBoards = Math.max(boardCount, Math.min(desiredMaxBoards, maxBoardsByState));
-  const stateBytes = frontierStateBytes(maxBoards);
-  const frontierWidth = clamp(
-    Math.floor(Math.min(storageLimit, bufferLimit) / Math.max(1, stateBytes * 2)),
-    MIN_FRONTIER_WIDTH,
-    Math.min(MAX_FRONTIER_WIDTH, Math.max(MIN_FRONTIER_WIDTH, requestedNodes))
-  );
-  const candidateRecordBytes = (GPU_FRONTIER_CANDIDATE_STRIDE + GPU_FRONTIER_DELTA_STRIDE) * I32_BYTES;
-  const candidateCapacity = clamp(
-    Math.floor(Math.min(storageLimit, bufferLimit) / candidateRecordBytes),
-    MIN_CANDIDATES,
-    Math.min(MAX_CANDIDATES, Math.max(MIN_CANDIDATES, requestedNodes * 4))
-  );
-  const neuralBytesPerSample = 32 * 64 * 16 * Float32Array.BYTES_PER_ELEMENT;
-  const neuralBatchSize = clamp(Math.floor(storageLimit / neuralBytesPerSample), 1, frontierWidth);
-  const candidateWorkgroupSize = workgroupSize(maxInvocations);
-  return {
-    maxBoards,
-    frontierWidth,
-    candidateCapacity,
-    neuralBatchSize,
-    candidateWorkgroupSize,
-    mutationTileSize: candidateWorkgroupSize >= 128 ? 128 : candidateWorkgroupSize >= 64 ? 64 : 32,
-    dispatchCandidateLimit: Math.max(candidateWorkgroupSize, Math.min(candidateCapacity, candidateWorkgroupSize * 1024))
-  };
+  const engine = await frontierTuningEngine();
+  return JSON.parse(readWasmString(engine, engine.chronofish_derive_frontier_tuning_json(
+    storageLimit,
+    bufferLimit,
+    maxInvocations,
+    requestedNodes,
+    boardCount,
+    additionalBoardCapacity
+  ))) as FrontierTuning;
 }
 
-export function autotuneFrontier(
+export async function autotuneFrontier(
   adapter: GPUAdapter,
   device: GPUDevice,
   requestedNodes: number,
@@ -485,7 +436,7 @@ export function autotuneFrontier(
   modelVersion: string,
   additionalBoardCapacity = 0
 ): Promise<FrontierTuning> {
-  const base = deriveFrontierTuning(device, requestedNodes, boardCount, additionalBoardCapacity);
+  const base = await deriveFrontierTuning(device, requestedNodes, boardCount, additionalBoardCapacity);
   const key = adapterTuningCacheKey(adapter, modelVersion, base);
   const cached = tuningCache.get(key);
   if (cached) {
@@ -504,73 +455,6 @@ export function frontierStateBytes(maxBoards: number): number {
   return frontierStateStride(maxBoards) * I32_BYTES;
 }
 
-export function encodeFrontierRoot(snapshot: GpuSnapshot, maxBoards: number): EncodedFrontierRoot {
-  const boards = sortedTimelines(snapshot)
-    .flatMap((timeline) => timeline.boards
-      .slice()
-      .sort((left, right) => left.time - right.time)
-      .map((board) => ({ timeline, board })));
-  if (boards.length > maxBoards) {
-    throw new Error(`GPU frontier snapshot has ${boards.length} boards but the adapter limit is ${maxBoards}.`);
-  }
-  const words = new Int32Array(frontierStateStride(maxBoards));
-  words[GPU_FRONTIER_HEADER_PARENT] = -1;
-  words[GPU_FRONTIER_HEADER_ROOT] = 0;
-  words[GPU_FRONTIER_HEADER_SCORE] = 0;
-  words[GPU_FRONTIER_HEADER_DEPTH] = 0;
-  words[GPU_FRONTIER_HEADER_TURN] = colorCode(snapshot.turn);
-  words[GPU_FRONTIER_HEADER_BOARD_COUNT] = boards.length;
-  words[GPU_FRONTIER_HEADER_PLAN_LENGTH] = 0;
-  words[GPU_FRONTIER_HEADER_COMPLETE] = 0;
-  words[GPU_FRONTIER_HEADER_TERMINAL] = snapshot.royalCaptureBy ? 1 : 0;
-  words[GPU_FRONTIER_HEADER_NEXT_WHITE_TIMELINE] = snapshot.nextTimelineId ?? 1;
-  words[GPU_FRONTIER_HEADER_NEXT_BLACK_TIMELINE] = snapshot.nextBlackTimelineId ?? -1;
-  const ids = snapshot.timelines.map((timeline) => timeline.id);
-  const activeDistance = Math.max(0, Math.min(-Math.min(...ids, 0), Math.max(...ids, 0))) + 1;
-  const activeLatest = snapshot.timelines
-    .filter((timeline) => timelineActive(timeline, activeDistance))
-    .map((timeline) => ({ timeline, board: latestBoard(timeline) }))
-    .filter((entry): entry is typeof entry & { board: NonNullable<typeof entry.board> } => Boolean(entry.board));
-  const present = activeLatest.reduce<number | null>((value, entry) => value === null ? entry.board.time : Math.min(value, entry.board.time), null) ?? 0;
-  const rootColor = colorCode(snapshot.turn);
-  const pending = activeLatest.filter(({ board }) => board.time === present && colorCode(board.sideToMove) === rootColor).length;
-  words[GPU_FRONTIER_HEADER_PRESENT_TIME] = present;
-  words[GPU_FRONTIER_HEADER_PENDING_BOARDS] = pending;
-  words[GPU_FRONTIER_HEADER_COMPLETE] = pending === 0 ? 1 : 0;
-
-  const boardOffset = GPU_FRONTIER_BOARD_OFFSET;
-  boards.forEach(({ timeline, board }, index) => {
-    const base = boardOffset + index * GPU_FRONTIER_BOARD_STRIDE;
-    const latest = latestBoard(timeline)?.time === board.time;
-    const active = timelineActive(timeline, activeDistance);
-    const pendingBoard = latest && active && board.time === present && colorCode(board.sideToMove) === rootColor;
-    words[base + GPU_FRONTIER_BOARD_TIMELINE_ID] = timeline.id;
-    words[base + GPU_FRONTIER_BOARD_ROW] = timeline.row;
-    words[base + GPU_FRONTIER_BOARD_OWNER] = ownerCode(timeline.owner);
-    words[base + GPU_FRONTIER_BOARD_TIME] = board.time;
-    words[base + GPU_FRONTIER_BOARD_SIDE_TO_MOVE] = colorCode(board.sideToMove);
-    words[base + GPU_FRONTIER_BOARD_CASTLING] = board.castling ?? 0;
-    words[base + GPU_FRONTIER_BOARD_EN_PASSANT] = board.enPassant?.x ?? -1;
-    words[base + GPU_FRONTIER_BOARD_EN_PASSANT + 1] = board.enPassant?.y ?? -1;
-    words[base + GPU_FRONTIER_BOARD_EN_PASSANT + 2] = board.enPassant?.capturedX ?? -1;
-    words[base + GPU_FRONTIER_BOARD_EN_PASSANT + 3] = board.enPassant?.capturedY ?? -1;
-    words[base + GPU_FRONTIER_BOARD_LATEST] = latest ? 1 : 0;
-    words[base + GPU_FRONTIER_BOARD_ORIGIN] = originCode(board.origin?.type);
-    words[base + GPU_FRONTIER_BOARD_ACTIVE] = active ? 1 : 0;
-    words[base + GPU_FRONTIER_BOARD_PENDING] = pendingBoard ? 1 : 0;
-    words.set(squareCodesForBoard(board), base + GPU_FRONTIER_BOARD_SQUARES);
-  });
-
-  const [hashLow, hashHigh] = hashFrontierWords(words.subarray(boardOffset, boardOffset + boards.length * GPU_FRONTIER_BOARD_STRIDE));
-  words[GPU_FRONTIER_HEADER_HASH_LOW] = hashLow;
-  words[GPU_FRONTIER_HEADER_HASH_HIGH] = hashHigh;
-  return { words, boardCount: boards.length, hashLow, hashHigh };
-}
-
-function timelineActive(timeline: { id: number; owner?: string }, activeDistance: number): boolean {
-  return timeline.owner === "neutral" || Math.abs(timeline.id) <= activeDistance;
-}
-
 export function adapterTuningCacheKey(adapter: GPUAdapter, modelVersion: string, tuning: FrontierTuning): string {
   const info = (adapter as GPUAdapter & { info?: { vendor?: string; architecture?: string; device?: string; description?: string } }).info;
   return [
@@ -587,33 +471,24 @@ function finiteLimit(value: number | undefined, fallback: number): number {
   return Number.isFinite(value) && (value ?? 0) > 0 ? value! : fallback;
 }
 
-function hashFrontierWords(words: Int32Array): [number, number] {
-  let low = 0x811c9dc5 >>> 0;
-  let high = 0x9e3779b9 >>> 0;
-  for (let index = 0; index < words.length; index += 1) {
-    const value = words[index] ?? 0;
-    low = Math.imul((low ^ value) >>> 0, 0x01000193) >>> 0;
-    high = Math.imul((high + value + index) >>> 0, 0x85ebca6b) >>> 0;
-  }
-  return [low | 0, high | 0];
+async function frontierTuningEngine(): Promise<ChronofishEngine> {
+  tuningEnginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
+    .then((instance) => instance.exports as unknown as ChronofishEngine);
+  return tuningEnginePromise;
 }
 
-function originCode(origin: string | undefined): number {
-  if (origin === "source-advance") return 1;
-  if (origin === "branch") return 2;
-  if (origin === "cross-board") return 3;
-  return origin ? 4 : 0;
-}
-
-function workgroupSize(maxInvocations: number): 32 | 64 | 128 | 256 {
-  if (maxInvocations >= 256) return 256;
-  if (maxInvocations >= 128) return 128;
-  if (maxInvocations >= 64) return 64;
-  return 32;
-}
-
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.max(minimum, Math.min(maximum, value));
+async function frontierSelectionPlan(tuning: FrontierTuning, maxSelectionScan: number | undefined): Promise<FrontierSelectionPlan> {
+  const engine = await frontierTuningEngine();
+  return JSON.parse(readWasmString(engine, engine.chronofish_frontier_selection_plan_json(
+    tuning.maxBoards,
+    tuning.frontierWidth,
+    tuning.candidateCapacity,
+    tuning.neuralBatchSize,
+    tuning.candidateWorkgroupSize,
+    tuning.mutationTileSize,
+    tuning.dispatchCandidateLimit,
+    maxSelectionScan ?? 0
+  ))) as FrontierSelectionPlan;
 }
 
 function align4(value: number): number {
@@ -841,14 +716,6 @@ function encodePass(device: GPUDevice, encoder: GPUCommandEncoder, pipeline: GPU
 
 function u32Uniform(values: number[]): Uint32Array {
   return new Uint32Array(values.map((value) => value >>> 0));
-}
-
-function floorPowerOfTwo(value: number): number {
-  return 2 ** Math.floor(Math.log2(Math.max(1, value)));
-}
-
-function nextPowerOfTwo(value: number): number {
-  return 2 ** Math.ceil(Math.log2(Math.max(1, value)));
 }
 
 export const frontierLayout = Object.freeze({
