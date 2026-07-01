@@ -919,11 +919,9 @@ pub fn select_training_working_set_for_projection(
         return samples.to_vec();
     }
     let bytes_per_sample = projection_size.saturating_mul(std::mem::size_of::<f32>());
-    let max_projected_samples = if bytes_per_sample == 0 {
-        samples.len()
-    } else {
-        1usize.max(max_projected_bytes / bytes_per_sample)
-    };
+    let max_projected_samples = max_projected_bytes.checked_div(bytes_per_sample)
+        .map(|x| x.max(1usize))
+        .unwrap_or(samples.len());
     select_training_working_set_with_capacity(samples, max_projected_samples)
 }
 
@@ -3207,9 +3205,9 @@ fn apply_policy_head_gradient(
             .map(|logit| (*logit - max_logit).exp())
             .collect::<Vec<_>>();
         let denominator = exp_logits.iter().sum::<f32>().max(1e-12);
-        for bucket in 0..POLICY_BUCKETS as usize {
+        for (bucket, item) in exp_logits.iter().enumerate().take(POLICY_BUCKETS as usize) {
             let target_value = if bucket == target { 1.0 } else { 0.0 };
-            let delta = (exp_logits[bucket] / denominator - target_value) * sample_weight;
+            let delta = (item / denominator - target_value) * sample_weight;
             let row = bucket * row_size;
             for (input, value) in feature.iter().enumerate().take(input_size) {
                 gradient[row + input] += delta * value;

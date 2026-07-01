@@ -2122,9 +2122,9 @@ pub fn bot_completed_search_depth(
     if completed_depth != requested_depth {
         return 0;
     }
-    if completed_depth >= 2 && completed_depth % 2 == 0 {
-        completed_depth
-    } else if completed_depth >= 1 && result_ends_in_royal_capture {
+    if (completed_depth >= 2 && completed_depth % 2 == 0)
+        || (completed_depth >= 1 && result_ends_in_royal_capture)
+    {
         completed_depth
     } else {
         0

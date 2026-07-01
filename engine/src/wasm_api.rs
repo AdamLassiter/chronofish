@@ -1452,7 +1452,7 @@ pub unsafe extern "C" fn chronofish_gpu_ranked_candidate_indexes_bytes(
         set_last_message("GPU candidate ranking request pointer is null.");
         return std::ptr::null();
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU candidate ranking request byte length is not i32-aligned.");
         return std::ptr::null();
     }
@@ -1483,7 +1483,7 @@ pub unsafe extern "C" fn chronofish_gpu_scoring_summary_bytes(
         set_last_message("GPU scoring summary request pointer is null.");
         return std::ptr::null();
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU scoring summary request byte length is not i32-aligned.");
         return std::ptr::null();
     }
@@ -1514,7 +1514,7 @@ pub unsafe extern "C" fn chronofish_gpu_mutation_summary_bytes(
         set_last_message("GPU mutation summary request pointer is null.");
         return std::ptr::null();
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU mutation summary request byte length is not i32-aligned.");
         return std::ptr::null();
     }
@@ -1583,7 +1583,7 @@ pub unsafe extern "C" fn chronofish_gpu_pick_candidate_records_bytes(
         set_last_message("GPU candidate record pick request pointer is null.");
         return std::ptr::null();
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU candidate record pick request byte length is not i32-aligned.");
         return std::ptr::null();
     }
@@ -1611,7 +1611,7 @@ pub unsafe extern "C" fn chronofish_gpu_candidate_index_bytes(ptr: *const u8, le
         set_last_message("GPU candidate index request pointer is null.");
         return -2;
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU candidate index request byte length is not i32-aligned.");
         return -2;
     }
@@ -1642,7 +1642,7 @@ pub unsafe extern "C" fn chronofish_gpu_reply_pressure_ranked_roots_bytes(
         set_last_message("GPU reply pressure request pointer is null.");
         return std::ptr::null();
     }
-    if len % std::mem::size_of::<i32>() != 0 {
+    if !len.is_multiple_of(std::mem::size_of::<i32>()) {
         set_last_message("GPU reply pressure request byte length is not i32-aligned.");
         return std::ptr::null();
     }

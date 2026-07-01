@@ -146,7 +146,7 @@ pub(crate) fn training_task_progress(
             }
         })
         .collect();
-    rows.sort_by(|left, right| right.updated.cmp(&left.updated));
+    rows.sort_by_key(|row| row.updated);
     rows.truncate(8);
 
     let pretty_rows: Vec<pretty_log::ProgressRow<'_>> = rows
