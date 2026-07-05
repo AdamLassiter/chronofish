@@ -1,8 +1,8 @@
 import { elements } from "./dom.js";
+import { readWasmString, writeWasmString } from "./engine-io.js";
 import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, PieceType, Position } from "./types.js";
 
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
-const DEFAULT_MIN_BOT_SEARCH_DEPTH = 2;
 
 type BotColor = Color;
 type AiStatus = "ok" | "noLegalTurn" | string;
@@ -18,6 +18,13 @@ interface BotEffort {
   minDepth?: number;
   nodes?: number;
   timeMs?: number;
+}
+
+interface BotSearchConfig {
+  targetDepth: number;
+  minDepth: number;
+  nodes: number;
+  timeMs: number;
 }
 
 interface AiChoice {
@@ -335,12 +342,7 @@ export function createBotController({
     if (!effort) {
       return;
     }
-    const timeMs = Math.max(1, effort.timeMs ?? 10_000);
-    const targetDepth = searchDepthAtLeastOne(effort.depth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH);
-    const minDepth = Math.min(
-      targetDepth,
-      searchDepthAtLeastOne(effort.minDepth ?? DEFAULT_MIN_BOT_SEARCH_DEPTH)
-    );
+    const searchConfig = botSearchConfig(effort);
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
     bot.thinking = true;
@@ -349,17 +351,17 @@ export function createBotController({
       botColor,
       backend,
       game: cloneGame(getGame()),
-      targetDepth,
-      minDepth,
+      targetDepth: searchConfig.targetDepth,
+      minDepth: searchConfig.minDepth,
       currentDepth: 0,
       workerCount,
-      nodes: Math.max(1, effort.nodes ?? 64),
-      timeMs,
+      nodes: searchConfig.nodes,
+      timeMs: searchConfig.timeMs,
       depthExpected: 0,
       depthReceived: 0,
       depthResults: [],
       bestByDepth: new Map(),
-      deadlineAt: Date.now() + timeMs,
+      deadlineAt: Date.now() + searchConfig.timeMs,
       results: [],
       errors: [],
       minimumFallbackStarted: false,
@@ -434,12 +436,22 @@ export function createBotController({
     return loadedEngine().chronofish_bot_worker_search_time_ms(timeMs);
   }
 
-  function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
-    return loadedEngine().chronofish_bot_next_search_depth(currentDepth, targetDepth);
+  function botSearchConfig(effort: BotEffort): BotSearchConfig {
+    const engine = loadedEngine();
+    const output = engine.chronofish_bot_search_config_json(
+      effort.depth ?? Number.NaN,
+      effort.minDepth ?? Number.NaN,
+      effort.nodes ?? Number.NaN,
+      effort.timeMs ?? Number.NaN
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as BotSearchConfig;
   }
 
-  function searchDepthAtLeastOne(depth: number): number {
-    return loadedEngine().chronofish_bot_search_depth_at_least_one(depth);
+  function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
+    return loadedEngine().chronofish_bot_next_search_depth(currentDepth, targetDepth);
   }
 
   function completedSearchDepth(result: AiSearchResult, requestedDepth: number): number | null {
@@ -636,9 +648,17 @@ export function createBotController({
   }
 
   function selectBestAiResult(results: AiSearchResult[]): AiSearchResult | null {
-    return results
-      .filter((result) => result.status === "ok" && result.moves.length > 0)
-      .sort(compareAiResultPreference)[0] ?? null;
+    const engine = loadedEngine();
+    const { ptr, len } = writeWasmString(engine, JSON.stringify(results));
+    try {
+      const output = engine.chronofish_bot_select_best_result_json(ptr, len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return JSON.parse(readWasmString(engine, output)) as AiSearchResult | null;
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
   }
 
   function selectDeepestStoredResult(pending: PendingSearch): AiSearchResult | null {
@@ -689,51 +709,20 @@ export function createBotController({
   }
 
   function rankedBotChoices(results: PendingResult[], selectedResult: AiSearchResult | null): RankedBotChoice[] {
-    const selectedKey = botMovesKey(selectedResult?.moves ?? []);
-    const byMoves = new Map<string, RankedBotChoice>();
-    for (const entry of results) {
-      const result = entry.result;
-      const rawChoices = Array.isArray(result.choices) && result.choices.length
-        ? result.choices
-        : result.moves.length
-          ? [{
-              moves: result.moves,
-              score: result.score,
-              depth: result.depth,
-              nodes: result.nodes,
-              gpuSearch: result.gpuSearch,
-              cpuSearch: result.cpuSearch,
-              principalVariation: result.principalVariation
-            }]
-          : [];
-      for (const choice of rawChoices) {
-        const moves = choice.moves ?? [];
-        const key = botMovesKey(moves);
-        if (!key) {
-          continue;
-        }
-        const current = byMoves.get(key);
-        const next: RankedBotChoice = {
-          moves,
-          score: choice.score,
-          depth: choice.depth ?? result.depth,
-          nodes: choice.nodes ?? result.nodes,
-          gpuSearch: choice.gpuSearch ?? result.gpuSearch,
-          cpuSearch: choice.cpuSearch ?? result.cpuSearch,
-          principalVariation: normalizePrincipalVariation(choice.principalVariation ?? result.principalVariation, moves),
-          partitionIndex: entry.partitionIndex,
-          selected: key === selectedKey
-        };
-        if (!current || compareBotChoicePreference(next, current) < 0) {
-          byMoves.set(key, next);
-        } else if (key === selectedKey) {
-          current.selected = true;
-        }
+    const engine = loadedEngine();
+    const { ptr, len } = writeWasmString(engine, JSON.stringify({
+      results,
+      selectedMoves: selectedResult?.moves ?? []
+    }));
+    try {
+      const output = engine.chronofish_bot_ranked_choices_json(ptr, len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
       }
+      return JSON.parse(readWasmString(engine, output)) as RankedBotChoice[];
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
     }
-    return Array.from(byMoves.values())
-      .sort(compareBotChoicePreference)
-      .slice(0, 16);
   }
 
   function buildBotDecisionRecord(pending: PendingSearch | null, result: AiSearchResult): BotDecisionRecord | null {
@@ -773,42 +762,6 @@ export function createBotController({
     if (result.trainingDecision) {
       botDecisionLog.push(result.trainingDecision);
     }
-  }
-
-  function botChoiceScore(choice: Pick<RankedBotChoice, "score">): number {
-    return Number.isFinite(choice.score) ? choice.score ?? -Infinity : -Infinity;
-  }
-
-  function botChoiceDepth(choice: Pick<RankedBotChoice, "depth">): number {
-    return Number.isFinite(choice.depth) ? choice.depth ?? 0 : 0;
-  }
-
-  function compareAiResultPreference(left: AiSearchResult, right: AiSearchResult): number {
-    const depth = (right.depth ?? 0) - (left.depth ?? 0);
-    if (depth !== 0) {
-      return depth;
-    }
-    const score = (right.score ?? -Infinity) - (left.score ?? -Infinity);
-    if (score !== 0) {
-      return score;
-    }
-    return (right.nodes ?? 0) - (left.nodes ?? 0);
-  }
-
-  function compareBotChoicePreference(left: RankedBotChoice, right: RankedBotChoice): number {
-    const depth = botChoiceDepth(right) - botChoiceDepth(left);
-    if (depth !== 0) {
-      return depth;
-    }
-    const score = botChoiceScore(right) - botChoiceScore(left);
-    if (score !== 0) {
-      return score;
-    }
-    const nodes = (right.nodes ?? 0) - (left.nodes ?? 0);
-    if (nodes !== 0) {
-      return nodes;
-    }
-    return botMovesKey(left.moves).localeCompare(botMovesKey(right.moves));
   }
 
   function botMovesKey(moves: Move[]): string {

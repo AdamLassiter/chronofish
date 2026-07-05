@@ -1,12 +1,13 @@
-import { decodeCompactModel } from "./training-gpu.js";
+import { decodeCompactModelWithEngine } from "./training-gpu.js";
 import { TRAINING_IO_TIMEOUT_MS } from "./training-gpu-constants.js";
 import { BUFFER_KEY } from "./training-worker-types.js";
 import type { CpuParameters } from "./training-worker-types.js";
 import type { CompactValueModel, TrainingSample } from "./training-gpu.js";
+import type { ChronofishEngine } from "./types.js";
 
 interface ReplayDb extends IDBDatabase {}
 
-export async function fetchActiveModel(): Promise<CompactValueModel | null> {
+export async function fetchActiveModel(engine: ChronofishEngine): Promise<CompactValueModel | null> {
   try {
     const response = await withTimeout(
       fetch("/api/training/model"),
@@ -17,7 +18,7 @@ export async function fetchActiveModel(): Promise<CompactValueModel | null> {
       return null;
     }
     const buffer = await response.arrayBuffer();
-    const model = decodeCompactModel(buffer);
+    const model = decodeCompactModelWithEngine(engine, buffer);
     if (model) {
       model.bytes = new Uint8Array(buffer);
     }

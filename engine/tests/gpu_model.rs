@@ -5,17 +5,27 @@ use chronofish_engine::gpu::training::{
     append_replay_samples,
     apply_draw_label,
     apply_outcome_label,
+    auxiliary_value_targets,
+    auxiliary_value_targets_bytes,
     bounded_value,
     byte_arrays_equal,
     clamp_training_integer,
     clamp_training_number,
     collect_search_label_samples,
     compact_model_is_finite,
+    compact_training_samples,
+    compact_value_model_architecture_matches_bytes,
     compact_value_model_encoded_len,
+    compact_value_model_hidden_features_json,
     compact_value_model_policy_values,
+    compact_value_model_policy_weights_bytes,
     concat_f32,
+    concat_f32_bytes,
     count_non_zero,
+    count_non_zero_bytes,
     cpu_baseline_mode_enabled,
+    cpu_head_training_max_positions,
+    cpu_prediction_max_batch,
     curriculum_board_times,
     curriculum_game_snapshot_json,
     curriculum_piece_type,
@@ -30,41 +40,60 @@ use chronofish_engine::gpu::training::{
     dense_kernel_entry_point,
     distill_training_samples,
     encode_compact_value_model,
+    f32_to_f16_bits,
+    f32_to_f16_upload_bytes,
     f32_values_are_finite,
     feature_length,
     fill_grouped_training_batch_indices,
+    fill_grouped_training_batch_indices_bytes,
     format_bytes,
     gpu_position_generation_search_config,
+    gpu_rollout_max_plies,
     gpu_training_worker_count,
     gpu_warmup_plies,
     gpu_warmup_search_config,
     group_training_indices_by_position,
     has_policy_training_target,
+    hidden_delta_params_bytes,
     hidden_features_from_projected,
     initial_hidden_weights,
+    initial_hidden_weights_bytes,
     inverse_tanh,
     is_training_mode,
     is_training_subject,
     label_source_counts,
+    layer_params_bytes,
     legacy_training_modes,
     legacy_training_subject,
     load_compact_value_model,
     loss_reduction_workgroup_count,
+    min_hidden_training_positions,
     model_architecture_matches,
     normalize_training_modes,
     normalized_search_score,
     optimizer_velocity,
     outcome_label_for_turns,
+    output_delta_params_bytes,
     output_layer_size,
+    output_params_bytes,
     pack_sparse_projection_features,
     policy_bucket_from_move_values,
     policy_bucket_from_values,
     policy_logits_array,
+    policy_params_bytes,
+    policy_training_batch_size,
+    policy_training_indices,
     policy_training_steps,
+    policy_training_steps_per_submit,
+    policy_training_target,
     policy_weights_array,
     previous_layer_size,
     project_features,
+    projection_chunk_size,
     projection_hash,
+    projection_params_bytes,
+    projection_temporary_budget,
+    quantized_policy_upload_bytes,
     replay_sample_priority,
     royal_capture_winner_snapshot_json,
     royal_count_snapshot_json,
@@ -75,9 +104,13 @@ use chronofish_engine::gpu::training::{
     search_label_sample,
     search_seed_json,
     select_training_working_set_for_projection,
+    select_training_working_set_indices_for_projection,
     select_training_working_set_with_capacity,
     shuffled_indices,
+    shuffled_indices_bytes,
+    sparse_projection_features_bytes,
     split_hidden_weights,
+    split_hidden_weights_bytes,
     split_policy_training_indices,
     split_validation_samples,
     split_work,
@@ -85,14 +118,25 @@ use chronofish_engine::gpu::training::{
     tactical_position_priority_from_counts,
     tactical_position_priority_snapshot_json,
     tactical_search_config,
+    take_training_sample_batches,
     train_policy_head_cpu,
     train_policy_head_from_features_cpu,
     train_value_head_cpu,
     train_value_head_from_features_cpu,
+    training_batch_normalization,
     training_label_priority,
+    training_label_weight,
+    training_label_worker_count,
     training_mode_count,
     training_mode_enabled,
+    training_weighted_average,
+    training_workgroups_16,
+    training_workgroups_64,
     unique_training_position_count,
+    value_gpu_batches_per_submit,
+    value_gpu_validation_interval,
+    value_head_validation_interval,
+    value_training_batch_size,
     worker_request_timeout_ms,
     worker_search_time_ms,
     xorshift32,
@@ -104,13 +148,17 @@ use chronofish_engine::gpu::training::{
     TrainingSample,
     TrainingWorkerSearchConfig,
     ValueHeadTrainingConfig,
+    AUXILIARY_VALUE_HEAD_COUNT,
     CPU_HEAD_TRAINING_MAX_POSITIONS,
     CPU_PREDICTION_MAX_BATCH,
     DEFAULT_BATCH_SIZE,
+    DEFAULT_HIDDEN_LAYERS,
     DEFAULT_PARTIAL_OUTCOME_LABEL_KIND,
     DEFAULT_PARTIAL_OUTCOME_LABEL_WEIGHT,
     DEFAULT_PATIENCE,
     DEFAULT_PROJECTED_WORKING_SET_BYTES,
+    DEFAULT_PROJECTION_SEED,
+    DEFAULT_PROJECTION_SIZE,
     DEFAULT_VALIDATION_SPLIT,
     DEFAULT_WEIGHT_DECAY,
     GPU_POSITION_GENERATION_TIME_MS,
@@ -177,6 +225,34 @@ fn compact_value_model_round_trips_through_rust_encoder() {
     assert_eq!(encoded, bytes);
     assert_eq!(encoded.len(), compact_value_model_encoded_len(&model));
     assert_eq!(compact_value_model_policy_values(&model), &[0.2, -0.2]);
+}
+
+#[test]
+fn compact_value_model_architecture_match_decodes_from_bytes() {
+    let bytes = encode_test_model(TestModel {
+        version: 5,
+        projection_size: DEFAULT_PROJECTION_SIZE as u32,
+        projection_seed: DEFAULT_PROJECTION_SEED,
+        hidden_layers: DEFAULT_HIDDEN_LAYERS.to_vec(),
+        hidden_weights: default_initial_hidden_weights(),
+        output_weights: vec![0.0; DEFAULT_HIDDEN_LAYERS.last().copied().unwrap() as usize + 1],
+        policy_values: vec![],
+        auxiliary_value_weights: vec![],
+        scale: 1.0,
+        bias: 0.0,
+    });
+
+    assert!(compact_value_model_architecture_matches_bytes(&bytes));
+
+    let mut wrong_projection = bytes.clone();
+    wrong_projection[8..12].copy_from_slice(&4u32.to_le_bytes());
+
+    assert!(!compact_value_model_architecture_matches_bytes(
+        &wrong_projection
+    ));
+    assert!(!compact_value_model_architecture_matches_bytes(
+        b"not a cfnn"
+    ));
 }
 
 #[test]
@@ -291,12 +367,138 @@ fn training_math_helpers_match_browser_layout_policy() {
     assert_eq!(loss_reduction_workgroup_count(64), 1);
     assert_eq!(loss_reduction_workgroup_count(65), 2);
     assert_eq!(loss_reduction_workgroup_count(4096), 64);
+    assert_eq!(training_workgroups_16(0), 0);
+    assert_eq!(training_workgroups_16(1), 1);
+    assert_eq!(training_workgroups_16(16), 1);
+    assert_eq!(training_workgroups_16(17), 2);
+    assert_eq!(training_workgroups_64(0), 0);
+    assert_eq!(training_workgroups_64(64), 1);
+    assert_eq!(training_workgroups_64(65), 2);
+    assert_eq!(projection_temporary_budget(0), 1);
+    assert_eq!(projection_temporary_budget(64), 32);
+    assert_eq!(
+        projection_temporary_budget(512 * 1024 * 1024),
+        PROJECTION_TEMPORARY_BUDGET
+    );
 
     let hidden = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
     let layers = split_hidden_weights(&hidden, 2, &[2, 1]);
     assert_eq!(layers, vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], vec![7.0]]);
     assert_eq!(concat_f32(&layers), hidden);
     assert_eq!(count_non_zero(&[0.0, -1.0, 0.0, 2.0]), 2);
+
+    let mut split_request = Vec::new();
+    for value in [2_u32, 2, hidden.len() as u32, 2, 1] {
+        split_request.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in &hidden {
+        split_request.extend_from_slice(&value.to_le_bytes());
+    }
+    let split_response = split_hidden_weights_bytes(&split_request).unwrap();
+    let mut cursor = 0;
+    let read_u32 = |bytes: &[u8], cursor: &mut usize| {
+        let value = u32::from_le_bytes(bytes[*cursor..*cursor + 4].try_into().unwrap());
+        *cursor += 4;
+        value
+    };
+    assert_eq!(read_u32(&split_response, &mut cursor), 2);
+    assert_eq!(read_u32(&split_response, &mut cursor), 6);
+    assert_eq!(read_u32(&split_response, &mut cursor), 1);
+    let split_values = split_response[cursor..]
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(split_values, hidden);
+
+    let mut concat_request = Vec::new();
+    for value in [2_u32, 2, 1] {
+        concat_request.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [8.0_f32, 9.0, 10.0] {
+        concat_request.extend_from_slice(&value.to_le_bytes());
+    }
+    let concat_values = concat_f32_bytes(&concat_request)
+        .unwrap()
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(concat_values, vec![8.0, 9.0, 10.0]);
+
+    let mut count_request = Vec::new();
+    for value in [0.0_f32, -1.0, 0.0, 2.0] {
+        count_request.extend_from_slice(&value.to_le_bytes());
+    }
+    assert_eq!(count_non_zero_bytes(&count_request).unwrap(), 2);
+
+    let layer_params = layer_params_bytes(8, 32, 64, 0.25, 0.01, 0.9);
+    assert_eq!(
+        u32::from_le_bytes(layer_params[0..4].try_into().unwrap()),
+        8
+    );
+    assert_eq!(
+        u32::from_le_bytes(layer_params[4..8].try_into().unwrap()),
+        32
+    );
+    assert_eq!(
+        u32::from_le_bytes(layer_params[8..12].try_into().unwrap()),
+        64
+    );
+    assert_eq!(
+        f32::from_le_bytes(layer_params[12..16].try_into().unwrap()),
+        0.25
+    );
+    assert_eq!(
+        f32::from_le_bytes(layer_params[16..20].try_into().unwrap()),
+        0.01
+    );
+    assert_eq!(
+        f32::from_le_bytes(layer_params[20..24].try_into().unwrap()),
+        0.9
+    );
+
+    let output_params = output_params_bytes(9, 128, 0.5, 0.02, 0.75);
+    assert_eq!(
+        u32::from_le_bytes(output_params[0..4].try_into().unwrap()),
+        9
+    );
+    assert_eq!(
+        u32::from_le_bytes(output_params[4..8].try_into().unwrap()),
+        128
+    );
+    assert_eq!(
+        f32::from_le_bytes(output_params[12..16].try_into().unwrap()),
+        0.5
+    );
+    assert_eq!(
+        f32::from_le_bytes(output_params[16..20].try_into().unwrap()),
+        0.02
+    );
+    assert_eq!(
+        f32::from_le_bytes(output_params[20..24].try_into().unwrap()),
+        0.75
+    );
+
+    let projection_params = projection_params_bytes(4, 128, 2048, u32::MAX, 16);
+    assert_eq!(
+        u32::from_le_bytes(projection_params[0..4].try_into().unwrap()),
+        4
+    );
+    assert_eq!(
+        u32::from_le_bytes(projection_params[4..8].try_into().unwrap()),
+        128
+    );
+    assert_eq!(
+        u32::from_le_bytes(projection_params[8..12].try_into().unwrap()),
+        2048
+    );
+    assert_eq!(
+        u32::from_le_bytes(projection_params[12..16].try_into().unwrap()),
+        u32::MAX
+    );
+    assert_eq!(
+        u32::from_le_bytes(projection_params[16..20].try_into().unwrap()),
+        16
+    );
 }
 
 #[test]
@@ -317,6 +519,17 @@ fn initial_hidden_weights_follow_browser_hash_initialization() {
 
     assert!((weights[0] - expected_first).abs() < 1e-6);
     assert!((weights[6] - expected_second_layer).abs() < 1e-6);
+
+    let mut request = Vec::new();
+    for value in [2_u32, 2, 2, 1] {
+        request.extend_from_slice(&value.to_le_bytes());
+    }
+    let decoded = initial_hidden_weights_bytes(&request)
+        .expect("initial hidden weights bytes")
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(decoded, weights);
 }
 
 #[test]
@@ -325,11 +538,46 @@ fn training_worker_scheduling_helpers_match_browser_policy() {
     assert_eq!(split_work(2, 8), vec![1, 1]);
     assert!(split_work(0, 4).is_empty());
     assert!(split_work(5, 0).is_empty());
+    let batches = vec![
+        vec![
+            training_sample("a", "outcome", 1.0, vec![1.0]),
+            training_sample("b", "outcome", 1.0, vec![2.0]),
+        ],
+        vec![training_sample("c", "outcome", 1.0, vec![3.0])],
+    ];
+    let capped = take_training_sample_batches(&batches, 2);
+    assert_eq!(
+        capped
+            .iter()
+            .map(|sample| sample.position_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("a"), Some("b")]
+    );
+    assert!(take_training_sample_batches(&batches, 0).is_empty());
+    let compacted = compact_training_samples(&[
+        Some(training_sample("present-a", "search", 1.0, vec![1.0])),
+        None,
+        Some(training_sample("present-b", "search", 1.0, vec![2.0])),
+    ]);
+    assert_eq!(
+        compacted
+            .iter()
+            .map(|sample| sample.position_key.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("present-a"), Some("present-b")]
+    );
 
     assert_eq!(gpu_training_worker_count(0, 8), 0);
     assert_eq!(gpu_training_worker_count(12, 8), 8);
     assert_eq!(gpu_training_worker_count(32, 99), 16);
     assert_eq!(gpu_training_worker_count(5, 0), 1);
+
+    assert_eq!(training_label_worker_count(0, None, 12), 0);
+    assert_eq!(training_label_worker_count(12, Some(99), 12), 8);
+    assert_eq!(training_label_worker_count(3, Some(99), 12), 3);
+    assert_eq!(training_label_worker_count(12, Some(0), 12), 1);
+    assert_eq!(training_label_worker_count(12, None, 16), 8);
+    assert_eq!(training_label_worker_count(12, None, 2), 3);
 
     assert_eq!(sample_plies(0, false), 1);
     assert_eq!(sample_plies(9, false), 10);
@@ -343,6 +591,9 @@ fn training_worker_scheduling_helpers_match_browser_policy() {
     assert_eq!(gpu_warmup_plies(1), 2);
     assert_eq!(gpu_warmup_plies(8), 9);
     assert_eq!(gpu_warmup_plies(9), 1);
+    assert_eq!(gpu_rollout_max_plies(0, 0), 10);
+    assert_eq!(gpu_rollout_max_plies(8, 1), 10);
+    assert_eq!(gpu_rollout_max_plies(12, 3), 15);
 
     assert_eq!(
         gpu_warmup_search_config(5, 50_000, 29_000, 0.25),
@@ -396,6 +647,37 @@ fn training_worker_timeout_helpers_match_browser_policy() {
 }
 
 #[test]
+fn auxiliary_value_targets_match_browser_head_order() {
+    let mut features = vec![0.0; 32 * 64];
+    features[25 * 64] = 1.0;
+    features[27 * 64] = 1.0;
+    features[31 * 64] = 0.25;
+    features[0] = 1.0;
+    features[13 * 64] = 1.0;
+    let sample = training_sample_with("aux", "search", 1.0, 0.2, Some(12), features);
+
+    let targets = auxiliary_value_targets(&sample);
+
+    assert_eq!(targets.len(), AUXILIARY_VALUE_HEAD_COUNT);
+    assert_eq!(targets[0], 1.0);
+    assert_eq!(targets[1], 0.2);
+    assert_eq!(targets[2], 0.25);
+    assert_eq!(targets[3], 0.5);
+    assert_eq!(targets[4], 1.0);
+    assert_eq!(targets[5], 1.0);
+    assert_eq!(targets[6], 7.0 / 16.0);
+    assert_eq!(targets[7], 0.0);
+    assert_eq!(targets[8], 0.0);
+
+    let bytes = auxiliary_value_targets_bytes(&[sample]);
+    assert_eq!(
+        bytes.len(),
+        AUXILIARY_VALUE_HEAD_COUNT * std::mem::size_of::<f32>()
+    );
+    assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 1.0);
+}
+
+#[test]
 fn training_config_clamps_match_browser_policy() {
     assert_eq!(VALUE_EPOCHS_PER_SUBMIT, 64);
     assert_eq!(POLICY_STEPS_PER_SUBMIT, 64);
@@ -408,10 +690,20 @@ fn training_config_clamps_match_browser_policy() {
     assert_eq!(MAX_GPU_VALIDATION_INTERVAL, 16_384);
     assert_eq!(TILED_TRAINING_MIN_BATCH, 16);
     assert_eq!(CPU_PREDICTION_MAX_BATCH, 4);
+    assert_eq!(cpu_prediction_max_batch(), CPU_PREDICTION_MAX_BATCH);
     assert_eq!(MIN_HIDDEN_TRAINING_POSITIONS, 256);
+    assert_eq!(
+        min_hidden_training_positions(),
+        MIN_HIDDEN_TRAINING_POSITIONS
+    );
     assert_eq!(CPU_HEAD_TRAINING_MAX_POSITIONS, 32);
+    assert_eq!(
+        cpu_head_training_max_positions(),
+        CPU_HEAD_TRAINING_MAX_POSITIONS
+    );
     assert_eq!(OPTIMIZER_MOMENTUM, 0.9);
     assert_eq!(PROJECTION_CHUNK_SIZE, 256);
+    assert_eq!(projection_chunk_size(), PROJECTION_CHUNK_SIZE);
     assert_eq!(PROJECTION_TEMPORARY_BUDGET, 128 * 1024 * 1024);
     assert!((optimizer_velocity(0.25, 0.75, OPTIMIZER_MOMENTUM) - 0.3).abs() < 1e-6);
     assert_eq!(
@@ -429,6 +721,48 @@ fn training_config_clamps_match_browser_policy() {
     assert_eq!(align4(1), 4);
     assert_eq!(align4(4), 4);
     assert_eq!(align4(5), 8);
+    let output_delta = output_delta_params_bytes(32, -4.0);
+    assert_eq!(output_delta.len(), 16);
+    assert_eq!(
+        u32::from_le_bytes(output_delta[0..4].try_into().unwrap()),
+        32
+    );
+    assert_eq!(
+        f32::from_le_bytes(output_delta[4..8].try_into().unwrap()),
+        0.0
+    );
+    let hidden_delta = hidden_delta_params_bytes(48, 64, 128);
+    assert_eq!(hidden_delta.len(), 16);
+    assert_eq!(
+        u32::from_le_bytes(hidden_delta[0..4].try_into().unwrap()),
+        48
+    );
+    assert_eq!(
+        u32::from_le_bytes(hidden_delta[4..8].try_into().unwrap()),
+        64
+    );
+    assert_eq!(
+        u32::from_le_bytes(hidden_delta[8..12].try_into().unwrap()),
+        128
+    );
+    let policy_params = policy_params_bytes(16, 2048, 12.5, 0.01, 0.00001, OPTIMIZER_MOMENTUM);
+    assert_eq!(policy_params.len(), 32);
+    assert_eq!(
+        u32::from_le_bytes(policy_params[0..4].try_into().unwrap()),
+        16
+    );
+    assert_eq!(
+        u32::from_le_bytes(policy_params[4..8].try_into().unwrap()),
+        2048
+    );
+    assert_eq!(
+        u32::from_le_bytes(policy_params[8..12].try_into().unwrap()),
+        257
+    );
+    assert_eq!(
+        f32::from_le_bytes(policy_params[16..20].try_into().unwrap()),
+        12.5
+    );
 
     assert_eq!(clamp_training_number(Some(0.05), 0.0001, 0.1, 0.01), 0.05);
     assert_eq!(clamp_training_number(Some(-1.0), 0.0, 2.0, 0.25), 0.0);
@@ -899,6 +1233,52 @@ fn trains_value_head_from_precomputed_features() {
 }
 
 #[test]
+fn compact_model_hidden_features_match_cpu_head_forward_path() {
+    let bytes = encode_test_model(TestModel {
+        version: 4,
+        projection_size: 2,
+        projection_seed: 123,
+        hidden_layers: vec![2],
+        hidden_weights: vec![1.0, 0.0, 0.25, 0.0, 1.0, -0.5],
+        output_weights: vec![0.0, 0.0, 0.0],
+        policy_values: vec![],
+        auxiliary_value_weights: vec![],
+        scale: 1.0,
+        bias: 0.0,
+    });
+    let model = decode_compact_value_model(&bytes).expect("decode trainable model");
+    let samples = vec![TrainingSample {
+        side_to_move: None,
+        board_count: None,
+        position_key: None,
+        features: vec![1.0, 2.0],
+        label: 0.75,
+        label_kind: None,
+        label_weight: 1.0,
+        base_label_weight: None,
+        label_mass: None,
+        observation_count: None,
+        policy: None,
+        pseudo: None,
+    }];
+    let projected = project_features(
+        &samples[0].features,
+        model.projection_size as usize,
+        model.projection_seed,
+    );
+    let expected = hidden_features_from_projected(projected, &model);
+    let json = compact_value_model_hidden_features_json(
+        &bytes,
+        &serde_json::to_string(&samples).expect("samples JSON"),
+    )
+    .expect("hidden features JSON");
+    let rows = serde_json::from_str::<Vec<Vec<f32>>>(&json).expect("hidden features parse");
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0], expected);
+}
+
+#[test]
 fn trains_policy_head_on_cpu_and_encodes_updated_model() {
     let bytes = encode_test_model(TestModel {
         version: 4,
@@ -1245,15 +1625,98 @@ fn training_sample_split_groups_batches_and_hashes_match_browser_policy() {
     assert_eq!(stable_sample_hash(&samples[0], 0), 2_303_567_373);
     assert_eq!(xorshift32(1234), 332_584_831);
     assert_eq!(shuffled_indices(&[0, 1, 2, 3], 1, 1234), vec![0, 3, 1, 2]);
+    let shuffled_bytes =
+        shuffled_indices_bytes(&[0, 1, 2, 3], 1, 1234).expect("shuffled indices bytes");
+    assert_eq!(
+        shuffled_bytes
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![0, 3, 1, 2]
+    );
     assert_eq!(groups, vec![vec![0, 1], vec![2]]);
     assert_eq!(second_batch, first_batch);
     assert_eq!(uniform_weight, first_batch.len() as f32);
     assert!(skewed_weight > uniform_weight);
     assert!(first_batch.iter().any(|index| *index == 0 || *index == 1));
     assert!(first_batch.iter().any(|index| *index == 2));
+    let mut request = Vec::new();
+    for value in [32_u32, 2, 3, 3, 1, 1234, 0, 2, 3, 0, 1, 2] {
+        request.extend_from_slice(&value.to_le_bytes());
+    }
+    for value in [1.0_f32, 1.0, 1.0] {
+        request.extend_from_slice(&value.to_le_bytes());
+    }
+    let response =
+        fill_grouped_training_batch_indices_bytes(&request).expect("fill grouped batch bytes");
+    let batch_weight = f32::from_le_bytes(response[0..4].try_into().unwrap());
+    let batch_len = u32::from_le_bytes(response[4..8].try_into().unwrap());
+    let batch = response[8..]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(batch_weight, uniform_weight);
+    assert_eq!(batch_len, 32);
+    assert_eq!(batch, first_batch);
     assert_eq!(unique_training_position_count(&samples, &[0, 1, 2]), 2);
     assert_eq!(unique_training_position_count(&samples, &[0, 1]), 1);
     assert_eq!(feature_length(&samples), Ok(3));
+}
+
+#[test]
+fn working_set_indices_keep_high_signal_samples_and_policy_targets() {
+    let mut samples = (0..6)
+        .map(|index| {
+            training_sample_with(
+                &format!("outcome-{index}"),
+                "outcome",
+                10.0 - index as f32,
+                0.0,
+                None,
+                vec![1.0],
+            )
+        })
+        .collect::<Vec<_>>();
+    samples.push(training_sample_with(
+        "policy-search",
+        "search",
+        1.0,
+        0.0,
+        Some(42),
+        vec![1.0],
+    ));
+    samples.push(training_sample_with(
+        "distilled",
+        "distilled",
+        1.0,
+        0.0,
+        None,
+        vec![1.0],
+    ));
+    samples.last_mut().unwrap().pseudo = Some(true);
+
+    let indexes = select_training_working_set_indices_for_projection(
+        &samples,
+        2_048,
+        4 * 2_048 * std::mem::size_of::<f32>(),
+    );
+    let selected = indexes
+        .iter()
+        .map(|index| samples[*index].position_key.as_deref().unwrap())
+        .collect::<Vec<_>>();
+
+    assert_eq!(indexes.len(), 4);
+    assert_eq!(
+        selected,
+        vec!["outcome-0", "outcome-1", "outcome-2", "policy-search"]
+    );
+    assert_eq!(
+        indexes
+            .iter()
+            .filter(|index| has_policy_training_target(&samples[**index]))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -1312,10 +1775,42 @@ fn policy_target_detection_and_training_step_bounds_match_browser_policy() {
     assert!(has_policy_training_target(&policy));
     assert!(!has_policy_training_target(&distilled));
     assert!(!has_policy_training_target(&missing));
+    let zero_weight = training_sample_with("zero", "search", 0.0, 0.0, Some(5), vec![1.0]);
+    let samples = vec![policy, distilled, missing, zero_weight];
+    assert_eq!(policy_training_indices(&samples, false), vec![0, 3]);
+    assert_eq!(policy_training_indices(&samples, true), vec![0]);
+    assert_eq!(policy_training_target(0), 0);
+    assert_eq!(policy_training_target(7), 7);
+    assert_eq!(policy_training_target(999), 256);
+    assert_eq!(training_label_weight(-0.5), 0.0);
+    assert_eq!(training_label_weight(0.0), 0.0);
+    assert_eq!(training_label_weight(1.5), 1.5);
+    assert_eq!(training_weighted_average(10.0, 2.0), 5.0);
+    assert_eq!(training_weighted_average(10.0, 0.0), 0.0);
+    assert_eq!(training_batch_normalization(2.0), 0.5);
+    assert_eq!(training_batch_normalization(0.0), 1_000_000.0);
     assert_eq!(policy_training_steps(0), 16);
     assert_eq!(policy_training_steps(128), 16);
     assert_eq!(policy_training_steps(2048), 32);
     assert_eq!(policy_training_steps(1_000_000), 256);
+    assert_eq!(value_training_batch_size(64, 0), 1);
+    assert_eq!(value_training_batch_size(64, 12), 12);
+    assert_eq!(value_training_batch_size(64, 128), 64);
+    assert_eq!(policy_training_batch_size(64, 0), 0);
+    assert_eq!(policy_training_batch_size(64, 12), 12);
+    assert_eq!(policy_training_batch_size(64, 128), 64);
+    assert_eq!(value_head_validation_interval(0, None), 1);
+    assert_eq!(value_head_validation_interval(100, Some(16)), 16);
+    assert_eq!(value_head_validation_interval(10, Some(256)), 10);
+    assert_eq!(value_gpu_batches_per_submit(0), 1);
+    assert_eq!(value_gpu_batches_per_submit(12), 12);
+    assert_eq!(value_gpu_batches_per_submit(128), 64);
+    assert_eq!(value_gpu_validation_interval(12, None), 256);
+    assert_eq!(value_gpu_validation_interval(64, Some(16)), 64);
+    assert_eq!(value_gpu_validation_interval(64, Some(128)), 128);
+    assert_eq!(policy_training_steps_per_submit(0), 0);
+    assert_eq!(policy_training_steps_per_submit(12), 12);
+    assert_eq!(policy_training_steps_per_submit(128), 64);
 }
 
 #[test]
@@ -1332,6 +1827,20 @@ fn sparse_projection_packs_dense_samples_into_stable_rows() {
     assert_eq!(packed.indices, vec![1, 3, 0, 2]);
     assert_eq!(packed.values, vec![2.0, -1.0, 3.0, 4.0]);
     assert_eq!(packed.byte_length, 16 + 16 + 16);
+
+    let bytes = sparse_projection_features_bytes(&samples, None).expect("pack sparse bytes");
+    let words = bytes[..16]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(words, vec![4, 4, 4, 48]);
+    assert_eq!(
+        bytes[16..32]
+            .chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+            .collect::<Vec<_>>(),
+        vec![0, 2, 2, 4]
+    );
 }
 
 #[test]
@@ -1748,12 +2257,65 @@ fn policy_head_shape_helpers_match_browser_model_adapters() {
     assert_eq!(weights[8], 0.75);
     assert_eq!(weights[0], 0.0);
 
+    let encoded = encode_compact_value_model(&model);
+    let weight_bytes = compact_value_model_policy_weights_bytes(&encoded, 2)
+        .expect("decode policy weights")
+        .expect("weights from logits");
+    assert_eq!(
+        weight_bytes.len(),
+        weights.len() * std::mem::size_of::<f32>()
+    );
+    assert_eq!(
+        f32::from_le_bytes(weight_bytes[8..12].try_into().unwrap()),
+        0.25
+    );
+    assert_eq!(
+        f32::from_le_bytes(weight_bytes[20..24].try_into().unwrap()),
+        -0.5
+    );
+
     let explicit_weights = (0..(257 * 2)).map(|value| value as f32).collect::<Vec<_>>();
     model.policy_weights = explicit_weights.clone();
     assert_eq!(
         policy_weights_array(Some(&model), 1),
         Some(explicit_weights)
     );
+}
+
+#[test]
+fn neural_frontier_upload_transforms_match_browser_policy() {
+    let weights = [-1.0_f32, -0.25, 0.0, 0.5, 1.0];
+    let mut request = Vec::new();
+    for value in weights {
+        request.extend_from_slice(&value.to_le_bytes());
+    }
+
+    let quantized = quantized_policy_upload_bytes(&request).expect("quantized policy upload");
+    assert_eq!(
+        quantized.len(),
+        8 + weights.len() * std::mem::size_of::<f32>()
+    );
+    let scale = f32::from_le_bytes(quantized[0..4].try_into().unwrap());
+    let max_abs_error = f32::from_le_bytes(quantized[4..8].try_into().unwrap());
+    let dequantized = quantized[8..]
+        .chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert!((scale - (1.0 / 127.0)).abs() < 1e-8);
+    assert!(max_abs_error <= scale / 2.0);
+    assert_eq!(dequantized[0], -1.0);
+    assert_eq!(dequantized[2], 0.0);
+    assert_eq!(dequantized[4], 1.0);
+
+    let halves = f32_to_f16_upload_bytes(&request).expect("f16 upload");
+    let half_values = halves
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(half_values, vec![0xbc00, 0xb400, 0x0000, 0x3800, 0x3c00]);
+    assert_eq!(f32_to_f16_bits(f32::INFINITY), 0x7c00);
+    assert_eq!(f32_to_f16_bits(f32::NEG_INFINITY), 0xfc00);
+    assert_eq!(f32_to_f16_bits(f32::NAN), 0x7e00);
 }
 
 #[test]

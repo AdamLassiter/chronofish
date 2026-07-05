@@ -270,6 +270,9 @@ pub const PROJECTION_TEMPORARY_BUDGET: usize = 128 * 1024 * 1024;
 pub const DEFAULT_PROJECTED_WORKING_SET_BYTES: usize = 128 * 1024 * 1024;
 pub const COMPACT_VALUE_MODEL_MAGIC: &[u8; 4] = b"CFNN";
 pub const MAX_COMPACT_VALUE_MODEL_VERSION: u32 = 5;
+pub const NEURAL_BOARD_PLANES: usize = 32;
+pub const NEURAL_BOARD_SQUARES: usize = 64;
+pub const AUXILIARY_VALUE_HEAD_COUNT: usize = 9;
 pub const MIN_POLICY_REPLAY_FRACTION: f32 = 0.25;
 pub const MIN_POLICY_WORKING_SET_FRACTION: f32 = 0.25;
 pub const MAX_PLAYOUT_PLIES: usize = 10;
@@ -302,6 +305,35 @@ pub struct CompactValueModel {
     pub scale: f32,
     pub bias: f32,
     pub output_activation: OutputActivation,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncodableCompactValueModelJson {
+    projection_size: u32,
+    projection_seed: u32,
+    hidden_layers: Vec<u32>,
+    hidden_weights: Vec<f32>,
+    output_weights: Vec<f32>,
+    #[serde(default)]
+    auxiliary_value_weights: Vec<f32>,
+    #[serde(default)]
+    policy_weights: Vec<f32>,
+    #[serde(default)]
+    policy_logits: Vec<f32>,
+    #[serde(default)]
+    scale: Option<f32>,
+    #[serde(default)]
+    bias: Option<f32>,
+    #[serde(default)]
+    output_activation: Option<OutputActivationJson>,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum OutputActivationJson {
+    Linear,
+    Tanh,
 }
 
 impl CompactValueModel {
@@ -383,7 +415,8 @@ pub struct TrainingSample {
     pub pseudo: Option<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ValidationSplit {
     pub train_indices: Vec<usize>,
     pub validation_indices: Vec<usize>,
@@ -919,10 +952,52 @@ pub fn select_training_working_set_for_projection(
         return samples.to_vec();
     }
     let bytes_per_sample = projection_size.saturating_mul(std::mem::size_of::<f32>());
-    let max_projected_samples = max_projected_bytes.checked_div(bytes_per_sample)
+    let max_projected_samples = max_projected_bytes
+        .checked_div(bytes_per_sample)
         .map(|x| x.max(1usize))
         .unwrap_or(samples.len());
     select_training_working_set_with_capacity(samples, max_projected_samples)
+}
+
+pub fn select_training_working_set_indices(
+    samples: &[TrainingSample],
+    max_projected_bytes: usize,
+) -> Vec<usize> {
+    select_training_working_set_indices_for_projection(
+        samples,
+        DEFAULT_PROJECTION_SIZE,
+        max_projected_bytes,
+    )
+}
+
+pub fn select_training_working_set_indices_for_projection(
+    samples: &[TrainingSample],
+    projection_size: usize,
+    max_projected_bytes: usize,
+) -> Vec<usize> {
+    let projected_bytes = samples
+        .len()
+        .saturating_mul(projection_size)
+        .saturating_mul(std::mem::size_of::<f32>());
+    if projected_bytes <= max_projected_bytes {
+        return (0..samples.len()).collect();
+    }
+    let bytes_per_sample = projection_size.saturating_mul(std::mem::size_of::<f32>());
+    let max_projected_samples = max_projected_bytes
+        .checked_div(bytes_per_sample)
+        .map(|x| x.max(1usize))
+        .unwrap_or(samples.len());
+    select_training_working_set_indices_with_capacity(samples, max_projected_samples)
+}
+
+pub fn select_training_working_set_indices_with_capacity(
+    samples: &[TrainingSample],
+    max_projected_samples: usize,
+) -> Vec<usize> {
+    select_training_working_set_entries(samples, max_projected_samples)
+        .into_iter()
+        .map(|entry| entry.index)
+        .collect()
 }
 
 pub fn select_training_working_set_with_capacity(
@@ -931,6 +1006,28 @@ pub fn select_training_working_set_with_capacity(
 ) -> Vec<TrainingSample> {
     if samples.len() <= max_projected_samples {
         return samples.to_vec();
+    }
+    select_training_working_set_entries(samples, max_projected_samples)
+        .into_iter()
+        .map(|entry| entry.sample)
+        .collect()
+}
+
+fn select_training_working_set_entries(
+    samples: &[TrainingSample],
+    max_projected_samples: usize,
+) -> Vec<ReplayEntry> {
+    if samples.len() <= max_projected_samples {
+        return samples
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, sample)| ReplayEntry {
+                sample,
+                index,
+                priority: 0.0,
+            })
+            .collect();
     }
     let target = 1usize.max(samples.len().min(max_projected_samples));
     let mut ranked = samples
@@ -995,7 +1092,7 @@ pub fn select_training_working_set_with_capacity(
         }
     }
     selected.sort_by_key(|entry| entry.index);
-    selected.into_iter().map(|entry| entry.sample).collect()
+    selected
 }
 
 pub fn training_sample_priority(sample: &TrainingSample, index: usize, total: usize) -> f32 {
@@ -1148,6 +1245,17 @@ pub fn shuffled_indices(indices: &[usize], epoch: u32, seed: u32) -> Vec<usize> 
     result
 }
 
+pub fn shuffled_indices_bytes(indices: &[usize], epoch: u32, seed: u32) -> Result<Vec<u8>, String> {
+    let shuffled = shuffled_indices(indices, epoch, seed);
+    let mut bytes = Vec::with_capacity(shuffled.len() * 4);
+    for index in shuffled {
+        let index = u32::try_from(index)
+            .map_err(|_| "Shuffled training index exceeds GPU parameter range.".to_string())?;
+        push_u32(&mut bytes, index);
+    }
+    Ok(bytes)
+}
+
 pub fn group_training_indices_by_position(
     samples: &[TrainingSample],
     indices: &[usize],
@@ -1207,6 +1315,91 @@ pub fn fill_grouped_training_batch_indices(
     Ok(batch_weight)
 }
 
+pub fn fill_grouped_training_batch_indices_bytes(request: &[u8]) -> Result<Vec<u8>, String> {
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn read_u32(&mut self, label: &str) -> Result<u32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Grouped batch request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Grouped batch request is missing {label}."))?;
+            self.offset = end;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+
+        fn read_f32(&mut self, label: &str) -> Result<f32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Grouped batch request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Grouped batch request is missing {label}."))?;
+            self.offset = end;
+            Ok(f32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+    }
+
+    let mut cursor = Cursor {
+        bytes: request,
+        offset: 0,
+    };
+    let batch_len = cursor.read_u32("batch length")? as usize;
+    let group_count = cursor.read_u32("group count")? as usize;
+    let item_count = cursor.read_u32("group item count")? as usize;
+    let label_weight_count = cursor.read_u32("label weight count")? as usize;
+    let epoch = cursor.read_u32("epoch")?;
+    let seed = cursor.read_u32("seed")?;
+    let mut offsets = Vec::with_capacity(group_count + 1);
+    for index in 0..=group_count {
+        offsets.push(cursor.read_u32(&format!("group offset {index}"))? as usize);
+    }
+    if offsets.first().copied().unwrap_or(0) != 0
+        || offsets.last().copied().unwrap_or(0) != item_count
+    {
+        return Err("Grouped batch request has inconsistent group offsets.".to_string());
+    }
+    let mut items = Vec::with_capacity(item_count);
+    for index in 0..item_count {
+        items.push(cursor.read_u32(&format!("group item {index}"))? as usize);
+    }
+    let mut label_weights = Vec::with_capacity(label_weight_count);
+    for index in 0..label_weight_count {
+        label_weights.push(cursor.read_f32(&format!("label weight {index}"))?);
+    }
+    if cursor.offset != request.len() {
+        return Err("Grouped batch request has trailing bytes.".to_string());
+    }
+    let mut groups = Vec::with_capacity(group_count);
+    for group_index in 0..group_count {
+        let start = offsets[group_index];
+        let end = offsets[group_index + 1];
+        if start > end || end > items.len() {
+            return Err("Grouped batch request has invalid group offsets.".to_string());
+        }
+        groups.push(items[start..end].to_vec());
+    }
+    let mut batch = vec![0; batch_len];
+    let batch_weight =
+        fill_grouped_training_batch_indices(&mut batch, &groups, epoch, seed, &label_weights)?;
+    let mut bytes = Vec::with_capacity(8 + batch.len() * 4);
+    push_f32(&mut bytes, batch_weight);
+    push_u32(&mut bytes, batch.len() as u32);
+    for index in batch {
+        push_u32(&mut bytes, index);
+    }
+    Ok(bytes)
+}
+
 pub fn xorshift32(value: u32) -> u32 {
     let mut state = value;
     state ^= state.wrapping_shl(13);
@@ -1235,8 +1428,42 @@ pub fn split_work(total: usize, workers: usize) -> Vec<usize> {
         .collect()
 }
 
+pub fn take_training_sample_batches(
+    batches: &[Vec<TrainingSample>],
+    target: usize,
+) -> Vec<TrainingSample> {
+    if target == 0 {
+        return Vec::new();
+    }
+    batches
+        .iter()
+        .flat_map(|batch| batch.iter().cloned())
+        .take(target)
+        .collect()
+}
+
+pub fn compact_training_samples(samples: &[Option<TrainingSample>]) -> Vec<TrainingSample> {
+    samples.iter().filter_map(Clone::clone).collect()
+}
+
 pub fn gpu_training_worker_count(total: usize, requested_workers: usize) -> usize {
     total.min(requested_workers.clamp(1, MAX_PARALLEL_GPU_TRAINING_WORKERS))
+}
+
+pub fn training_label_worker_count(
+    job_count: usize,
+    requested_workers: Option<usize>,
+    hardware_cores: usize,
+) -> usize {
+    if job_count == 0 {
+        return 0;
+    }
+    let auto_workers = hardware_cores
+        .max(4)
+        .saturating_sub(1)
+        .clamp(1, MAX_PARALLEL_GPU_TRAINING_WORKERS);
+    let requested = requested_workers.unwrap_or(auto_workers);
+    job_count.min(requested.clamp(1, 8))
 }
 
 pub fn sample_plies(index: usize, encode_only: bool) -> usize {
@@ -1250,6 +1477,10 @@ pub fn gpu_warmup_plies(worker_index: usize) -> usize {
     } else {
         1 + (worker_index % MAX_PLAYOUT_PLIES.saturating_sub(1).max(1))
     }
+}
+
+pub fn gpu_rollout_max_plies(target: usize, worker_index: usize) -> usize {
+    MAX_PLAYOUT_PLIES.max(target.saturating_add(worker_index))
 }
 
 pub fn gpu_warmup_search_config(
@@ -1766,6 +1997,38 @@ pub fn pack_sparse_projection_features(
         })
         .collect::<Result<Vec<_>, _>>()?;
     pack_sparse_feature_rows(&rows, input_size)
+}
+
+pub fn sparse_projection_features_bytes(
+    samples: &[TrainingSample],
+    input_size: Option<usize>,
+) -> Result<Vec<u8>, String> {
+    let packed = pack_sparse_projection_features(samples, input_size)?;
+    let offsets_len = u32::try_from(packed.offsets.len())
+        .map_err(|_| "sparse projection offset count exceeds GPU parameter range".to_string())?;
+    let indices_len = u32::try_from(packed.indices.len())
+        .map_err(|_| "sparse projection index count exceeds GPU parameter range".to_string())?;
+    let values_len = u32::try_from(packed.values.len())
+        .map_err(|_| "sparse projection value count exceeds GPU parameter range".to_string())?;
+    let byte_length = u32::try_from(packed.byte_length)
+        .map_err(|_| "sparse projection byte length exceeds GPU parameter range".to_string())?;
+    let mut bytes = Vec::with_capacity(
+        16 + (packed.offsets.len() + packed.indices.len() + packed.values.len()) * 4,
+    );
+    push_u32(&mut bytes, offsets_len);
+    push_u32(&mut bytes, indices_len);
+    push_u32(&mut bytes, values_len);
+    push_u32(&mut bytes, byte_length);
+    for value in packed.offsets {
+        push_u32(&mut bytes, value);
+    }
+    for value in packed.indices {
+        push_u32(&mut bytes, value);
+    }
+    for value in packed.values {
+        push_f32(&mut bytes, value);
+    }
+    Ok(bytes)
 }
 
 pub fn pack_sparse_feature_rows(
@@ -2940,6 +3203,134 @@ pub fn loss_reduction_workgroup_count(sample_count: usize) -> usize {
     1usize.max(sample_count.saturating_add(63) / 64)
 }
 
+pub fn training_workgroups_16(item_count: usize) -> usize {
+    item_count.div_ceil(16)
+}
+
+pub fn training_workgroups_64(item_count: usize) -> usize {
+    item_count.div_ceil(64)
+}
+
+pub fn cpu_prediction_max_batch() -> usize {
+    CPU_PREDICTION_MAX_BATCH
+}
+
+pub fn cpu_head_training_max_positions() -> usize {
+    CPU_HEAD_TRAINING_MAX_POSITIONS
+}
+
+pub fn min_hidden_training_positions() -> usize {
+    MIN_HIDDEN_TRAINING_POSITIONS
+}
+
+pub fn projection_chunk_size() -> usize {
+    PROJECTION_CHUNK_SIZE
+}
+
+pub fn projection_temporary_budget(max_buffer_size: usize) -> usize {
+    PROJECTION_TEMPORARY_BUDGET.min(max_buffer_size.saturating_div(2).max(1))
+}
+
+pub fn output_delta_params_bytes(sample_count: usize, total_weight: f32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    push_u32(&mut bytes, sample_count as u32);
+    push_f32(&mut bytes, total_weight.max(0.0));
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    bytes
+}
+
+pub fn hidden_delta_params_bytes(
+    sample_count: usize,
+    current_size: usize,
+    next_size: usize,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    push_u32(&mut bytes, sample_count as u32);
+    push_u32(&mut bytes, current_size as u32);
+    push_u32(&mut bytes, next_size as u32);
+    push_u32(&mut bytes, 0);
+    bytes
+}
+
+pub fn policy_params_bytes(
+    batch_count: usize,
+    input_size: usize,
+    total_weight: f32,
+    learning_rate: f32,
+    weight_decay: f32,
+    momentum: f32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32);
+    push_u32(&mut bytes, batch_count as u32);
+    push_u32(&mut bytes, input_size as u32);
+    push_u32(&mut bytes, POLICY_BUCKETS);
+    push_u32(&mut bytes, 0);
+    push_f32(&mut bytes, total_weight.max(0.0));
+    push_f32(&mut bytes, learning_rate);
+    push_f32(&mut bytes, weight_decay);
+    push_f32(&mut bytes, momentum);
+    bytes
+}
+
+pub fn layer_params_bytes(
+    sample_count: usize,
+    input_size: usize,
+    output_size: usize,
+    learning_rate: f32,
+    weight_decay: f32,
+    momentum: f32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32);
+    push_u32(&mut bytes, sample_count as u32);
+    push_u32(&mut bytes, input_size as u32);
+    push_u32(&mut bytes, output_size as u32);
+    push_f32(&mut bytes, learning_rate);
+    push_f32(&mut bytes, weight_decay);
+    push_f32(&mut bytes, momentum);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    bytes
+}
+
+pub fn output_params_bytes(
+    sample_count: usize,
+    input_size: usize,
+    learning_rate: f32,
+    weight_decay: f32,
+    momentum: f32,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32);
+    push_u32(&mut bytes, sample_count as u32);
+    push_u32(&mut bytes, input_size as u32);
+    push_u32(&mut bytes, 0);
+    push_f32(&mut bytes, learning_rate);
+    push_f32(&mut bytes, weight_decay);
+    push_f32(&mut bytes, momentum);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    bytes
+}
+
+pub fn projection_params_bytes(
+    sample_count: usize,
+    input_size: usize,
+    projection_size: usize,
+    seed: u32,
+    output_offset: usize,
+) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(32);
+    push_u32(&mut bytes, sample_count as u32);
+    push_u32(&mut bytes, input_size as u32);
+    push_u32(&mut bytes, projection_size as u32);
+    push_u32(&mut bytes, seed);
+    push_u32(&mut bytes, output_offset as u32);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    push_u32(&mut bytes, 0);
+    bytes
+}
+
 pub fn split_hidden_weights(
     hidden_weights: &[f32],
     input_size: usize,
@@ -2959,6 +3350,81 @@ pub fn split_hidden_weights(
     layers
 }
 
+pub fn split_hidden_weights_bytes(request: &[u8]) -> Result<Vec<u8>, String> {
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn read_u32(&mut self, label: &str) -> Result<u32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Hidden weight split request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Hidden weight split request is missing {label}."))?;
+            self.offset = end;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+
+        fn read_f32(&mut self, label: &str) -> Result<f32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Hidden weight split request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Hidden weight split request is missing {label}."))?;
+            self.offset = end;
+            Ok(f32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+    }
+
+    let mut cursor = Cursor {
+        bytes: request,
+        offset: 0,
+    };
+    let input_size = cursor.read_u32("input size")? as usize;
+    let layer_count = cursor.read_u32("layer count")? as usize;
+    let weight_count = cursor.read_u32("weight count")? as usize;
+    let mut hidden_layers = Vec::with_capacity(layer_count);
+    for _ in 0..layer_count {
+        hidden_layers.push(cursor.read_u32("hidden layer size")?);
+    }
+    let mut hidden_weights = Vec::with_capacity(weight_count);
+    for _ in 0..weight_count {
+        hidden_weights.push(cursor.read_f32("hidden weight")?);
+    }
+    if cursor.offset != request.len() {
+        return Err("Hidden weight split request has trailing bytes.".to_string());
+    }
+
+    let layers = split_hidden_weights(&hidden_weights, input_size, &hidden_layers);
+    let layer_count = u32::try_from(layers.len())
+        .map_err(|_| "Hidden weight layer count exceeds GPU parameter range.".to_string())?;
+    let value_count = layers.iter().map(Vec::len).sum::<usize>();
+    let mut bytes = Vec::with_capacity(4 + layers.len() * 4 + value_count * 4);
+    push_u32(&mut bytes, layer_count);
+    for layer in &layers {
+        push_u32(
+            &mut bytes,
+            u32::try_from(layer.len()).map_err(|_| {
+                "Hidden weight layer length exceeds GPU parameter range.".to_string()
+            })?,
+        );
+    }
+    for layer in layers {
+        for value in layer {
+            push_f32(&mut bytes, value);
+        }
+    }
+    Ok(bytes)
+}
+
 pub fn concat_f32(arrays: &[Vec<f32>]) -> Vec<f32> {
     let length = arrays.iter().map(Vec::len).sum();
     let mut result = Vec::with_capacity(length);
@@ -2968,8 +3434,88 @@ pub fn concat_f32(arrays: &[Vec<f32>]) -> Vec<f32> {
     result
 }
 
+pub fn concat_f32_bytes(request: &[u8]) -> Result<Vec<u8>, String> {
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn read_u32(&mut self, label: &str) -> Result<u32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Float32 concat request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Float32 concat request is missing {label}."))?;
+            self.offset = end;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+
+        fn read_f32(&mut self, label: &str) -> Result<f32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Float32 concat request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Float32 concat request is missing {label}."))?;
+            self.offset = end;
+            Ok(f32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+    }
+
+    let mut cursor = Cursor {
+        bytes: request,
+        offset: 0,
+    };
+    let array_count = cursor.read_u32("array count")? as usize;
+    let mut lengths = Vec::with_capacity(array_count);
+    for _ in 0..array_count {
+        lengths.push(cursor.read_u32("array length")? as usize);
+    }
+    let mut arrays = Vec::with_capacity(array_count);
+    for length in lengths {
+        let mut values = Vec::with_capacity(length);
+        for _ in 0..length {
+            values.push(cursor.read_f32("array value")?);
+        }
+        arrays.push(values);
+    }
+    if cursor.offset != request.len() {
+        return Err("Float32 concat request has trailing bytes.".to_string());
+    }
+
+    let values = concat_f32(&arrays);
+    let mut bytes = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        push_f32(&mut bytes, value);
+    }
+    Ok(bytes)
+}
+
 pub fn count_non_zero(values: &[f32]) -> usize {
     values.iter().filter(|value| **value != 0.0).count()
+}
+
+pub fn count_non_zero_bytes(bytes: &[u8]) -> Result<usize, String> {
+    let values = f32_values_from_bytes(bytes, "Non-zero count request")?;
+    Ok(count_non_zero(&values))
+}
+
+fn f32_values_from_bytes(bytes: &[u8], label: &str) -> Result<Vec<f32>, String> {
+    let chunks = bytes.chunks_exact(4);
+    if !chunks.remainder().is_empty() {
+        return Err(format!("{label} length is not a multiple of f32 size."));
+    }
+    let mut values = Vec::with_capacity(bytes.len() / 4);
+    for chunk in chunks {
+        values.push(f32::from_le_bytes(chunk.try_into().unwrap()));
+    }
+    Ok(values)
 }
 
 pub fn model_architecture_matches(model: &CompactValueModel) -> bool {
@@ -2979,6 +3525,12 @@ pub fn model_architecture_matches(model: &CompactValueModel) -> bool {
         && !model.hidden_weights.is_empty()
         && model.output_activation == OutputActivation::Tanh
         && compact_model_is_finite(model)
+}
+
+pub fn compact_value_model_architecture_matches_bytes(bytes: &[u8]) -> bool {
+    decode_compact_value_model(bytes)
+        .map(|model| model_architecture_matches(&model))
+        .unwrap_or(false)
 }
 
 pub fn output_layer_size(hidden_layers: &[u32]) -> Result<usize, String> {
@@ -3028,6 +3580,85 @@ pub fn policy_weights_array(
     Some(weights)
 }
 
+pub fn compact_value_model_policy_weights_bytes(
+    bytes: &[u8],
+    input_size: usize,
+) -> Result<Option<Vec<u8>>, CompactValueModelError> {
+    let model = decode_compact_value_model(bytes)?;
+    let Some(weights) = policy_weights_array(Some(&model), input_size) else {
+        return Ok(None);
+    };
+    let mut output = Vec::with_capacity(weights.len() * std::mem::size_of::<f32>());
+    for value in weights {
+        output.extend_from_slice(&value.to_le_bytes());
+    }
+    Ok(Some(output))
+}
+
+pub fn quantized_policy_upload_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let weights = f32_values_from_bytes(bytes, "Policy quantization weights")?;
+    let mut max_abs = 0.0_f32;
+    for value in &weights {
+        max_abs = max_abs.max(value.abs());
+    }
+    let scale = if max_abs > 0.0 {
+        max_abs / 127.0
+    } else {
+        1.0 / 127.0
+    };
+    let mut dequantized = Vec::with_capacity(weights.len());
+    let mut max_abs_error = 0.0_f32;
+    for value in weights {
+        let packed = (value / scale).round().clamp(-127.0, 127.0) as i8;
+        let restored = packed as f32 * scale;
+        dequantized.push(restored);
+        max_abs_error = max_abs_error.max((value - restored).abs());
+    }
+    let mut output = Vec::with_capacity(8 + dequantized.len() * std::mem::size_of::<f32>());
+    push_f32(&mut output, scale);
+    push_f32(&mut output, max_abs_error);
+    for value in dequantized {
+        push_f32(&mut output, value);
+    }
+    Ok(output)
+}
+
+pub fn f32_to_f16_upload_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let values = f32_values_from_bytes(bytes, "f16 upload weights")?;
+    let mut output = Vec::with_capacity(values.len() * std::mem::size_of::<u16>());
+    for value in values {
+        output.extend_from_slice(&f32_to_f16_bits(value).to_le_bytes());
+    }
+    Ok(output)
+}
+
+pub fn f32_to_f16_bits(value: f32) -> u16 {
+    if !value.is_finite() {
+        return if value < 0.0 {
+            0xfc00
+        } else if value > 0.0 {
+            0x7c00
+        } else {
+            0x7e00
+        };
+    }
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127 + 15;
+    let mut mantissa = bits & 0x7fffff;
+    if exponent <= 0 {
+        if exponent < -10 {
+            return sign;
+        }
+        mantissa = (mantissa | 0x800000) >> (1 - exponent);
+        return sign | (((mantissa + 0x1000) >> 13) as u16);
+    }
+    if exponent >= 31 {
+        return sign | 0x7c00;
+    }
+    sign | ((exponent as u16) << 10) | (((mantissa + 0x1000) >> 13) as u16)
+}
+
 pub fn initial_hidden_weights(input_size: usize, hidden_layers: &[u32]) -> Vec<f32> {
     let mut weights = Vec::new();
     let mut previous = input_size;
@@ -3050,6 +3681,49 @@ pub fn initial_hidden_weights(input_size: usize, hidden_layers: &[u32]) -> Vec<f
     weights
 }
 
+pub fn initial_hidden_weights_bytes(request: &[u8]) -> Result<Vec<u8>, String> {
+    struct Cursor<'a> {
+        bytes: &'a [u8],
+        offset: usize,
+    }
+
+    impl<'a> Cursor<'a> {
+        fn read_u32(&mut self, label: &str) -> Result<u32, String> {
+            let end = self
+                .offset
+                .checked_add(4)
+                .ok_or_else(|| "Initial hidden weight request is too large.".to_string())?;
+            let bytes = self
+                .bytes
+                .get(self.offset..end)
+                .ok_or_else(|| format!("Initial hidden weight request is missing {label}."))?;
+            self.offset = end;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        }
+    }
+
+    let mut cursor = Cursor {
+        bytes: request,
+        offset: 0,
+    };
+    let input_size = cursor.read_u32("input size")? as usize;
+    let layer_count = cursor.read_u32("layer count")? as usize;
+    let mut hidden_layers = Vec::with_capacity(layer_count);
+    for _ in 0..layer_count {
+        hidden_layers.push(cursor.read_u32("hidden layer size")?);
+    }
+    if cursor.offset != request.len() {
+        return Err("Initial hidden weight request has trailing bytes.".to_string());
+    }
+
+    let weights = initial_hidden_weights(input_size, &hidden_layers);
+    let mut bytes = Vec::with_capacity(weights.len() * std::mem::size_of::<f32>());
+    for value in weights {
+        push_f32(&mut bytes, value);
+    }
+    Ok(bytes)
+}
+
 pub fn default_initial_hidden_weights() -> Vec<f32> {
     initial_hidden_weights(DEFAULT_PROJECTION_SIZE, DEFAULT_HIDDEN_LAYERS)
 }
@@ -3070,6 +3744,185 @@ pub fn f32_values_are_finite(values: &[f32]) -> bool {
 
 pub fn byte_arrays_equal(left: Option<&[u8]>, right: Option<&[u8]>) -> bool {
     matches!((left, right), (Some(left), Some(right)) if left == right)
+}
+
+pub fn compact_value_model_json(bytes: &[u8]) -> Result<String, String> {
+    let model = decode_compact_value_model(bytes).map_err(|error| error.to_string())?;
+    serde_json::to_string(&compact_value_model_json_value(&model))
+        .map_err(|error| format!("failed to encode compact value model JSON: {error}"))
+}
+
+pub fn compact_value_model_frontier_layout_json(bytes: &[u8]) -> Result<String, String> {
+    let model = decode_compact_value_model(bytes).map_err(|error| error.to_string())?;
+    if !model_architecture_matches(&model) {
+        return Ok(serde_json::json!({
+            "architectureMatches": false,
+        })
+        .to_string());
+    }
+    let output_size = output_layer_size(&model.hidden_layers)?;
+    let hidden_layer_weights = frontier_hidden_layer_weights(&model)?;
+    let policy_weights = policy_weights_array(Some(&model), output_size);
+    serde_json::to_string(&serde_json::json!({
+        "architectureMatches": true,
+        "model": compact_value_model_json_value(&model),
+        "outputLayerSize": output_size,
+        "hiddenLayerWeights": hidden_layer_weights,
+        "policyWeights": policy_weights,
+    }))
+    .map_err(|error| format!("failed to encode compact value model frontier layout JSON: {error}"))
+}
+
+fn compact_value_model_json_value(model: &CompactValueModel) -> serde_json::Value {
+    serde_json::json!({
+        "projectionSize": model.projection_size,
+        "projectionSeed": model.projection_seed,
+        "hiddenLayers": model.hidden_layers,
+        "hiddenWeights": model.hidden_weights,
+        "outputWeights": model.output_weights,
+        "auxiliaryValueWeights": model.auxiliary_value_weights,
+        "policyLogits": model.policy_logits,
+        "policyWeights": model.policy_weights,
+        "scale": model.scale,
+        "bias": model.bias,
+        "outputActivation": model.output_activation.to_string(),
+    })
+}
+
+fn frontier_hidden_layer_weights(model: &CompactValueModel) -> Result<Vec<Vec<f32>>, String> {
+    let mut expected_len = 0usize;
+    let mut input_size = model.projection_size as usize;
+    for &output_size in &model.hidden_layers {
+        expected_len = expected_len
+            .checked_add(output_size as usize * (input_size + 1))
+            .ok_or_else(|| "GPU value model hidden-weight layout is too large.".to_string())?;
+        input_size = output_size as usize;
+    }
+    if expected_len != model.hidden_weights.len() {
+        return Err(format!(
+            "GPU value model hidden-weight layout has {} weights but expected {expected_len}.",
+            model.hidden_weights.len()
+        ));
+    }
+    Ok(split_hidden_weights(
+        &model.hidden_weights,
+        model.projection_size as usize,
+        &model.hidden_layers,
+    ))
+}
+
+pub fn compact_value_model_bytes_from_json(text: &str) -> Result<Vec<u8>, String> {
+    let input: EncodableCompactValueModelJson = serde_json::from_str(text)
+        .map_err(|error| format!("Compact value model JSON is invalid: {error}"))?;
+    let version = if !input.auxiliary_value_weights.is_empty() {
+        5
+    } else if matches!(input.output_activation, Some(OutputActivationJson::Tanh)) {
+        4
+    } else if !input.policy_weights.is_empty() {
+        3
+    } else if !input.policy_logits.is_empty() {
+        2
+    } else {
+        1
+    };
+    let model = CompactValueModel {
+        version,
+        projection_size: input.projection_size,
+        projection_seed: input.projection_seed,
+        hidden_layers: input.hidden_layers,
+        hidden_weights: input.hidden_weights,
+        output_weights: input.output_weights,
+        policy_logits: if version == 2 {
+            input.policy_logits
+        } else {
+            Vec::new()
+        },
+        policy_weights: if version >= 3 {
+            input.policy_weights
+        } else {
+            Vec::new()
+        },
+        auxiliary_value_weights: if version >= 5 {
+            input.auxiliary_value_weights
+        } else {
+            Vec::new()
+        },
+        scale: input.scale.unwrap_or(1.0),
+        bias: input.bias.unwrap_or(0.0),
+        output_activation: if version >= 4 {
+            OutputActivation::Tanh
+        } else {
+            OutputActivation::Linear
+        },
+    };
+    Ok(encode_compact_value_model(&model))
+}
+
+pub fn compact_value_model_is_finite_bytes(bytes: &[u8]) -> bool {
+    decode_compact_value_model(bytes)
+        .map(|model| compact_model_is_finite(&model))
+        .unwrap_or(false)
+}
+
+pub fn compact_value_model_training_layout_bytes(
+    model_bytes: Option<&[u8]>,
+    average_label: f32,
+) -> Result<Vec<u8>, String> {
+    let active = match model_bytes.filter(|bytes| !bytes.is_empty()) {
+        Some(bytes) => Some(decode_compact_value_model(bytes).map_err(|error| error.to_string())?),
+        None => None,
+    };
+    let architecture_matches = active
+        .as_ref()
+        .map(model_architecture_matches)
+        .unwrap_or(false);
+    let output_size = output_layer_size(DEFAULT_HIDDEN_LAYERS)?;
+    let hidden_weights = if architecture_matches {
+        active
+            .as_ref()
+            .map(|model| model.hidden_weights.clone())
+            .unwrap_or_default()
+    } else {
+        default_initial_hidden_weights()
+    };
+    let mut output_weights = vec![0.0; output_size + 1];
+    if architecture_matches {
+        if let Some(model) = active.as_ref() {
+            if model.output_weights.len() == output_weights.len() {
+                output_weights.clone_from_slice(&model.output_weights);
+            } else {
+                output_weights[output_size] = inverse_tanh(average_label);
+            }
+        }
+    } else {
+        output_weights[output_size] = inverse_tanh(average_label);
+    }
+    let mut bytes = Vec::with_capacity(16 + (hidden_weights.len() + output_weights.len()) * 4);
+    push_u32(&mut bytes, u32::from(architecture_matches));
+    push_u32(&mut bytes, output_size as u32);
+    push_u32(&mut bytes, hidden_weights.len() as u32);
+    push_u32(&mut bytes, output_weights.len() as u32);
+    for value in hidden_weights.iter().chain(output_weights.iter()) {
+        push_f32(&mut bytes, *value);
+    }
+    Ok(bytes)
+}
+
+pub fn compact_value_model_hidden_features_json(
+    model_bytes: &[u8],
+    samples_json: &str,
+) -> Result<String, String> {
+    let model = decode_compact_value_model(model_bytes)
+        .map_err(|error| format!("Compact model hidden-feature request is invalid: {error}"))?;
+    let samples = serde_json::from_str::<Vec<TrainingSample>>(samples_json)
+        .map_err(|error| format!("Compact model hidden-feature samples are invalid: {error}"))?;
+    feature_length(&samples)?;
+    let features = samples
+        .iter()
+        .map(|sample| hidden_features(&sample.features, &model))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&features)
+        .map_err(|error| format!("Compact model hidden features failed to encode: {error}"))
 }
 
 fn value_head_loss(features: &[Vec<f32>], samples: &[TrainingSample], weights: &[f32]) -> f32 {
@@ -3230,6 +4083,103 @@ fn apply_policy_head_gradient(
     }
 }
 
+pub fn auxiliary_value_targets(sample: &TrainingSample) -> [f32; AUXILIARY_VALUE_HEAD_COUNT] {
+    let features = &sample.features;
+    let board_stride = NEURAL_BOARD_PLANES * NEURAL_BOARD_SQUARES;
+    let encoded_board_count = features.len() / board_stride;
+    let board_count = sample
+        .board_count
+        .unwrap_or(encoded_board_count)
+        .min(encoded_board_count)
+        .max(1);
+    let mut active_boards = 0.0;
+    let mut present_boards = 0.0;
+    let mut royal_danger: f32 = 0.0;
+    let mut active_material = 0.0;
+    let mut inactive_material = 0.0;
+    for board in 0..board_count {
+        let base = board * board_stride;
+        let active = features
+            .get(base + 25 * NEURAL_BOARD_SQUARES)
+            .copied()
+            .unwrap_or(0.0);
+        let present = features
+            .get(base + 27 * NEURAL_BOARD_SQUARES)
+            .copied()
+            .unwrap_or(0.0);
+        let royal = features
+            .get(base + 31 * NEURAL_BOARD_SQUARES)
+            .copied()
+            .unwrap_or(0.0);
+        active_boards += if active > 0.0 { 1.0 } else { 0.0 };
+        present_boards += if present > 0.0 { 1.0 } else { 0.0 };
+        royal_danger = royal_danger.max(royal);
+        let material = material_balance_for_encoded_board(features, base);
+        if active > 0.0 {
+            active_material += material;
+        } else {
+            inactive_material += material;
+        }
+    }
+    let board_count = board_count as f32;
+    [
+        if sample.label > 0.05 {
+            1.0
+        } else if sample.label < -0.05 {
+            -1.0
+        } else {
+            0.0
+        },
+        bounded_value(sample.label),
+        royal_danger,
+        bounded_value(1.0 - 2.0 * royal_danger),
+        bounded_value(active_boards / board_count),
+        bounded_value(present_boards / board_count),
+        bounded_value(active_material / 16.0),
+        bounded_value(inactive_material / 16.0),
+        if sample.policy.is_some() { 0.0 } else { 1.0 },
+    ]
+}
+
+pub fn auxiliary_value_targets_bytes(samples: &[TrainingSample]) -> Vec<u8> {
+    let mut bytes =
+        Vec::with_capacity(samples.len() * AUXILIARY_VALUE_HEAD_COUNT * std::mem::size_of::<f32>());
+    for sample in samples {
+        for value in auxiliary_value_targets(sample) {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
+pub fn material_balance_for_encoded_board(features: &[f32], board_base: usize) -> f32 {
+    let mut balance = 0.0;
+    for plane in 0..24 {
+        let piece_value = encoded_piece_value(plane % 12);
+        let sign = if plane < 12 { 1.0 } else { -1.0 };
+        for square in 0..NEURAL_BOARD_SQUARES {
+            balance += sign
+                * piece_value
+                * features
+                    .get(board_base + plane * NEURAL_BOARD_SQUARES + square)
+                    .copied()
+                    .unwrap_or(0.0);
+        }
+    }
+    balance
+}
+
+pub fn encoded_piece_value(piece_type: usize) -> f32 {
+    match piece_type {
+        0 | 3 => 8.0,
+        2 => 5.0,
+        4 | 5 => 4.0,
+        6 | 9 => 3.0,
+        7 | 8 => 2.0,
+        _ => 1.0,
+    }
+}
+
 fn policy_logits(feature: &[f32], weights: &[f32], input_size: usize) -> Vec<f32> {
     let row_size = input_size + 1;
     let mut logits = vec![0.0; POLICY_BUCKETS as usize];
@@ -3246,16 +4196,78 @@ fn policy_logits(feature: &[f32], weights: &[f32], input_size: usize) -> Vec<f32
 fn policy_target(sample: Option<&TrainingSample>) -> usize {
     sample
         .and_then(|sample| sample.policy)
+        .map(policy_training_target)
         .unwrap_or(0)
-        .min(POLICY_BUCKETS - 1) as usize
+}
+
+pub fn policy_training_target(policy: u32) -> usize {
+    policy.min(POLICY_BUCKETS - 1) as usize
+}
+
+pub fn training_label_weight(label_weight: f32) -> f32 {
+    label_weight.max(0.0)
+}
+
+pub fn training_weighted_average(total: f64, total_weight: f64) -> f64 {
+    if total_weight > 0.0 {
+        total / total_weight
+    } else {
+        0.0
+    }
+}
+
+pub fn training_batch_normalization(batch_weight: f64) -> f64 {
+    1.0 / batch_weight.max(1e-6)
 }
 
 pub fn has_policy_training_target(sample: &TrainingSample) -> bool {
     sample.label_kind.as_deref() != Some("distilled") && sample.policy.is_some()
 }
 
+pub fn policy_training_indices(
+    samples: &[TrainingSample],
+    require_positive_weight: bool,
+) -> Vec<usize> {
+    samples
+        .iter()
+        .enumerate()
+        .filter(|(_, sample)| {
+            has_policy_training_target(sample)
+                && (!require_positive_weight || training_label_weight(sample.label_weight) > 0.0)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
 pub fn policy_training_steps(value_epochs: usize) -> usize {
     (value_epochs.saturating_add(63) / 64).clamp(16, 256)
+}
+
+pub fn value_training_batch_size(config_batch_size: usize, training_count: usize) -> usize {
+    config_batch_size.min(training_count.max(1))
+}
+
+pub fn policy_training_batch_size(config_batch_size: usize, training_count: usize) -> usize {
+    config_batch_size.min(training_count)
+}
+
+pub fn value_head_validation_interval(epochs: usize, validation_interval: Option<usize>) -> usize {
+    validation_interval.unwrap_or(256).min(epochs).max(1)
+}
+
+pub fn value_gpu_batches_per_submit(epochs: usize) -> usize {
+    VALUE_EPOCHS_PER_SUBMIT.min(epochs.max(1))
+}
+
+pub fn value_gpu_validation_interval(
+    batches_per_submit: usize,
+    validation_interval: Option<usize>,
+) -> usize {
+    batches_per_submit.max(validation_interval.unwrap_or(256))
+}
+
+pub fn policy_training_steps_per_submit(steps: usize) -> usize {
+    POLICY_STEPS_PER_SUBMIT.min(steps)
 }
 
 fn default_label_weight() -> f32 {

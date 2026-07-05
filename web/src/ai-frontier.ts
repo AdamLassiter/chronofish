@@ -45,8 +45,6 @@ const gpuMapMode: GpuMapModeConstants = (globalThis as unknown as { GPUMapMode?:
 
 const I32_BYTES = Int32Array.BYTES_PER_ELEMENT;
 const GPU_SHADER_STAGE_COMPUTE = 4;
-const DEFAULT_STORAGE_LIMIT = 128 * 1024 * 1024;
-const DEFAULT_BUFFER_LIMIT = 256 * 1024 * 1024;
 const tuningCache = new Map<string, Promise<FrontierTuning>>();
 let tuningEnginePromise: Promise<ChronofishEngine> | null = null;
 
@@ -131,16 +129,18 @@ interface PooledBuffer {
 export class FrontierBufferPool {
   readonly device: GPUDevice;
   readonly tuning: FrontierTuning;
+  readonly engine: ChronofishEngine | undefined;
   #buffers: PooledBuffer[] = [];
   #destroyed = false;
 
-  constructor(device: GPUDevice, tuning: FrontierTuning) {
+  constructor(device: GPUDevice, tuning: FrontierTuning, engine?: ChronofishEngine) {
     this.device = device;
     this.tuning = tuning;
+    this.engine = engine;
   }
 
   createSearchBuffers(): FrontierBufferSet {
-    const stateBytes = frontierStateBytes(this.tuning.maxBoards) * this.tuning.frontierWidth;
+    const stateBytes = frontierStateBytes(this.tuning.maxBoards, this.engine) * this.tuning.frontierWidth;
     const candidateBytes = GPU_FRONTIER_CANDIDATE_STRIDE * I32_BYTES * this.tuning.candidateCapacity;
     const deltaBytes = GPU_FRONTIER_DELTA_STRIDE * I32_BYTES * this.tuning.candidateCapacity;
     const storageCopy = gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC | gpuBufferUsage.COPY_DST;
@@ -162,7 +162,7 @@ export class FrontierBufferPool {
     if (this.#destroyed) {
       throw new Error("GPU frontier buffer pool was destroyed.");
     }
-    const size = align4(Math.max(4, byteLength));
+    const size = align4(Math.max(4, byteLength), this.engine);
     const existing = this.#buffers.find((entry) => !entry.inUse && entry.usage === usage && entry.size >= size);
     if (existing) {
       existing.inUse = true;
@@ -202,13 +202,15 @@ export class FrontierGpuPipeline {
   readonly device: GPUDevice;
   readonly tuning: FrontierTuning;
   readonly pool: FrontierBufferPool;
+  readonly engine: ChronofishEngine | undefined;
   #pipelines: Promise<FrontierPipelines> | null = null;
   #cycleTemporaries: GPUBuffer[] = [];
 
-  constructor(device: GPUDevice, tuning: FrontierTuning, pool = new FrontierBufferPool(device, tuning)) {
+  constructor(device: GPUDevice, tuning: FrontierTuning, pool?: FrontierBufferPool, engine?: ChronofishEngine) {
     this.device = device;
     this.tuning = tuning;
-    this.pool = pool;
+    this.engine = engine ?? pool?.engine;
+    this.pool = pool ?? new FrontierBufferPool(device, tuning, this.engine);
   }
 
   uploadRoot(buffers: FrontierBufferSet, root: EncodedFrontierRoot): void {
@@ -224,7 +226,7 @@ export class FrontierGpuPipeline {
     const pipelines = await this.pipelines();
     const selectionPlan = await frontierSelectionPlan(this.tuning, options.maxSelectionScan);
     const { candidateCapacity, selectionCapacity } = selectionPlan;
-    const stateStride = frontierStateStride(this.tuning.maxBoards);
+    const stateStride = frontierStateStride(this.tuning.maxBoards, this.engine);
     const boardOffset = GPU_FRONTIER_BOARD_OFFSET;
     encoder.clearBuffer(buffers.counters, 0, 12);
     encoder.clearBuffer(buffers.nextStates);
@@ -235,11 +237,11 @@ export class FrontierGpuPipeline {
     encoder.clearBuffer(buffers.eligibility);
     encoder.clearBuffer(buffers.selected);
 
-    const stateCount = Math.max(1, Math.min(this.tuning.frontierWidth, options.stateCount ?? this.tuning.frontierWidth));
+    const stateCount = frontierCycleStateCount(this.tuning.frontierWidth, options.stateCount ?? this.tuning.frontierWidth, this.engine);
     const sourceScans = stateCount * this.tuning.maxBoards * 64;
-    const sourceScanLimit = Math.max(this.tuning.candidateWorkgroupSize, this.tuning.dispatchCandidateLimit);
+    const sourceScanLimit = frontierExpansionSourceScanLimit(this.tuning.candidateWorkgroupSize, this.tuning.dispatchCandidateLimit, this.engine);
     for (let base = 0; base < sourceScans; base += sourceScanLimit) {
-      const count = Math.min(sourceScanLimit, sourceScans - base);
+      const count = frontierExpansionSourceScanCount(sourceScanLimit, sourceScans, base, this.engine);
       const expandParams = u32Uniform([
         stateCount,
         this.tuning.maxBoards,
@@ -261,7 +263,7 @@ export class FrontierGpuPipeline {
       const expandParamsBuffer = this.temporaryUniform(expandParams);
       encodePass(this.device, encoder, pipelines.expand, [
         buffers.states, buffers.candidates, buffers.deltas, buffers.counters, expandParamsBuffer
-      ], Math.ceil(count / this.tuning.candidateWorkgroupSize), 1, `frontier_expand_${options.cycleIndex}_${base}`);
+      ], frontierExpandWorkgroups(count, this.tuning.candidateWorkgroupSize, this.engine), 1, `frontier_expand_${options.cycleIndex}_${base}`);
     }
     await scoreCandidates?.(encoder, buffers, candidateCapacity);
 
@@ -278,8 +280,8 @@ export class FrontierGpuPipeline {
     const selectParamsBuffer = this.temporaryUniform(selectParams);
     const inertSortBuffer = this.temporaryUniform(new Uint32Array(4));
     const selectionBuffers = selectionPassBuffers(buffers, selectParamsBuffer, inertSortBuffer);
-    encodePass(this.device, encoder, pipelines.hash, selectionBuffers, Math.ceil(candidateCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_hash");
-    encodePass(this.device, encoder, pipelines.bucketOrder, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_bucket_order");
+    encodePass(this.device, encoder, pipelines.hash, selectionBuffers, frontierSelectionWorkgroups(candidateCapacity, this.tuning.candidateWorkgroupSize, this.engine), 1, "frontier_hash");
+    encodePass(this.device, encoder, pipelines.bucketOrder, selectionBuffers, frontierSelectionWorkgroups(selectionCapacity, this.tuning.candidateWorkgroupSize, this.engine), 1, "frontier_bucket_order");
     for (let k = 2; k <= selectionCapacity; k *= 2) {
       for (let j = k / 2; j > 0; j = Math.floor(j / 2)) {
         const stageBuffer = this.temporaryUniform(new Uint32Array([k, j, 0, 0]));
@@ -288,15 +290,15 @@ export class FrontierGpuPipeline {
           encoder,
           pipelines.bitonicSort,
           selectionPassBuffers(buffers, selectParamsBuffer, stageBuffer),
-          Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize),
+          frontierSelectionWorkgroups(selectionCapacity, this.tuning.candidateWorkgroupSize, this.engine),
           1,
           `frontier_bitonic_sort_${k}_${j}`
         );
       }
     }
-    encodePass(this.device, encoder, pipelines.markUnique, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_mark_unique");
-    encodePass(this.device, encoder, pipelines.markParentQuota, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_mark_parent_quota");
-    encodePass(this.device, encoder, pipelines.compactSelected, selectionBuffers, Math.ceil(selectionCapacity / this.tuning.candidateWorkgroupSize), 1, "frontier_compact_selected");
+    encodePass(this.device, encoder, pipelines.markUnique, selectionBuffers, frontierSelectionWorkgroups(selectionCapacity, this.tuning.candidateWorkgroupSize, this.engine), 1, "frontier_mark_unique");
+    encodePass(this.device, encoder, pipelines.markParentQuota, selectionBuffers, frontierSelectionWorkgroups(selectionCapacity, this.tuning.candidateWorkgroupSize, this.engine), 1, "frontier_mark_parent_quota");
+    encodePass(this.device, encoder, pipelines.compactSelected, selectionBuffers, frontierSelectionWorkgroups(selectionCapacity, this.tuning.candidateWorkgroupSize, this.engine), 1, "frontier_compact_selected");
     encodePass(this.device, encoder, pipelines.select, selectionBuffers, 1, 1, "frontier_fill_selection_underflow");
 
     const stateParams = u32Uniform([
@@ -323,7 +325,7 @@ export class FrontierGpuPipeline {
       buffers.summaries,
       buffers.counters,
       stateParamsBuffer
-    ], Math.ceil(this.tuning.frontierWidth / this.tuning.mutationTileSize), 1, "frontier_materialize_selected");
+    ], frontierMaterializeWorkgroups(this.tuning.frontierWidth, this.tuning.mutationTileSize, this.engine), 1, "frontier_materialize_selected");
   }
 
   swapFrontiers(buffers: FrontierBufferSet): void {
@@ -334,12 +336,12 @@ export class FrontierGpuPipeline {
 
   async encodeMinimax(encoder: GPUCommandEncoder, buffers: FrontierBufferSet, targetDepth: number): Promise<void> {
     const pipelines = await this.pipelines();
-    const boundedDepth = Math.min(targetDepth, GPU_FRONTIER_ANCESTRY_STRIDE);
+    const boundedDepth = frontierMinimaxBoundedDepth(targetDepth, GPU_FRONTIER_ANCESTRY_STRIDE, this.engine);
     let readFromSummaries = true;
     for (let level = boundedDepth - 1; level > 0; level -= 1) {
       const params = this.temporaryUniform(u32Uniform([
         this.tuning.frontierWidth,
-        frontierStateStride(this.tuning.maxBoards),
+        frontierStateStride(this.tuning.maxBoards, this.engine),
         GPU_FRONTIER_HEADER_STRIDE,
         boundedDepth,
         level,
@@ -352,7 +354,7 @@ export class FrontierGpuPipeline {
         encoder,
         pipelines.reduce,
         [buffers.states, buffers.summaries, params],
-        Math.ceil(this.tuning.frontierWidth / 64),
+        frontierMinimaxWorkgroups(this.tuning.frontierWidth, this.engine),
         1,
         `frontier_minimax_reduce_${level}`
       );
@@ -361,7 +363,7 @@ export class FrontierGpuPipeline {
     if (boundedDepth > 1 && readFromSummaries) {
       const params = this.temporaryUniform(u32Uniform([
         this.tuning.frontierWidth,
-        frontierStateStride(this.tuning.maxBoards),
+        frontierStateStride(this.tuning.maxBoards, this.engine),
         GPU_FRONTIER_HEADER_STRIDE,
         boundedDepth,
         0,
@@ -374,7 +376,7 @@ export class FrontierGpuPipeline {
         encoder,
         pipelines.copyReduced,
         [buffers.states, buffers.summaries, params],
-        Math.ceil(this.tuning.frontierWidth / 64),
+        frontierMinimaxWorkgroups(this.tuning.frontierWidth, this.engine),
         1,
         "frontier_minimax_copy_scores"
       );
@@ -399,7 +401,7 @@ export class FrontierGpuPipeline {
 
   private temporaryUniform(data: ArrayBufferView): GPUBuffer {
     const buffer = this.device.createBuffer({
-      size: align4(data.byteLength),
+      size: align4(data.byteLength, this.engine),
       usage: gpuBufferUsage.UNIFORM | gpuBufferUsage.COPY_DST
     });
     this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
@@ -414,14 +416,11 @@ export async function deriveFrontierTuning(
   boardCount: number,
   additionalBoardCapacity = 0
 ): Promise<FrontierTuning> {
-  const storageLimit = finiteLimit(device.limits?.maxStorageBufferBindingSize, DEFAULT_STORAGE_LIMIT);
-  const bufferLimit = finiteLimit(device.limits?.maxBufferSize, DEFAULT_BUFFER_LIMIT);
-  const maxInvocations = finiteLimit(device.limits?.maxComputeInvocationsPerWorkgroup, 256);
   const engine = await frontierTuningEngine();
   return JSON.parse(readWasmString(engine, engine.chronofish_derive_frontier_tuning_json(
-    storageLimit,
-    bufferLimit,
-    maxInvocations,
+    device.limits?.maxStorageBufferBindingSize ?? 0,
+    device.limits?.maxBufferSize ?? 0,
+    device.limits?.maxComputeInvocationsPerWorkgroup ?? 0,
     requestedNodes,
     boardCount,
     additionalBoardCapacity
@@ -447,12 +446,74 @@ export async function autotuneFrontier(
   return tuning;
 }
 
-export function frontierStateStride(maxBoards: number): number {
+export function frontierStateStride(maxBoards: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_state_stride(maxBoards);
+  }
   return GPU_FRONTIER_BOARD_OFFSET + maxBoards * GPU_FRONTIER_BOARD_STRIDE;
 }
 
-export function frontierStateBytes(maxBoards: number): number {
+export function frontierStateBytes(maxBoards: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_state_bytes(maxBoards);
+  }
   return frontierStateStride(maxBoards) * I32_BYTES;
+}
+
+export function frontierExpandWorkgroups(count: number, candidateWorkgroupSize: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_expand_workgroups(count, candidateWorkgroupSize);
+  }
+  return Math.ceil(count / Math.max(1, candidateWorkgroupSize));
+}
+
+export function frontierSelectionWorkgroups(capacity: number, candidateWorkgroupSize: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_selection_workgroups(capacity, candidateWorkgroupSize);
+  }
+  return Math.ceil(capacity / Math.max(1, candidateWorkgroupSize));
+}
+
+export function frontierMaterializeWorkgroups(frontierWidth: number, mutationTileSize: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_materialize_workgroups(frontierWidth, mutationTileSize);
+  }
+  return Math.ceil(frontierWidth / Math.max(1, mutationTileSize));
+}
+
+export function frontierMinimaxWorkgroups(frontierWidth: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_minimax_workgroups(frontierWidth);
+  }
+  return Math.ceil(frontierWidth / 64);
+}
+
+export function frontierCycleStateCount(frontierWidth: number, requestedStateCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_cycle_state_count(frontierWidth, requestedStateCount);
+  }
+  return Math.max(1, Math.min(frontierWidth, requestedStateCount));
+}
+
+export function frontierExpansionSourceScanLimit(candidateWorkgroupSize: number, dispatchCandidateLimit: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_expansion_source_scan_limit(candidateWorkgroupSize, dispatchCandidateLimit);
+  }
+  return Math.max(candidateWorkgroupSize, dispatchCandidateLimit, 1);
+}
+
+export function frontierExpansionSourceScanCount(sourceScanLimit: number, sourceScans: number, sourceScanBase: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_expansion_source_scan_count(sourceScanLimit, sourceScans, sourceScanBase);
+  }
+  return Math.min(sourceScanLimit, sourceScans - sourceScanBase);
+}
+
+export function frontierMinimaxBoundedDepth(targetDepth: number, ancestryStride: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_minimax_bounded_depth(targetDepth, ancestryStride);
+  }
+  return Math.min(targetDepth, ancestryStride);
 }
 
 export function adapterTuningCacheKey(adapter: GPUAdapter, modelVersion: string, tuning: FrontierTuning): string {
@@ -465,10 +526,6 @@ export function adapterTuningCacheKey(adapter: GPUAdapter, modelVersion: string,
     modelVersion,
     tuning.maxBoards
   ].join(":");
-}
-
-function finiteLimit(value: number | undefined, fallback: number): number {
-  return Number.isFinite(value) && (value ?? 0) > 0 ? value! : fallback;
 }
 
 async function frontierTuningEngine(): Promise<ChronofishEngine> {
@@ -491,7 +548,10 @@ async function frontierSelectionPlan(tuning: FrontierTuning, maxSelectionScan: n
   ))) as FrontierSelectionPlan;
 }
 
-function align4(value: number): number {
+export function align4(value: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_align4(value);
+  }
   return Math.ceil(value / 4) * 4;
 }
 

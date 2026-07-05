@@ -3,47 +3,90 @@ use std::path::PathBuf;
 use chronofish_engine::gpu::search::{
     bot_completed_search_depth,
     bot_next_search_depth,
+    bot_ranked_choices_json,
+    bot_search_config_json,
     bot_search_depth_at_least_one,
+    bot_select_best_result_json,
     bot_worker_search_time_ms,
     derive_frontier_tuning,
+    frontier_cycle_state_count,
+    frontier_expand_workgroups,
+    frontier_expansion_source_scan_count,
+    frontier_expansion_source_scan_limit,
+    frontier_materialize_workgroups,
     frontier_max_cycles,
+    frontier_minimax_bounded_depth,
+    frontier_minimax_workgroups,
+    frontier_neural_cache_hit_rate,
+    frontier_next_active_state_limit,
     frontier_per_parent_limit,
+    frontier_policy_workgroups,
     frontier_selection_plan,
+    frontier_selection_workgroups,
     frontier_state_bytes,
+    frontier_state_stride,
     gpu_board_record_from_snapshot,
+    gpu_candidate_batch_candidate_count,
+    gpu_candidate_batch_source_count,
     gpu_candidate_board_records_from_snapshot,
     gpu_candidate_index_from_i32s,
+    gpu_candidate_input_meta_json_from_i32s,
     gpu_candidate_inputs_from_snapshot_json,
     gpu_candidate_inputs_from_timelines,
     gpu_candidate_inputs_i32s_from_snapshot_json,
     gpu_candidate_inputs_json_from_snapshot_json,
+    gpu_candidate_max_candidates_per_batch,
+    gpu_candidate_max_candidates_per_dispatch,
+    gpu_candidate_max_dispatch_workgroups,
     gpu_candidate_move_from_record,
+    gpu_candidate_score_workgroups,
+    gpu_candidate_source_batch_size,
     gpu_child_is_source_advance,
+    gpu_choice_agreement_choices_json,
     gpu_choice_agreement_json,
+    gpu_completed_turn_choice_json,
+    gpu_diagnostic_rate,
+    gpu_effective_branching_factor,
     gpu_frontier_active_timeline_distance,
+    gpu_frontier_choices_json_from_i32s,
     gpu_frontier_clamp_usize,
     gpu_frontier_floor_power_of_two,
     gpu_frontier_hash_words,
     gpu_frontier_next_power_of_two,
     gpu_frontier_origin_code,
     gpu_frontier_pending_board_count,
+    gpu_frontier_plan_json_from_i32s,
     gpu_frontier_positive_limit,
     gpu_frontier_present_time,
     gpu_frontier_root_i32s_from_snapshot_json,
     gpu_frontier_timeline_active,
     gpu_frontier_workgroup_size,
+    gpu_full_search_reported_depth,
     gpu_latest_board_index,
+    gpu_move_plan_key_json,
     gpu_mutation_board_record_from_snapshot,
     gpu_mutation_board_record_to_snapshot,
+    gpu_mutation_candidate_limit,
+    gpu_mutation_candidate_workgroups,
     gpu_mutation_summary_from_i32s,
     gpu_next_branch_row,
+    gpu_nodes_per_second,
+    gpu_non_postable_result_summary_json,
+    gpu_pending_present_boards_json_from_snapshot_json,
     gpu_pick_candidate_records_from_i32s,
+    gpu_postable_search_result_json,
     gpu_ranked_candidate_indexes_from_i32s,
+    gpu_ranked_candidates_json_from_i32s,
     gpu_reply_pressure_ranked_roots_from_i32s,
+    gpu_reply_score_workgroups_x,
+    gpu_reply_score_workgroups_y,
+    gpu_reported_latency_ms,
     gpu_scoring_summary_from_i32s,
     gpu_search_board_to_square_codes,
     gpu_search_color_code,
     gpu_search_color_from_code,
+    gpu_search_failure_summary_json,
+    gpu_search_nodes,
     gpu_search_opposite_color,
     gpu_search_owner_code,
     gpu_search_owner_from_code,
@@ -51,14 +94,26 @@ use chronofish_engine::gpu::search::{
     gpu_search_piece_from_code,
     gpu_search_piece_type_code,
     gpu_search_piece_type_from_code,
+    gpu_search_ranking_limit,
+    gpu_search_reply_limit,
     gpu_search_select_candidate_json,
+    gpu_search_select_choice_json,
+    gpu_search_selected_choice_json,
     gpu_search_square_codes_to_board,
+    gpu_search_validation_limit,
+    gpu_snapshot_game_json,
+    gpu_snapshot_with_child_boards_json,
     gpu_source_square_records_for_board,
     gpu_square_record_from_code,
+    gpu_summarize_search_choices_json,
+    gpu_supported_mutation_candidate_indexes_from_i32s,
     gpu_target_square_records_for_board,
     gpu_timeline_sort_order,
     gpu_turn_completion_key_json,
+    gpu_turn_completion_max_moves,
+    gpu_turn_status_json_from_i32s,
     gpu_turn_status_records_i32s_from_snapshot_json,
+    gpu_worker_search_config_json,
     search,
     FrontierSelectionPlan,
     FrontierTuning,
@@ -85,9 +140,15 @@ use chronofish_engine::gpu::search::{
     FRONTIER_BOARD_OFFSET,
     FRONTIER_BOARD_PENDING,
     FRONTIER_HEADER_BOARD_COUNT,
+    FRONTIER_HEADER_DEPTH,
     FRONTIER_HEADER_PENDING_BOARDS,
+    FRONTIER_HEADER_PLAN_LENGTH,
     FRONTIER_HEADER_PRESENT_TIME,
+    FRONTIER_HEADER_SCORE,
+    FRONTIER_HEADER_TERMINAL,
     FRONTIER_HEADER_TURN,
+    FRONTIER_MOVE_STRIDE,
+    FRONTIER_PLAN_OFFSET,
     GPU_BOARD_STRIDE,
     GPU_CANDIDATE_INPUT_HEADER_I32S,
     GPU_CANDIDATE_STRIDE,
@@ -122,6 +183,84 @@ fn bot_search_policy_matches_web_timeout_contract() {
     assert_eq!(bot_worker_search_time_ms(1_000), 900);
     assert_eq!(bot_worker_search_time_ms(20), 1);
 
+    let config: serde_json::Value = serde_json::from_str(
+        &bot_search_config_json(f64::NAN, f64::NAN, f64::NAN, f64::NAN).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(config["targetDepth"], 2);
+    assert_eq!(config["minDepth"], 2);
+    assert_eq!(config["nodes"], 64.0);
+    assert_eq!(config["timeMs"], 10_000.0);
+
+    let config: serde_json::Value =
+        serde_json::from_str(&bot_search_config_json(1.9, 4.0, 0.0, -5.0).unwrap()).unwrap();
+    assert_eq!(config["targetDepth"], 1);
+    assert_eq!(config["minDepth"], 1);
+    assert_eq!(config["nodes"], 1.0);
+    assert_eq!(config["timeMs"], 1.0);
+
+    let worker_config: serde_json::Value =
+        serde_json::from_str(&gpu_worker_search_config_json(4.9, 2.1, 10_000.0).unwrap()).unwrap();
+    assert_eq!(worker_config["requestedDepth"], 4);
+    assert_eq!(worker_config["minimumDepth"], 2);
+    assert_eq!(worker_config["searchTimeMs"], 10_000.0);
+    assert_eq!(worker_config["deadlineDelayMs"], 8_000.0);
+
+    let worker_config: serde_json::Value =
+        serde_json::from_str(&gpu_worker_search_config_json(1.0, 3.0, f64::NAN).unwrap()).unwrap();
+    assert_eq!(worker_config["requestedDepth"], 1);
+    assert_eq!(worker_config["minimumDepth"], 1);
+    assert_eq!(worker_config["searchTimeMs"], 10_000.0);
+    assert!(worker_config["deadlineDelayMs"].is_null());
+
+    assert_eq!(gpu_search_ranking_limit(f64::NAN), 64);
+    assert_eq!(gpu_search_ranking_limit(4.0), 16);
+    assert_eq!(gpu_search_ranking_limit(20.9), 20);
+    assert_eq!(gpu_search_ranking_limit(256.0), 128);
+    assert_eq!(gpu_search_reply_limit(1.0), 4);
+    assert_eq!(gpu_search_reply_limit(8.9), 8);
+    assert_eq!(gpu_search_reply_limit(64.0), 12);
+    assert_eq!(gpu_search_validation_limit(1.0), 8);
+    assert_eq!(gpu_search_validation_limit(20.9), 20);
+    assert_eq!(gpu_search_validation_limit(64.0), 32);
+    assert_eq!(gpu_search_nodes(f64::NAN), 64.0);
+    assert_eq!(gpu_search_nodes(0.0), 0.0);
+    assert_eq!(gpu_search_nodes(12.5), 12.5);
+    assert_eq!(gpu_mutation_candidate_limit(0), 0);
+    assert_eq!(gpu_mutation_candidate_limit(12), 12);
+    assert_eq!(gpu_mutation_candidate_limit(99), 64);
+    assert_eq!(gpu_mutation_candidate_workgroups(0), 0);
+    assert_eq!(gpu_mutation_candidate_workgroups(1), 1);
+    assert_eq!(gpu_mutation_candidate_workgroups(64), 1);
+    assert_eq!(gpu_mutation_candidate_workgroups(65), 2);
+    assert_eq!(gpu_turn_completion_max_moves(0, 0), 4);
+    assert_eq!(gpu_turn_completion_max_moves(1, 3), 7);
+    assert_eq!(gpu_turn_completion_max_moves(12, 3), 12);
+    assert_eq!(gpu_candidate_max_dispatch_workgroups(), 65_535);
+    assert_eq!(gpu_candidate_max_candidates_per_dispatch(), 65_535 * 64);
+    assert_eq!(
+        gpu_candidate_max_candidates_per_batch(128 * 1024 * 1024),
+        (128 * 1024 * 1024) / (GPU_CANDIDATE_STRIDE * std::mem::size_of::<i32>())
+    );
+    assert_eq!(gpu_candidate_max_candidates_per_batch(96), 1);
+    assert_eq!(gpu_candidate_source_batch_size(1000, 32), 31);
+    assert_eq!(gpu_candidate_source_batch_size(1000, 0), 1000);
+    assert_eq!(gpu_candidate_batch_source_count(100, 64, 32), 32);
+    assert_eq!(gpu_candidate_batch_source_count(100, 96, 32), 4);
+    assert_eq!(gpu_candidate_batch_candidate_count(7, 11), 77);
+    assert_eq!(gpu_candidate_score_workgroups(0), 0);
+    assert_eq!(gpu_candidate_score_workgroups(65), 2);
+    assert_eq!(
+        gpu_candidate_score_workgroups(usize::MAX),
+        gpu_candidate_max_dispatch_workgroups()
+    );
+    assert_eq!(gpu_reply_score_workgroups_x(0), 0);
+    assert_eq!(gpu_reply_score_workgroups_x(1), 1);
+    assert_eq!(gpu_reply_score_workgroups_x(17), 2);
+    assert_eq!(gpu_reply_score_workgroups_y(0), 0);
+    assert_eq!(gpu_reply_score_workgroups_y(16), 1);
+    assert_eq!(gpu_reply_score_workgroups_y(33), 3);
+
     assert_eq!(bot_completed_search_depth(2.0, 2, false), 2);
     assert_eq!(bot_completed_search_depth(3.0, 3, false), 0);
     assert_eq!(bot_completed_search_depth(3.0, 3, true), 3);
@@ -129,6 +268,140 @@ fn bot_search_policy_matches_web_timeout_contract() {
     assert_eq!(bot_completed_search_depth(1.0, 1, true), 1);
     assert_eq!(bot_completed_search_depth(1.0, 2, true), 0);
     assert_eq!(bot_completed_search_depth(f64::NAN, 2, true), 0);
+}
+
+#[test]
+fn bot_ranked_choices_match_controller_preference_order() {
+    let request = serde_json::json!({
+        "selectedMoves": [{
+            "from": { "timelineId": 1, "time": 0, "x": 0, "y": 1 },
+            "to": { "timelineId": 1, "time": 1, "x": 0, "y": 2 }
+        }],
+        "results": [
+            {
+                "partitionIndex": 2,
+                "result": {
+                    "status": "ok",
+                    "moves": [{
+                        "from": { "timelineId": 0, "time": 0, "x": 1, "y": 1 },
+                        "to": { "timelineId": 0, "time": 1, "x": 1, "y": 2 }
+                    }],
+                    "score": 90,
+                    "depth": 1,
+                    "nodes": 8,
+                    "gpuSearch": "legacy"
+                }
+            },
+            {
+                "partitionIndex": 1,
+                "result": {
+                    "status": "ok",
+                    "moves": [],
+                    "choices": [
+                        {
+                            "moves": [{
+                                "from": { "timelineId": 1, "time": 0, "x": 0, "y": 1 },
+                                "to": { "timelineId": 1, "time": 1, "x": 0, "y": 2 }
+                            }],
+                            "score": 5,
+                            "depth": 3,
+                            "nodes": 4,
+                            "cpuSearch": "candidate"
+                        },
+                        {
+                            "moves": [{
+                                "from": { "timelineId": 0, "time": 0, "x": 1, "y": 1 },
+                                "to": { "timelineId": 0, "time": 1, "x": 1, "y": 2 }
+                            }],
+                            "score": 1,
+                            "depth": 2,
+                            "nodes": 16
+                        }
+                    ]
+                }
+            }
+        ]
+    });
+
+    let choices: serde_json::Value = serde_json::from_str(
+        &bot_ranked_choices_json(&request.to_string()).expect("ranked choices"),
+    )
+    .expect("ranked choices parse");
+    let choices = choices.as_array().expect("choices array");
+    assert_eq!(choices.len(), 2);
+    assert_eq!(choices[0]["depth"], 3);
+    assert_eq!(choices[0]["selected"], true);
+    assert_eq!(choices[0]["partitionIndex"], 1);
+    assert_eq!(choices[0]["principalVariation"][0], choices[0]["moves"]);
+    assert_eq!(choices[1]["score"], 1);
+    assert_eq!(choices[1]["depth"], 2);
+}
+
+#[test]
+fn bot_select_best_result_prefers_depth_score_nodes_and_legal_moves() {
+    let results = serde_json::json!([
+        {
+            "status": "ok",
+            "moves": [],
+            "score": 1000,
+            "depth": 9,
+            "nodes": 99
+        },
+        {
+            "status": "noLegalTurn",
+            "moves": [{
+                "from": { "timelineId": 0, "time": 0, "x": 0, "y": 0 },
+                "to": { "timelineId": 0, "time": 1, "x": 0, "y": 1 }
+            }],
+            "score": 1000,
+            "depth": 9,
+            "nodes": 99
+        },
+        {
+            "status": "ok",
+            "moves": [{
+                "from": { "timelineId": 0, "time": 0, "x": 0, "y": 0 },
+                "to": { "timelineId": 0, "time": 1, "x": 0, "y": 1 }
+            }],
+            "score": 50,
+            "depth": 2,
+            "nodes": 8,
+            "label": "score-loses-to-depth"
+        },
+        {
+            "status": "ok",
+            "moves": [{
+                "from": { "timelineId": 0, "time": 0, "x": 1, "y": 0 },
+                "to": { "timelineId": 0, "time": 1, "x": 1, "y": 1 }
+            }],
+            "score": 3,
+            "depth": 3,
+            "nodes": 10,
+            "label": "nodes-wins"
+        },
+        {
+            "status": "ok",
+            "moves": [{
+                "from": { "timelineId": 0, "time": 0, "x": 2, "y": 0 },
+                "to": { "timelineId": 0, "time": 1, "x": 2, "y": 1 }
+            }],
+            "score": 3,
+            "depth": 3,
+            "nodes": 4,
+            "label": "same-depth-score"
+        }
+    ]);
+
+    let selected: serde_json::Value = serde_json::from_str(
+        &bot_select_best_result_json(&results.to_string()).expect("selected result"),
+    )
+    .expect("selected result parse");
+    assert_eq!(selected["label"], "nodes-wins");
+
+    let none: serde_json::Value =
+        serde_json::from_str(&bot_select_best_result_json("[]").expect("empty selection"))
+            .expect("empty selection parse");
+    assert!(none.is_null());
 }
 
 #[test]
@@ -333,6 +606,89 @@ fn gpu_search_selection_policy_matches_web_worker_contract() {
 }
 
 #[test]
+fn gpu_search_choice_selection_normalizes_web_search_choices() {
+    let response = gpu_search_select_choice_json(
+        r#"{
+            "temperature": 0,
+            "randomSeed": 7,
+            "candidates": [
+                {
+                    "score": 50,
+                    "move": {
+                        "from": { "timelineId": 1, "time": 0, "x": 1, "y": 1 },
+                        "to": { "timelineId": 1, "time": 1, "x": 1, "y": 2 }
+                    }
+                },
+                {
+                    "score": 75,
+                    "moves": [{
+                        "from": { "timelineId": 2, "time": 0, "x": 2, "y": 2 },
+                        "to": { "timelineId": 2, "time": 1, "x": 2, "y": 3 }
+                    }]
+                },
+                { "score": 100, "moves": [] }
+            ]
+        }"#,
+    )
+    .expect("choice selection response");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("choice selection response JSON");
+
+    assert_eq!(value["selectedIndex"], 1);
+    assert_eq!(value["rankedIndexes"], serde_json::json!([1, 0]));
+}
+
+#[test]
+fn gpu_search_selected_choice_attaches_engine_summarized_choices() {
+    let response = gpu_search_selected_choice_json(
+        r#"{
+            "temperature": 0,
+            "randomSeed": 7,
+            "candidates": [
+                {
+                    "score": 50,
+                    "depth": 2,
+                    "gpuSearch": "first",
+                    "move": {
+                        "from": { "timelineId": 1, "time": 0, "x": 1, "y": 1 },
+                        "to": { "timelineId": 1, "time": 1, "x": 1, "y": 2 }
+                    }
+                },
+                {
+                    "score": 75,
+                    "depth": 3,
+                    "gpuSearch": "selected",
+                    "moves": [{
+                        "from": { "timelineId": 2, "time": 0, "x": 2, "y": 2 },
+                        "to": { "timelineId": 2, "time": 1, "x": 2, "y": 3 }
+                    }]
+                },
+                { "score": 100, "gpuSearch": "unsupported", "moves": [] }
+            ]
+        }"#,
+    )
+    .expect("selected choice response");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("selected choice response JSON");
+
+    assert_eq!(value["score"], 75);
+    assert_eq!(value["gpuSearch"], "selected");
+    assert_eq!(value["choices"].as_array().map(Vec::len), Some(2));
+    assert_eq!(value["choices"][0]["rank"], 1);
+    assert_eq!(value["choices"][0]["score"], 75);
+    assert_eq!(value["choices"][1]["rank"], 2);
+    assert_eq!(value["choices"][1]["score"], 50);
+    assert_eq!(
+        value["choices"][0]["moves"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    let empty = gpu_search_selected_choice_json(r#"{ "candidates": [] }"#)
+        .expect("empty selected choice response");
+    assert_eq!(empty, "null");
+}
+
+#[test]
 fn gpu_turn_status_records_match_web_worker_contract() {
     let records = gpu_turn_status_records_i32s_from_snapshot_json(
         r#"{
@@ -368,6 +724,74 @@ fn gpu_turn_status_records_match_web_worker_contract() {
     )
     .expect("fallback turn-status records");
     assert_eq!(fallback, vec![0, 0, 0, 1]);
+}
+
+#[test]
+fn gpu_turn_status_json_matches_web_worker_contract() {
+    let response = gpu_turn_status_json_from_i32s(&[0, 1, 6, 2]).expect("turn-status JSON");
+    let value: serde_json::Value = serde_json::from_str(&response).expect("turn-status parses");
+    assert_eq!(value["complete"], true);
+    assert_eq!(value["nextTurn"], "black");
+    assert_eq!(value["presentTime"], 6);
+    assert_eq!(value["pendingPresentBoardCount"], 2);
+
+    let fallback = gpu_turn_status_json_from_i32s(&[0, 2, 6, 2]).expect("fallback color");
+    let fallback_value: serde_json::Value =
+        serde_json::from_str(&fallback).expect("fallback turn-status parses");
+    assert_eq!(fallback_value["nextTurn"], "white");
+}
+
+#[test]
+fn gpu_pending_present_boards_json_matches_web_worker_contract() {
+    let json = gpu_pending_present_boards_json_from_snapshot_json(
+        r#"{
+            "format": "json",
+            "turn": "white",
+            "timelines": [
+                {
+                    "id": -1,
+                    "row": 0,
+                    "owner": "white",
+                    "boards": [
+                        { "time": 3, "sideToMove": "white", "castling": 0, "enPassant": null, "origin": null, "board": [] }
+                    ]
+                },
+                {
+                    "id": 0,
+                    "row": 1,
+                    "owner": "white",
+                    "boards": [
+                        { "time": 3, "sideToMove": "white", "castling": 0, "enPassant": null, "origin": null, "board": [] }
+                    ]
+                },
+                {
+                    "id": 1,
+                    "row": 2,
+                    "owner": "white",
+                    "boards": [
+                        { "time": 4, "sideToMove": "white", "castling": 0, "enPassant": null, "origin": null, "board": [] }
+                    ]
+                },
+                {
+                    "id": 2,
+                    "row": 3,
+                    "owner": "black",
+                    "boards": [
+                        { "time": 3, "sideToMove": "black", "castling": 0, "enPassant": null, "origin": null, "board": [] }
+                    ]
+                }
+            ]
+        }"#,
+    )
+    .expect("pending present boards");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("pending JSON parses");
+    assert_eq!(
+        value,
+        serde_json::json!([
+            { "timelineId": -1, "time": 3 },
+            { "timelineId": 0, "time": 3 }
+        ])
+    );
 }
 
 #[test]
@@ -415,6 +839,17 @@ fn gpu_ranked_candidate_indexes_match_web_worker_contract() {
         gpu_ranked_candidate_indexes_from_i32s(&request).expect("unfiltered ranked indexes"),
         vec![1, 4]
     );
+    let ranked_json =
+        gpu_ranked_candidates_json_from_i32s(&request).expect("ranked candidate JSON");
+    let ranked: serde_json::Value =
+        serde_json::from_str(&ranked_json).expect("ranked candidate JSON parses");
+    assert_eq!(ranked.as_array().map(Vec::len), Some(2));
+    assert_eq!(ranked[0]["index"], 1);
+    assert_eq!(ranked[0]["score"], 30);
+    assert_eq!(ranked[0]["move"]["from"]["timelineId"], 2);
+    assert_eq!(ranked[0]["move"]["from"]["time"], 7);
+    assert_eq!(ranked[0]["move"]["to"]["timelineId"], 2);
+    assert_eq!(ranked[0]["move"]["to"]["time"], 8);
 }
 
 #[test]
@@ -449,6 +884,47 @@ fn gpu_mutation_summary_matches_web_worker_contract() {
     assert_eq!(
         gpu_mutation_summary_from_i32s(&[3, 1, 3, 4, 1, 1]),
         "1:3,3:2,4:1"
+    );
+}
+
+#[test]
+fn gpu_supported_mutation_candidates_match_web_worker_contract() {
+    let request = [
+        5,
+        0,
+        1,
+        0,
+        1,
+        GPU_MUTATION_STATUS_OK,
+        0,
+        GPU_MUTATION_STATUS_OK,
+        1,
+        GPU_MUTATION_STATUS_BRANCH_OK,
+        1,
+        GPU_MUTATION_STATUS_ROYAL_CAPTURE,
+        1,
+    ];
+    assert_eq!(
+        gpu_supported_mutation_candidate_indexes_from_i32s(&request).expect("supported indexes"),
+        vec![2, 3, 4]
+    );
+
+    let mut limited = request;
+    limited[1] = 2;
+    assert_eq!(
+        gpu_supported_mutation_candidate_indexes_from_i32s(&limited).expect("limited indexes"),
+        vec![2, 3]
+    );
+    let mut status_only = request;
+    status_only[2] = 0;
+    assert_eq!(
+        gpu_supported_mutation_candidate_indexes_from_i32s(&status_only).expect("status indexes"),
+        vec![1, 2, 3, 4]
+    );
+
+    assert!(
+        gpu_supported_mutation_candidate_indexes_from_i32s(&[2, 0, GPU_MUTATION_STATUS_OK])
+            .is_err()
     );
 }
 
@@ -507,6 +983,313 @@ fn gpu_choice_agreement_matches_web_worker_contract() {
     let empty_value: serde_json::Value =
         serde_json::from_str(&empty).expect("empty choice agreement JSON");
     assert_eq!(empty_value["agreements"], serde_json::json!([0]));
+}
+
+#[test]
+fn gpu_choice_agreement_choices_normalizes_web_search_choices() {
+    let response = gpu_choice_agreement_choices_json(
+        r#"{
+            "selected": {
+                "move": {
+                    "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                    "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                }
+            },
+            "choices": [
+                {
+                    "move": {
+                        "from": { "timelineId": 9, "time": 9, "x": 9, "y": 9 },
+                        "to": { "timelineId": 8, "time": 8, "x": 8, "y": 8 }
+                    }
+                },
+                {
+                    "moves": [{
+                        "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                        "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                    }]
+                }
+            ],
+            "limits": [1, 2]
+        }"#,
+    )
+    .expect("choice agreement choices response");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("choice agreement choices JSON");
+    assert_eq!(value["agreements"], serde_json::json!([0, 1]));
+}
+
+#[test]
+fn gpu_move_plan_key_matches_web_worker_contract() {
+    assert_eq!(
+        gpu_move_plan_key_json(
+            r#"[
+                {
+                    "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                    "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                },
+                {
+                    "from": { "timelineId": -1, "time": 0, "x": 2, "y": 3 },
+                    "to": { "timelineId": -1, "time": 1, "x": 2, "y": 4 }
+                }
+            ]"#,
+        )
+        .expect("move plan key"),
+        "1:2:3:4:5:6:7:8/-1:0:2:3:-1:1:2:4"
+    );
+    assert_eq!(
+        gpu_move_plan_key_json("[]").expect("empty move plan key"),
+        ""
+    );
+}
+
+#[test]
+fn gpu_frontier_plan_decoder_matches_web_worker_contract() {
+    let mut words = vec![0; FRONTIER_PLAN_OFFSET + FRONTIER_MOVE_STRIDE * 2 + 4];
+    let offset = FRONTIER_PLAN_OFFSET + 4;
+    words[offset..offset + FRONTIER_MOVE_STRIDE].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    words[offset + FRONTIER_MOVE_STRIDE..offset + FRONTIER_MOVE_STRIDE * 2]
+        .copy_from_slice(&[-1, 0, 2, 3, -1, 1, 2, 4]);
+
+    let value: serde_json::Value = serde_json::from_str(
+        &gpu_frontier_plan_json_from_i32s(&words, offset, 2).expect("frontier plan JSON"),
+    )
+    .expect("frontier plan JSON parses");
+
+    assert_eq!(value[0]["from"]["timelineId"], 1);
+    assert_eq!(value[0]["to"]["y"], 8);
+    assert_eq!(value[1]["from"]["timelineId"], -1);
+    assert_eq!(value[1]["to"]["time"], 1);
+    assert!(gpu_frontier_plan_json_from_i32s(&words, words.len() - 1, 2)
+        .expect_err("truncated plan should fail")
+        .contains("truncated"));
+}
+
+#[test]
+fn gpu_frontier_choices_rank_dedupe_and_decode_plans() {
+    let stride = frontier_state_stride(1);
+    let mut words = vec![0; stride * 3];
+    let first = 0;
+    words[first + FRONTIER_HEADER_SCORE] = 10;
+    words[first + FRONTIER_HEADER_DEPTH] = 2;
+    words[first + FRONTIER_HEADER_PLAN_LENGTH] = 1;
+    words[first + FRONTIER_PLAN_OFFSET..first + FRONTIER_PLAN_OFFSET + FRONTIER_MOVE_STRIDE]
+        .copy_from_slice(&[1, 0, 0, 1, 1, 1, 0, 2]);
+
+    let second = stride;
+    words[second + FRONTIER_HEADER_SCORE] = 40;
+    words[second + FRONTIER_HEADER_DEPTH] = 3;
+    words[second + FRONTIER_HEADER_TERMINAL] = 1;
+    words[second + FRONTIER_HEADER_PLAN_LENGTH] = 1;
+    words[second + FRONTIER_PLAN_OFFSET..second + FRONTIER_PLAN_OFFSET + FRONTIER_MOVE_STRIDE]
+        .copy_from_slice(&[2, 0, 3, 4, 2, 1, 3, 5]);
+
+    let duplicate = stride * 2;
+    words[duplicate + FRONTIER_HEADER_SCORE] = 80;
+    words[duplicate + FRONTIER_HEADER_DEPTH] = 3;
+    words[duplicate + FRONTIER_HEADER_PLAN_LENGTH] = 1;
+    words
+        [duplicate + FRONTIER_PLAN_OFFSET..duplicate + FRONTIER_PLAN_OFFSET + FRONTIER_MOVE_STRIDE]
+        .copy_from_slice(&[2, 0, 3, 4, 2, 1, 3, 5]);
+
+    let choices: serde_json::Value = serde_json::from_str(
+        &gpu_frontier_choices_json_from_i32s(&words, 1, 3, 4, "resident-frontier", 12)
+            .expect("frontier choices JSON"),
+    )
+    .expect("frontier choices parse");
+
+    let choices = choices.as_array().expect("choices array");
+    assert_eq!(choices.len(), 2);
+    assert_eq!(choices[0]["score"], 80);
+    assert_eq!(choices[0]["depth"], 3);
+    assert_eq!(choices[0]["gpuTerminal"], false);
+    assert_eq!(choices[0]["moves"][0]["from"]["timelineId"], 2);
+    assert_eq!(choices[0]["gpuSearch"], "resident-frontier");
+    assert_eq!(choices[1]["score"], 10);
+    assert_eq!(choices[1]["depth"], 2);
+}
+
+#[test]
+fn gpu_non_postable_result_summary_matches_web_worker_contract() {
+    assert_eq!(
+        gpu_non_postable_result_summary_json(
+            r#"{
+                "status": "incompleteTurn",
+                "moves": [],
+                "incompleteMoves": [1, 2],
+                "pendingPresentBoardCount": 3
+            }"#,
+        )
+        .expect("non-postable summary"),
+        "status=incompleteTurn, moves=0, incomplete=2, pending=3"
+    );
+    assert_eq!(
+        gpu_non_postable_result_summary_json("null").expect("null summary"),
+        "status=unknown, moves=0, incomplete=0, pending=unknown"
+    );
+}
+
+#[test]
+fn gpu_postable_search_result_matches_web_worker_contract() {
+    assert!(
+        gpu_postable_search_result_json(r#"{ "status": "ok", "moves": [1] }"#)
+            .expect("postable result")
+    );
+    assert!(
+        !gpu_postable_search_result_json(r#"{ "status": "ok", "moves": [] }"#)
+            .expect("empty moves")
+    );
+    assert!(
+        !gpu_postable_search_result_json(r#"{ "status": "incompleteTurn", "moves": [1] }"#)
+            .expect("wrong status")
+    );
+    assert!(!gpu_postable_search_result_json("null").expect("null result"));
+}
+
+#[test]
+fn gpu_completed_turn_choice_matches_web_worker_contract() {
+    let response = gpu_completed_turn_choice_json(
+        r#"{
+            "result": {
+                "status": "ok",
+                "moves": [],
+                "score": 42,
+                "depth": 2,
+                "nodes": 9,
+                "gpuSearch": "old-search",
+                "principalVariation": [
+                    [],
+                    [{
+                        "from": { "timelineId": 8, "time": 7, "x": 6, "y": 5 },
+                        "to": { "timelineId": 4, "time": 3, "x": 2, "y": 1 }
+                    }]
+                ],
+                "choices": [
+                    {
+                        "rank": 3,
+                        "score": 10,
+                        "moves": [{
+                            "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                            "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                        }]
+                    },
+                    {
+                        "rank": 4,
+                        "score": 5,
+                        "moves": [{
+                            "from": { "timelineId": -1, "time": 0, "x": 2, "y": 3 },
+                            "to": { "timelineId": -1, "time": 1, "x": 2, "y": 4 }
+                        }]
+                    }
+                ]
+            },
+            "moves": [{
+                "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+            }],
+            "gpuSearch": "completed-search"
+        }"#,
+    )
+    .expect("completed-turn choice response");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("completed-turn choice JSON");
+    assert_eq!(value["moves"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value["gpuSearch"], "completed-search");
+    assert_eq!(
+        value["principalVariation"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(value["choices"].as_array().map(Vec::len), Some(2));
+    assert_eq!(value["choices"][0]["rank"], 1);
+    assert_eq!(value["choices"][0]["score"], 42);
+    assert_eq!(value["choices"][0]["gpuSearch"], "completed-search");
+    assert_eq!(value["choices"][1]["rank"], 4);
+}
+
+#[test]
+fn gpu_summarize_search_choices_matches_web_worker_contract() {
+    let response = gpu_summarize_search_choices_json(
+        r#"[
+            {
+                "score": 12,
+                "move": {
+                    "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                    "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                },
+                "depth": 2,
+                "nodes": 99,
+                "gpuSearch": "single",
+                "gpuTerminal": true,
+                "tactical": true
+            },
+            {
+                "score": 5,
+                "moves": [{
+                    "from": { "timelineId": -1, "time": 0, "x": 2, "y": 3 },
+                    "to": { "timelineId": -1, "time": 1, "x": 2, "y": 4 }
+                }],
+                "principalVariation": []
+            }
+        ]"#,
+    )
+    .expect("search choice summary");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("search choice summary JSON");
+    assert_eq!(value.as_array().map(Vec::len), Some(2));
+    assert_eq!(value[0]["rank"], 1);
+    assert_eq!(value[0]["moves"].as_array().map(Vec::len), Some(1));
+    assert_eq!(value[0]["gpuSearch"], "single");
+    assert_eq!(value[0]["gpuTerminal"], true);
+    assert_eq!(value[0]["tactical"], true);
+    assert_eq!(value[1]["rank"], 2);
+    assert_eq!(
+        value[1]["principalVariation"].as_array().map(Vec::len),
+        Some(0)
+    );
+}
+
+#[test]
+fn gpu_search_failure_summary_matches_web_worker_contract() {
+    let mut board_a = vec![vec![serde_json::Value::Null; 8]; 8];
+    board_a[0][0] = serde_json::json!({"type": "rook", "color": "black"});
+    let mut board_b = vec![vec![serde_json::Value::Null; 8]; 8];
+    board_b[7][7] = serde_json::json!({"type": "king", "color": "white"});
+    let snapshot = serde_json::json!({
+        "turn": "white",
+        "timelines": [
+            {
+                "id": 2,
+                "row": 2,
+                "owner": "white",
+                "boards": [{
+                    "time": 1,
+                    "sideToMove": "white",
+                    "castling": 0,
+                    "enPassant": null,
+                    "board": board_b
+                }]
+            },
+            {
+                "id": -1,
+                "row": -1,
+                "owner": "black",
+                "boards": [{
+                    "time": 4,
+                    "sideToMove": "black",
+                    "castling": 9,
+                    "enPassant": {"x": 2, "y": 3, "capturedX": 2, "capturedY": 4},
+                    "board": board_a
+                }]
+            }
+        ],
+        "nextTimelineId": 3,
+        "nextBlackTimelineId": -2
+    })
+    .to_string();
+
+    assert_eq!(
+        gpu_search_failure_summary_json(&snapshot).expect("failure summary"),
+        "sources=2, targets=128, pending=1, timelines=2"
+    );
 }
 
 #[test]
@@ -1005,6 +1788,124 @@ fn gpu_candidate_inputs_from_timelines_match_web_candidate_input_contract() {
 }
 
 #[test]
+fn gpu_snapshot_game_json_matches_web_validation_snapshot_contract() {
+    let game = gpu_snapshot_game_json(
+        r#"{
+            "turn": "white",
+            "timelines": [{
+                "id": 2,
+                "row": 1,
+                "label": "Main",
+                "owner": "white",
+                "boards": [{
+                    "time": 3,
+                    "sideToMove": "black",
+                    "castling": 9,
+                    "enPassant": {"x": 2, "y": 3, "capturedX": 2, "capturedY": 4},
+                    "origin": {"type": "move"},
+                    "squares": [262]
+                }]
+            }],
+            "nextTimelineId": 4,
+            "nextBlackTimelineId": -2,
+            "royalCaptureBy": null
+        }"#,
+    )
+    .expect("game snapshot JSON");
+    let value: serde_json::Value = serde_json::from_str(&game).expect("game snapshot parses");
+    assert_eq!(value["turn"], "white");
+    assert_eq!(value["nextTimelineId"], 4);
+    assert_eq!(value["nextBlackTimelineId"], -2);
+    assert_eq!(value["checkedRoyals"], serde_json::json!([]));
+    assert_eq!(value["timelines"][0]["label"], "Main");
+    assert_eq!(value["timelines"][0]["boards"][0]["time"], 3);
+    assert_eq!(value["timelines"][0]["boards"][0]["sideToMove"], "black");
+    assert_eq!(
+        value["timelines"][0]["boards"][0]["board"][0][0]["type"],
+        "rook"
+    );
+    assert_eq!(
+        value["timelines"][0]["boards"][0]["board"][0][0]["color"],
+        "black"
+    );
+    assert_eq!(
+        value["timelines"][0]["boards"][0]["board"][0][1],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn gpu_snapshot_with_child_boards_json_matches_web_branch_contract() {
+    let mut records = vec![0; GPU_MUTATION_CHILD_STRIDE];
+    records[1] = 0;
+    records[2] = 4;
+    records[3] = 1;
+    records[5] = -1;
+    records[6] = -1;
+    records[7] = -1;
+    records[8] = -1;
+    records[9] = 1;
+    let branch = GPU_MUTATION_BOARD_STRIDE;
+    records[branch + 1] = 0;
+    records[branch + 2] = 3;
+    records[branch + 3] = 1;
+    records[branch + 5] = -1;
+    records[branch + 6] = -1;
+    records[branch + 7] = -1;
+    records[branch + 8] = -1;
+    records[branch + 9] = 1;
+
+    let request = serde_json::json!({
+        "snapshot": {
+            "format": "engine-gpu-snapshot-v1",
+            "turn": "white",
+            "nextTimelineId": 1,
+            "nextBlackTimelineId": -1,
+            "royalCaptureBy": null,
+            "timelines": [{
+                "id": 0,
+                "row": 0,
+                "owner": "neutral",
+                "boards": [
+                    {"timelineIndex": 0, "timelineId": 0, "time": 2, "sideToMove": "white", "castling": 0, "enPassant": null, "latest": false, "originKind": 0, "squares": {"0": 6}},
+                    {"timelineIndex": 0, "timelineId": 0, "time": 3, "sideToMove": "white", "castling": 0, "enPassant": null, "latest": true, "originKind": 0, "squares": {"0": 1}}
+                ]
+            }]
+        },
+        "childBoardRecords": records,
+        "mutationStatus": GPU_MUTATION_STATUS_BRANCH_OK,
+        "move": {
+            "from": {"timelineId": 0, "time": 3, "x": 3, "y": 7},
+            "to": {"timelineId": 0, "time": 2, "x": 3, "y": 5}
+        },
+        "advanceTurn": true
+    });
+    let output = gpu_snapshot_with_child_boards_json(&request.to_string()).expect("child snapshot");
+    let value: serde_json::Value = serde_json::from_str(&output).expect("child snapshot JSON");
+
+    assert_eq!(value["turn"], "black");
+    assert_eq!(value["nextTimelineId"], 2);
+    assert_eq!(value["timelines"].as_array().unwrap().len(), 2);
+    assert_eq!(value["timelines"][0]["boards"].as_array().unwrap().len(), 3);
+    assert_eq!(value["timelines"][0]["boards"][0]["latest"], false);
+    assert_eq!(value["timelines"][0]["boards"][0]["squares"][0], 6);
+    assert_eq!(value["timelines"][0]["boards"][2]["time"], 4);
+    assert_eq!(
+        value["timelines"][0]["boards"][2]["origin"]["type"],
+        "source-advance"
+    );
+    assert_eq!(value["timelines"][1]["id"], 1);
+    assert_eq!(value["timelines"][1]["row"], 1);
+    assert_eq!(value["timelines"][1]["owner"], "white");
+    assert_eq!(value["timelines"][1]["boards"][0]["time"], 3);
+    assert_eq!(
+        value["timelines"][1]["boards"][0]["origin"]["type"],
+        "branch"
+    );
+    assert_eq!(value["boards"].as_array().unwrap().len(), 4);
+}
+
+#[test]
 fn gpu_candidate_inputs_from_snapshot_json_matches_web_candidate_input_contract() {
     let mut board_a = vec![vec![serde_json::Value::Null; 8]; 8];
     board_a[0][0] = serde_json::json!({"type": "rook", "color": "black"});
@@ -1058,6 +1959,12 @@ fn gpu_candidate_inputs_from_snapshot_json_matches_web_candidate_input_contract(
     assert_eq!(json["sourceCount"], 2);
     assert_eq!(json["targetCount"], 128);
     assert_eq!(json["sourceMeta"][0]["timelineId"], -1);
+    let meta_json: serde_json::Value = serde_json::from_str(
+        &gpu_candidate_input_meta_json_from_i32s(&words).expect("candidate input metadata JSON"),
+    )
+    .expect("candidate input metadata JSON parses");
+    assert_eq!(meta_json["sourceMeta"], json["sourceMeta"]);
+    assert_eq!(meta_json["targetMeta"], json["targetMeta"]);
     assert_eq!(words[0], 2);
     assert_eq!(words[1], 128);
     assert_eq!(words[2], 2);
@@ -1131,6 +2038,16 @@ fn frontier_tuning_derivation_matches_browser_gpu_device_math() {
     assert_eq!(gpu_frontier_next_power_of_two(0), 1);
     assert_eq!(gpu_frontier_next_power_of_two(1), 1);
     assert_eq!(gpu_frontier_next_power_of_two(300), 512);
+    assert_eq!(frontier_expand_workgroups(0, 128), 0);
+    assert_eq!(frontier_expand_workgroups(129, 128), 2);
+    assert_eq!(frontier_selection_workgroups(256, 64), 4);
+    assert_eq!(frontier_selection_workgroups(7, 0), 7);
+    assert_eq!(frontier_materialize_workgroups(512, 128), 4);
+    assert_eq!(frontier_materialize_workgroups(9, 0), 9);
+    assert_eq!(frontier_minimax_workgroups(0), 0);
+    assert_eq!(frontier_minimax_workgroups(65), 2);
+    assert_eq!(frontier_policy_workgroups(0), 0);
+    assert_eq!(frontier_policy_workgroups(65), 2);
 
     assert_eq!(frontier_state_bytes(1), 2_488);
     assert_eq!(
@@ -1213,6 +2130,43 @@ fn frontier_cycle_policy_matches_web_worker_orchestration() {
     assert_eq!(frontier_per_parent_limit(8), 2);
     assert_eq!(frontier_per_parent_limit(112), 14);
     assert_eq!(frontier_per_parent_limit(512), 16);
+
+    assert_eq!(frontier_next_active_state_limit(512, 1, 2), 2);
+    assert_eq!(frontier_next_active_state_limit(512, 32, 16), 512);
+    assert_eq!(frontier_next_active_state_limit(128, 128, 16), 128);
+    assert_eq!(frontier_next_active_state_limit(128, 32, 0), 32);
+
+    assert_eq!(frontier_cycle_state_count(512, 0), 1);
+    assert_eq!(frontier_cycle_state_count(512, 32), 32);
+    assert_eq!(frontier_cycle_state_count(128, 512), 128);
+
+    assert_eq!(frontier_neural_cache_hit_rate(2.0, 3.0), 0.4);
+    assert_eq!(frontier_neural_cache_hit_rate(1.0, 2.0), 0.333);
+    assert_eq!(frontier_neural_cache_hit_rate(0.0, 0.0), 0.0);
+
+    assert_eq!(frontier_expansion_source_scan_limit(64, 256), 256);
+    assert_eq!(frontier_expansion_source_scan_limit(512, 128), 512);
+    assert_eq!(frontier_expansion_source_scan_limit(0, 0), 1);
+    assert_eq!(frontier_expansion_source_scan_count(256, 1024, 512), 256);
+    assert_eq!(frontier_expansion_source_scan_count(256, 1024, 900), 124);
+    assert_eq!(frontier_expansion_source_scan_count(256, 1024, 1200), 0);
+
+    assert_eq!(frontier_minimax_bounded_depth(6, 4), 4);
+    assert_eq!(frontier_minimax_bounded_depth(2, 4), 2);
+
+    assert_eq!(gpu_full_search_reported_depth(1), 1);
+    assert_eq!(gpu_full_search_reported_depth(2), 2);
+    assert_eq!(gpu_full_search_reported_depth(5), 2);
+
+    assert_eq!(gpu_diagnostic_rate(12.0, 100.0), 0.12);
+    assert_eq!(gpu_diagnostic_rate(1.0, 3.0), 0.333);
+    assert_eq!(gpu_diagnostic_rate(1.0, 0.0), 0.0);
+    assert_eq!(gpu_effective_branching_factor(7.0, 3.0), 2.33);
+    assert_eq!(gpu_effective_branching_factor(7.0, 0.0), 7.0);
+    assert_eq!(gpu_reported_latency_ms(12.4), 12.0);
+    assert_eq!(gpu_reported_latency_ms(-5.0), 0.0);
+    assert_eq!(gpu_nodes_per_second(1000.0, 250.0), 4000.0);
+    assert_eq!(gpu_nodes_per_second(1000.0, 0.0), 1000.0);
 }
 
 #[test]

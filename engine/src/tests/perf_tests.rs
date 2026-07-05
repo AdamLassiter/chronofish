@@ -4,7 +4,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{cpu::{CHECKMATE_SCORE, EvalWeights, EvaluationLimits, EvaluationStats, SearchContext, SearchOptions, SearchStats}, *};
+use crate::{
+    cpu::{
+        EvalWeights,
+        EvaluationLimits,
+        EvaluationStats,
+        SearchContext,
+        SearchOptions,
+        SearchStats,
+        CHECKMATE_SCORE,
+    },
+    *,
+};
 
 // Run with:
 // CHRONOFISH_PERF_REPS=20 cargo test -p chronofish-engine perf_tests:: --release -- --ignored --nocapture --test-threads=1

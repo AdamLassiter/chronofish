@@ -1,4 +1,7 @@
-use std::collections::BTreeSet;
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{cpu::EvalWeights, wasm_api::parse_game_snapshot, Game};
 
@@ -11,6 +14,26 @@ pub const MAX_CPU_TRAINING_CANDIDATES: usize = 256;
 pub const MAX_CPU_TRAINING_ELITES: usize = 4;
 
 pub type CpuParameters = Vec<(String, i32)>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CpuScoredCandidate {
+    pub parameters: CpuParameters,
+    pub score: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CpuFitnessEntry {
+    pub key: String,
+    pub score: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CpuCandidateScoringPlan {
+    pub unique_candidates: Vec<CpuParameters>,
+    pub cached_scores: Vec<CpuScoredCandidate>,
+    pub uncached_candidates: Vec<CpuParameters>,
+    pub cache_hits: usize,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +177,17 @@ pub fn cpu_training_candidate_count(cpu_candidates: usize) -> usize {
     cpu_candidates.clamp(1, MAX_CPU_TRAINING_CANDIDATES)
 }
 
+pub fn cpu_screening_game_count(
+    sample_game_count: usize,
+    cpu_screening_opponent_variants: usize,
+) -> usize {
+    if sample_game_count == 0 {
+        0
+    } else {
+        sample_game_count.min(cpu_screening_opponent_variants.max(1))
+    }
+}
+
 pub fn cpu_training_finalist_target(
     population_len: usize,
     cpu_finalists: usize,
@@ -173,6 +207,106 @@ pub fn cpu_training_finalist_target(
 
 pub fn cpu_training_elite_count(cpu_finalists: usize) -> usize {
     cpu_finalists.clamp(1, MAX_CPU_TRAINING_ELITES)
+}
+
+pub fn cpu_training_candidate_improved(
+    candidate_score: f64,
+    baseline_score: f64,
+    best_candidate_score: f64,
+) -> bool {
+    candidate_score.is_finite()
+        && candidate_score > baseline_score
+        && candidate_score > best_candidate_score
+}
+
+pub fn cpu_training_next_stagnation(generations_without_candidate: usize, improved: bool) -> usize {
+    if improved {
+        0
+    } else {
+        generations_without_candidate.saturating_add(1)
+    }
+}
+
+pub fn cpu_training_should_continue(
+    now_ms: f64,
+    deadline_at_ms: f64,
+    generations_without_candidate: usize,
+    max_generations_without_candidate: usize,
+) -> bool {
+    now_ms < deadline_at_ms && generations_without_candidate < max_generations_without_candidate
+}
+
+pub fn rank_cpu_scored_candidates(
+    mut candidates: Vec<CpuScoredCandidate>,
+) -> Vec<CpuScoredCandidate> {
+    candidates.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+    });
+    candidates
+}
+
+pub fn cpu_training_elites(
+    candidates: &[CpuScoredCandidate],
+    baseline: &CpuParameters,
+    cpu_finalists: usize,
+) -> Vec<CpuParameters> {
+    let baseline_key = cpu_parameters_key(baseline);
+    rank_cpu_scored_candidates(candidates.to_vec())
+        .into_iter()
+        .filter(|entry| cpu_parameters_key(&entry.parameters) != baseline_key)
+        .take(cpu_training_elite_count(cpu_finalists))
+        .map(|entry| entry.parameters)
+        .collect()
+}
+
+pub fn cpu_training_finalist_candidates(
+    baseline: &CpuParameters,
+    screened: &[CpuScoredCandidate],
+    target: usize,
+) -> Vec<CpuParameters> {
+    let mut candidates = Vec::with_capacity(target.saturating_add(1));
+    candidates.push(baseline.clone());
+    candidates.extend(
+        rank_cpu_scored_candidates(screened.to_vec())
+            .into_iter()
+            .take(target)
+            .map(|entry| entry.parameters),
+    );
+    unique_cpu_parameters(&candidates)
+}
+
+pub fn cpu_candidate_scoring_plan(
+    candidates: &[CpuParameters],
+    fitness: &[CpuFitnessEntry],
+) -> CpuCandidateScoringPlan {
+    let unique_candidates = unique_cpu_parameters(candidates);
+    let fitness_by_key = fitness
+        .iter()
+        .map(|entry| (entry.key.clone(), entry.score))
+        .collect::<BTreeMap<_, _>>();
+    let mut cached_scores = Vec::new();
+    let mut uncached_candidates = Vec::new();
+    for parameters in &unique_candidates {
+        let key = cpu_parameters_key(parameters);
+        if let Some(score) = fitness_by_key.get(&key) {
+            cached_scores.push(CpuScoredCandidate {
+                parameters: parameters.clone(),
+                score: *score,
+            });
+        } else {
+            uncached_candidates.push(parameters.clone());
+        }
+    }
+    let cache_hits = cached_scores.len();
+    CpuCandidateScoringPlan {
+        unique_candidates,
+        cached_scores,
+        uncached_candidates,
+        cache_hits,
+    }
 }
 
 pub fn breed_cpu_population(
@@ -314,6 +448,25 @@ pub fn cpu_match_turn_time_ms(
     available.clamp(1, cpu_training_time_ms.max(1))
 }
 
+pub fn cpu_paired_match_deadline_ms(
+    now_ms: f64,
+    deadline_at_ms: f64,
+    total_matches: usize,
+    completed_matches: usize,
+) -> f64 {
+    let remaining_matches = total_matches.saturating_sub(completed_matches).max(1) as f64;
+    let slice_ms = ((deadline_at_ms - now_ms) / remaining_matches).max(1.0);
+    deadline_at_ms.min(now_ms + slice_ms)
+}
+
+pub fn cpu_paired_match_average_score(score: f64, completed_matches: usize) -> f64 {
+    if completed_matches == 0 {
+        f64::NAN
+    } else {
+        score / completed_matches as f64
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn cpu_training_position_target(
     samples: usize,
@@ -405,6 +558,23 @@ pub fn cpu_search_label_weight(training_mode_count: usize) -> f32 {
     } else {
         1.0
     }
+}
+
+pub fn cpu_reference_comparison_count(game_count: usize, reference_count: usize) -> usize {
+    game_count.min(if reference_count == 0 {
+        game_count
+    } else {
+        reference_count
+    })
+}
+
+pub fn cpu_reference_should_continue(
+    now_ms: f64,
+    deadline_at_ms: f64,
+    compared: usize,
+    max_match_plies: usize,
+) -> bool {
+    now_ms < deadline_at_ms && compared < max_match_plies
 }
 
 pub fn move_agreement_bonus(left: &[CpuTrainingMove], right: &[CpuTrainingMove]) -> i32 {

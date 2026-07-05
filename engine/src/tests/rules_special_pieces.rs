@@ -478,7 +478,7 @@ fn ai_can_complete_turn_across_more_than_four_active_boards() {
 }
 
 #[test]
-#[ignore = "wall-clock performance check; run with `cargo test ai_search_perf -- --ignored --nocapture`"]
+#[ignore = "wall-clock performance check; run with --ignored --nocapture"]
 fn ai_search_perf_stockfish_style_steps_do_not_regress() {
     let game = five_board_perf_position();
     let stages = [
@@ -582,7 +582,7 @@ fn ai_search_perf_stockfish_style_steps_do_not_regress() {
 }
 
 #[test]
-#[ignore = "wall-clock late-game performance check; run in release mode with --ignored --nocapture"]
+#[ignore = "wall-clock late-game performance check; run with --ignored --nocapture"]
 fn late_history_search_cost_stays_bounded() {
     let early = five_board_perf_position();
     let late = with_repeated_history(&early, 12);

@@ -1,5 +1,8 @@
-import { decodeCompactModel, modelArchitectureMatches } from "./training-gpu.js";
+import { decodeCompactFrontierModelLayoutWithEngine } from "./training-gpu.js";
 import type { CompactValueModel } from "./training-gpu.js";
+import { readWasmBytes, readWasmString, writeWasmBytes } from "./engine-io.js";
+import { instantiateChronofishWasm } from "./wasm-loader.js";
+import type { ChronofishEngine } from "./types.js";
 import { FRONTIER_NEURAL_SHADER, FRONTIER_POLICY_SHADER } from "./training-shaders.js";
 import frontierForward from "../../engine/src/gpu/search/shaders/frontier_forward.wgsl";
 
@@ -17,7 +20,10 @@ const usage: BufferUsageConstants = (globalThis as unknown as { GPUBufferUsage?:
   UNIFORM: 64
 };
 
+let modelEnginePromise: Promise<ChronofishEngine> | null = null;
+
 interface ModelBuffers {
+  engine: ChronofishEngine;
   model: CompactValueModel;
   inferencePrecision: InferencePrecision;
   sharedBoardEncoder: GPUBuffer[];
@@ -62,6 +68,7 @@ interface Pipelines {
 export class FrontierNeuralEvaluator {
   readonly device: GPUDevice;
   #model: Promise<ModelBuffers | null> | null = null;
+  #engine: ChronofishEngine | null = null;
   #pipelines: Promise<Pipelines> | null = null;
   #workspace: NeuralWorkspace | null = null;
   #currentPolicyFeatures: { buffer: GPUBuffer; capacity: number; count: number } | null = null;
@@ -86,10 +93,9 @@ export class FrontierNeuralEvaluator {
   }
 
   cacheStats(): { hits: number; misses: number; stores: number; hitRate: number } {
-    const lookups = this.#cacheStats.hits + this.#cacheStats.misses;
     return {
       ...this.#cacheStats,
-      hitRate: lookups > 0 ? Math.round((this.#cacheStats.hits / lookups) * 1000) / 1000 : 0
+      hitRate: frontierNeuralCacheHitRate(this.#cacheStats.hits, this.#cacheStats.misses, this.#engine ?? undefined)
     };
   }
 
@@ -125,17 +131,17 @@ export class FrontierNeuralEvaluator {
       return false;
     }
     const pipelines = await this.pipelines();
-    const effectiveBatchSize = Math.max(1, Math.min(stateCount, Math.floor(batchSize)));
-    const workspace = this.workspace(effectiveBatchSize, modelBuffers.model);
+    const effectiveBatchSize = frontierNeuralEffectiveBatchSize(modelBuffers.engine, stateCount, batchSize);
+    const workspace = this.workspace(effectiveBatchSize, modelBuffers.model, modelBuffers.engine);
     const nextPolicyFeatures = modelBuffers.fastNet.policyWeights
-      ? this.policyFeatureBuffer("next", stateCount, outputLayerSize(modelBuffers.model))
+      ? this.policyFeatureBuffer("next", stateCount, modelBuffers.fastNet.inputSize, modelBuffers.engine)
       : null;
     if (nextPolicyFeatures) {
       encoder.clearBuffer(nextPolicyFeatures);
     }
     for (let stateOffset = 0; stateOffset < stateCount; stateOffset += effectiveBatchSize) {
-      const batchCount = Math.min(effectiveBatchSize, stateCount - stateOffset);
-      const common = this.keep(uniformU32(this.device, [
+      const batchCount = frontierNeuralBatchCount(modelBuffers.engine, stateCount, stateOffset, effectiveBatchSize);
+      const common = this.keep(frontierNeuralParams(this.device, modelBuffers.engine,
         batchCount,
         stateStride,
         boardOffset,
@@ -144,41 +150,41 @@ export class FrontierNeuralEvaluator {
         modelBuffers.model.projectionSize,
         modelBuffers.model.projectionSeed,
         targetDepth
-      ]));
-      const apply = this.keep(uniformMixed(this.device, batchCount, rootColor, modelBuffers.model.scale ?? 1, modelBuffers.model.bias ?? 0, stateOffset));
+      ));
+      const apply = this.keep(frontierNeuralApplyParams(this.device, modelBuffers.engine, batchCount, rootColor, modelBuffers.model.scale ?? 1, modelBuffers.model.bias ?? 0, stateOffset));
 
       encodeBindings(this.device, encoder, pipelines.selectBoards, [
         [0, states], [1, workspace.selectedBoards], [5, common], [7, workspace.activeStates]
-      ], Math.ceil(batchCount * 16 / 64));
+      ], frontierNeuralSelectBoardWorkgroups(modelBuffers.engine, batchCount));
       encodeBindings(this.device, encoder, pipelines.project, [
         [0, states], [1, workspace.selectedBoards], [2, workspace.projected], [5, common], [7, workspace.activeStates]
-      ], Math.ceil(batchCount / 16), Math.ceil(modelBuffers.model.projectionSize / 16));
+      ], frontierNeuralProjectWorkgroupsX(modelBuffers.engine, batchCount), frontierNeuralProjectWorkgroupsY(modelBuffers.engine, modelBuffers.model.projectionSize));
 
       for (let layer = 0; layer < modelBuffers.model.hiddenLayers.length; layer += 1) {
         const inputSize = layer === 0 ? modelBuffers.model.projectionSize : modelBuffers.model.hiddenLayers[layer - 1]!;
         const outputSize = modelBuffers.model.hiddenLayers[layer]!;
-        const layerParams = this.keep(uniformU32(this.device, [batchCount, inputSize, outputSize, 0]));
+        const layerParams = this.keep(frontierNeuralLayerParams(this.device, modelBuffers.engine, batchCount, inputSize, outputSize));
         encodeBindings(this.device, encoder, pipelines.forwardLayer, [
           [0, layer === 0 ? workspace.projected : workspace.activations[layer - 1]!],
           [1, modelBuffers.sharedBoardEncoder[layer]!],
           [2, workspace.activations[layer]!],
           [3, layerParams],
           [4, workspace.activeStates]
-        ], Math.ceil(batchCount / 16), Math.ceil(outputSize / 16));
+        ], frontierNeuralLayerWorkgroupsX(modelBuffers.engine, batchCount), frontierNeuralLayerWorkgroupsY(modelBuffers.engine, outputSize));
       }
       if (nextPolicyFeatures) {
         encoder.copyBufferToBuffer(
           workspace.activations.at(-1)!,
           0,
           nextPolicyFeatures,
-          stateOffset * outputLayerSize(modelBuffers.model) * Float32Array.BYTES_PER_ELEMENT,
-          batchCount * outputLayerSize(modelBuffers.model) * Float32Array.BYTES_PER_ELEMENT
+          stateOffset * modelBuffers.fastNet.inputSize * Float32Array.BYTES_PER_ELEMENT,
+          batchCount * modelBuffers.fastNet.inputSize * Float32Array.BYTES_PER_ELEMENT
         );
         this.#cacheStats.stores += batchCount;
       }
 
       const finalSize = modelBuffers.model.hiddenLayers.at(-1)!;
-      const outputParams = this.keep(uniformU32(this.device, [batchCount, finalSize, 0, 0]));
+      const outputParams = this.keep(frontierNeuralLayerParams(this.device, modelBuffers.engine, batchCount, finalSize, 0));
       encodeBindings(this.device, encoder, modelBuffers.model.outputActivation === "tanh"
         ? pipelines.forwardOutput
         : pipelines.forwardOutputLinear, [
@@ -187,10 +193,10 @@ export class FrontierNeuralEvaluator {
         [2, workspace.predictions],
         [3, outputParams],
         [4, workspace.activeStates]
-      ], Math.ceil(batchCount / 64));
+      ], frontierNeuralOutputWorkgroups(modelBuffers.engine, batchCount));
       encodeBindings(this.device, encoder, pipelines.applyValues, [
         [0, states], [3, workspace.predictions], [4, summaries], [5, common], [6, apply], [7, workspace.activeStates]
-      ], Math.ceil(batchCount / 64));
+      ], frontierNeuralOutputWorkgroups(modelBuffers.engine, batchCount));
     }
     return true;
   }
@@ -216,7 +222,7 @@ export class FrontierNeuralEvaluator {
     const inputSize = modelBuffers.fastNet.inputSize;
     if (!this.#currentPolicyFeatures || this.#currentPolicyFeatures.count < stateCount) {
       this.#cacheStats.misses += stateCount;
-      const current = this.policyFeatureBuffer("current", stateCount, inputSize);
+      const current = this.policyFeatureBuffer("current", stateCount, inputSize, modelBuffers.engine);
       encoder.clearBuffer(current);
       this.encodeHiddenFeatures(
         encoder,
@@ -234,13 +240,13 @@ export class FrontierNeuralEvaluator {
     } else {
       this.#cacheStats.hits += stateCount;
     }
-    const params = this.keep(policyParams(this.device, candidateCount, candidateStride, inputSize, 25));
+    const params = this.keep(policyParams(this.device, modelBuffers.engine, candidateCount, candidateStride, inputSize, 25));
     encodeBindings(this.device, encoder, pipelines.applyPolicy, [
       [0, candidates],
       [1, this.#currentPolicyFeatures!.buffer],
       [2, modelBuffers.fastNet.policyWeights],
       [3, params]
-    ], Math.ceil(candidateCount / 64));
+    ], frontierPolicyWorkgroups(modelBuffers.engine, candidateCount));
     return true;
   }
 
@@ -272,9 +278,11 @@ export class FrontierNeuralEvaluator {
     this.#temporaries = [];
   }
 
-  private model(): Promise<ModelBuffers | null> {
+  private async model(): Promise<ModelBuffers | null> {
     this.#model ??= loadModel(this.device);
-    return this.#model;
+    const model = await this.#model;
+    this.#engine = model?.engine ?? null;
+    return model;
   }
 
   private pipelines(): Promise<Pipelines> {
@@ -282,7 +290,7 @@ export class FrontierNeuralEvaluator {
     return this.#pipelines;
   }
 
-  private workspace(stateCount: number, model: CompactValueModel): NeuralWorkspace {
+  private workspace(stateCount: number, model: CompactValueModel, engine: ChronofishEngine): NeuralWorkspace {
     if (this.#workspace && this.#workspace.capacity >= stateCount) {
       return this.#workspace;
     }
@@ -292,13 +300,13 @@ export class FrontierNeuralEvaluator {
     const capacity = stateCount;
     this.#workspace = {
       capacity,
-      selectedBoards: gpuBuffer(this.device, capacity * 16 * 4),
-      activeStates: gpuBuffer(this.device, capacity * 4),
-      projected: gpuBuffer(this.device, capacity * model.projectionSize * 4),
+      selectedBoards: gpuBuffer(this.device, capacity * 16 * 4, 0, engine),
+      activeStates: gpuBuffer(this.device, capacity * 4, 0, engine),
+      projected: gpuBuffer(this.device, capacity * model.projectionSize * 4, 0, engine),
       activations: model.hiddenLayers.map((size) =>
-        gpuBuffer(this.device, capacity * size * 4, usage.COPY_SRC)
+        gpuBuffer(this.device, capacity * size * 4, usage.COPY_SRC, engine)
       ),
-      predictions: gpuBuffer(this.device, capacity * 4)
+      predictions: gpuBuffer(this.device, capacity * 4, 0, engine)
     };
     return this.#workspace;
   }
@@ -321,12 +329,12 @@ export class FrontierNeuralEvaluator {
     modelBuffers: ModelBuffers,
     pipelines: Pipelines
   ): void {
-    const effectiveBatchSize = Math.max(1, Math.min(stateCount, Math.floor(batchSize)));
-    const workspace = this.workspace(effectiveBatchSize, modelBuffers.model);
-    const inputSize = outputLayerSize(modelBuffers.model);
+    const effectiveBatchSize = frontierNeuralEffectiveBatchSize(modelBuffers.engine, stateCount, batchSize);
+    const workspace = this.workspace(effectiveBatchSize, modelBuffers.model, modelBuffers.engine);
+    const inputSize = modelBuffers.fastNet.inputSize;
     for (let stateOffset = 0; stateOffset < stateCount; stateOffset += effectiveBatchSize) {
-      const batchCount = Math.min(effectiveBatchSize, stateCount - stateOffset);
-      const common = this.keep(uniformU32(this.device, [
+      const batchCount = frontierNeuralBatchCount(modelBuffers.engine, stateCount, stateOffset, effectiveBatchSize);
+      const common = this.keep(frontierNeuralParams(this.device, modelBuffers.engine,
         batchCount,
         stateStride,
         boardOffset,
@@ -335,26 +343,26 @@ export class FrontierNeuralEvaluator {
         modelBuffers.model.projectionSize,
         modelBuffers.model.projectionSeed,
         targetDepth
-      ]));
+      ));
       encodeBindings(this.device, encoder, pipelines.selectBoards, [
         [0, states], [1, workspace.selectedBoards], [5, common], [7, workspace.activeStates]
-      ], Math.ceil(batchCount * 16 / 64));
+      ], frontierNeuralSelectBoardWorkgroups(modelBuffers.engine, batchCount));
       encodeBindings(this.device, encoder, pipelines.project, [
         [0, states], [1, workspace.selectedBoards], [2, workspace.projected], [5, common], [7, workspace.activeStates]
-      ], Math.ceil(batchCount / 16), Math.ceil(modelBuffers.model.projectionSize / 16));
+      ], frontierNeuralProjectWorkgroupsX(modelBuffers.engine, batchCount), frontierNeuralProjectWorkgroupsY(modelBuffers.engine, modelBuffers.model.projectionSize));
       for (let layer = 0; layer < modelBuffers.model.hiddenLayers.length; layer += 1) {
         const layerInputSize = layer === 0
           ? modelBuffers.model.projectionSize
           : modelBuffers.model.hiddenLayers[layer - 1]!;
         const outputSize = modelBuffers.model.hiddenLayers[layer]!;
-        const layerParams = this.keep(uniformU32(this.device, [batchCount, layerInputSize, outputSize, 0]));
+        const layerParams = this.keep(frontierNeuralLayerParams(this.device, modelBuffers.engine, batchCount, layerInputSize, outputSize));
         encodeBindings(this.device, encoder, pipelines.forwardLayer, [
           [0, layer === 0 ? workspace.projected : workspace.activations[layer - 1]!],
           [1, modelBuffers.sharedBoardEncoder[layer]!],
           [2, workspace.activations[layer]!],
           [3, layerParams],
           [4, workspace.activeStates]
-        ], Math.ceil(batchCount / 16), Math.ceil(outputSize / 16));
+        ], frontierNeuralLayerWorkgroupsX(modelBuffers.engine, batchCount), frontierNeuralLayerWorkgroupsY(modelBuffers.engine, outputSize));
       }
       encoder.copyBufferToBuffer(
         workspace.activations.at(-1)!,
@@ -369,7 +377,8 @@ export class FrontierNeuralEvaluator {
   private policyFeatureBuffer(
     target: "current" | "next",
     stateCount: number,
-    inputSize: number
+    inputSize: number,
+    engine: ChronofishEngine
   ): GPUBuffer {
     const field = target === "current" ? this.#currentPolicyFeatures : this.#nextPolicyFeatures;
     if (field && field.capacity >= stateCount) {
@@ -378,7 +387,7 @@ export class FrontierNeuralEvaluator {
     }
     field?.buffer.destroy();
     const created = {
-      buffer: gpuBuffer(this.device, stateCount * inputSize * Float32Array.BYTES_PER_ELEMENT),
+      buffer: gpuBuffer(this.device, stateCount * inputSize * Float32Array.BYTES_PER_ELEMENT, 0, engine),
       capacity: stateCount,
       count: stateCount
     };
@@ -411,22 +420,27 @@ async function loadModel(device: GPUDevice): Promise<ModelBuffers | null> {
   }
 }
 
-function modelBuffersFromBytes(device: GPUDevice, bytes: ArrayBuffer): ModelBuffers | null {
-  const model = decodeCompactModel(bytes);
-  if (!modelArchitectureMatches(model)) {
+async function modelBuffersFromBytes(device: GPUDevice, bytes: ArrayBuffer): Promise<ModelBuffers | null> {
+  const engine = await compactModelEngine();
+  const layout = decodeCompactFrontierModelLayoutWithEngine(engine, bytes);
+  if (!layout) {
     return null;
   }
+  const model = layout.model;
   const inferencePrecision = device.features?.has("shader-f16" as GPUFeatureName) ? "fp16" : "fp32";
-  const sharedBoardEncoder = splitHiddenWeights(model).map((weights) => initializedWeightBuffer(device, weights, inferencePrecision));
-  const policyWeights = policyWeightsForModel(model);
-  const policyQuantization = policyWeights ? quantizePolicyWeights(policyWeights) : null;
+  const sharedBoardEncoder = await Promise.all(
+    layout.hiddenLayerWeights.map((weights) => initializedWeightBuffer(device, weights, inferencePrecision, engine))
+  );
+  const policyWeights = layout.policyWeights;
+  const policyQuantization = policyWeights ? quantizePolicyWeights(policyWeights, engine) : null;
   return {
+    engine,
     model,
     inferencePrecision,
     sharedBoardEncoder,
     fastNet: {
-      policyWeights: policyQuantization ? initializedWeightBuffer(device, policyQuantization.dequantized, inferencePrecision) : null,
-      inputSize: outputLayerSize(model),
+      policyWeights: policyQuantization ? await initializedWeightBuffer(device, policyQuantization.dequantized, inferencePrecision, engine) : null,
+      inputSize: layout.outputLayerSize,
       policyQuantization: policyQuantization
         ? {
           format: inferencePrecision === "fp16" ? "int8-to-fp16-upload" : "int8-dequantized-upload",
@@ -436,77 +450,56 @@ function modelBuffersFromBytes(device: GPUDevice, bytes: ArrayBuffer): ModelBuff
         : null
     },
     bigNet: {
-      outputWeights: initializedWeightBuffer(device, model.outputWeights, inferencePrecision),
+      outputWeights: await initializedWeightBuffer(device, model.outputWeights, inferencePrecision, engine),
       auxiliaryValueWeights: model.auxiliaryValueWeights?.length
-        ? initializedWeightBuffer(device, model.auxiliaryValueWeights, inferencePrecision)
+        ? await initializedWeightBuffer(device, model.auxiliaryValueWeights, inferencePrecision, engine)
         : null
     }
   };
 }
 
-function quantizePolicyWeights(weights: Float32Array): {
-  quantized: Int8Array;
+function compactModelEngine(): Promise<ChronofishEngine> {
+  modelEnginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
+    .then((instance) => instance.exports as unknown as ChronofishEngine);
+  return modelEnginePromise;
+}
+
+function quantizePolicyWeights(weights: Float32Array, engine: ChronofishEngine): {
   dequantized: Float32Array;
   scale: number;
   maxAbsError: number;
 } {
-  let maxAbs = 0;
-  for (const weight of weights) {
-    maxAbs = Math.max(maxAbs, Math.abs(weight));
+  const input = writeWasmBytes(engine, new Uint8Array(weights.buffer, weights.byteOffset, weights.byteLength));
+  try {
+    const output = engine.chronofish_quantized_policy_upload_bytes(input.ptr, input.len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return readQuantizedPolicyUpload(readWasmBytes(engine, output), weights.length);
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
   }
-  const scale = maxAbs > 0 ? maxAbs / 127 : 1 / 127;
-  const quantized = new Int8Array(weights.length);
-  const dequantized = new Float32Array(weights.length);
-  let maxAbsError = 0;
-  for (let index = 0; index < weights.length; index += 1) {
-    const value = weights[index] ?? 0;
-    const packed = Math.max(-127, Math.min(127, Math.round(value / scale)));
-    quantized[index] = packed;
-    const restored = packed * scale;
-    dequantized[index] = restored;
-    maxAbsError = Math.max(maxAbsError, Math.abs(value - restored));
-  }
-  return { quantized, dequantized, scale, maxAbsError };
 }
 
-function outputLayerSize(model: CompactValueModel): number {
-  const size = model.hiddenLayers.at(-1);
-  if (!size) {
-    throw new Error("GPU value model has no hidden output layer.");
+function readQuantizedPolicyUpload(bytes: Uint8Array, weightCount: number): {
+  dequantized: Float32Array;
+  scale: number;
+  maxAbsError: number;
+} {
+  const expectedLength = 8 + weightCount * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedLength) {
+    throw new Error(`Quantized policy upload has ${bytes.byteLength} bytes but expected ${expectedLength}.`);
   }
-  return size;
-}
-
-function policyWeightsForModel(model: CompactValueModel): Float32Array | null {
-  const inputSize = outputLayerSize(model);
-  const expected = 257 * (inputSize + 1);
-  if (model.policyWeights?.length === expected) {
-    return model.policyWeights;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const scale = view.getFloat32(0, true);
+  const maxAbsError = view.getFloat32(4, true);
+  const dequantized = new Float32Array(weightCount);
+  let cursor = 8;
+  for (let index = 0; index < weightCount; index += 1) {
+    dequantized[index] = view.getFloat32(cursor, true);
+    cursor += 4;
   }
-  if (model.policyLogits?.length !== 257) {
-    return null;
-  }
-  const weights = new Float32Array(expected);
-  for (let bucket = 0; bucket < 257; bucket += 1) {
-    weights[bucket * (inputSize + 1) + inputSize] = model.policyLogits[bucket] ?? 0;
-  }
-  return weights;
-}
-
-function splitHiddenWeights(model: CompactValueModel): Float32Array[] {
-  const layers: Float32Array[] = [];
-  let cursor = 0;
-  let inputSize = model.projectionSize;
-  for (const outputSize of model.hiddenLayers) {
-    const count = outputSize * (inputSize + 1);
-    layers.push(model.hiddenWeights.slice(cursor, cursor + count));
-    cursor += count;
-    inputSize = outputSize;
-  }
-  if (cursor !== model.hiddenWeights.length) {
-    throw new Error("GPU value model hidden-weight layout is incompatible with search.");
-  }
-  return layers;
+  return { dequantized, scale, maxAbsError };
 }
 
 async function createPipelines(device: GPUDevice): Promise<Pipelines> {
@@ -550,53 +543,38 @@ function encodeBindings(device: GPUDevice, encoder: GPUCommandEncoder, pipeline:
   pass.end();
 }
 
-function gpuBuffer(device: GPUDevice, byteLength: number, extraUsage = 0): GPUBuffer {
+function gpuBuffer(device: GPUDevice, byteLength: number, extraUsage = 0, engine?: ChronofishEngine): GPUBuffer {
   return device.createBuffer({
-    size: align4(byteLength),
+    size: align4(byteLength, engine),
     usage: usage.STORAGE | usage.COPY_DST | extraUsage
   });
 }
 
-function initializedBuffer(device: GPUDevice, values: ArrayBufferView): GPUBuffer {
-  const buffer = gpuBuffer(device, values.byteLength);
+function initializedBuffer(device: GPUDevice, values: ArrayBufferView, engine?: ChronofishEngine): GPUBuffer {
+  const buffer = gpuBuffer(device, values.byteLength, 0, engine);
   device.queue.writeBuffer(buffer, 0, values);
   return buffer;
 }
 
-function initializedWeightBuffer(device: GPUDevice, values: Float32Array, precision: InferencePrecision): GPUBuffer {
-  return initializedBuffer(device, precision === "fp16" ? float32ToFloat16Array(values) : values);
+async function initializedWeightBuffer(device: GPUDevice, values: Float32Array, precision: InferencePrecision, engine: ChronofishEngine): Promise<GPUBuffer> {
+  return initializedBuffer(device, precision === "fp16" ? float32ToFloat16Array(values, engine) : values, engine);
 }
 
-function float32ToFloat16Array(values: Float32Array): Uint16Array {
-  const halves = new Uint16Array(values.length);
-  for (let index = 0; index < values.length; index += 1) {
-    halves[index] = float32ToFloat16Bits(values[index] ?? 0);
-  }
-  return halves;
-}
-
-function float32ToFloat16Bits(value: number): number {
-  if (!Number.isFinite(value)) {
-    return value < 0 ? 0xfc00 : value > 0 ? 0x7c00 : 0x7e00;
-  }
-  const floatView = new Float32Array(1);
-  const intView = new Uint32Array(floatView.buffer);
-  floatView[0] = value;
-  const bits = intView[0]!;
-  const sign = (bits >>> 16) & 0x8000;
-  const exponent = ((bits >>> 23) & 0xff) - 127 + 15;
-  let mantissa = bits & 0x7fffff;
-  if (exponent <= 0) {
-    if (exponent < -10) {
-      return sign;
+function float32ToFloat16Array(values: Float32Array, engine: ChronofishEngine): Uint16Array {
+  const input = writeWasmBytes(engine, new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
+  try {
+    const output = engine.chronofish_f32_to_f16_upload_bytes(input.ptr, input.len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
     }
-    mantissa = (mantissa | 0x800000) >>> (1 - exponent);
-    return sign | ((mantissa + 0x1000) >>> 13);
+    const bytes = readWasmBytes(engine, output);
+    if (bytes.byteLength !== values.length * Uint16Array.BYTES_PER_ELEMENT) {
+      throw new Error("f16 upload response length does not match the request.");
+    }
+    return new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Uint16Array.BYTES_PER_ELEMENT).slice();
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
   }
-  if (exponent >= 31) {
-    return sign | 0x7c00;
-  }
-  return sign | (exponent << 10) | ((mantissa + 0x1000) >>> 13);
 }
 
 const frontierForwardF16 = `enable f16;
@@ -613,14 +591,71 @@ ${FRONTIER_POLICY_SHADER
   .replace(/var logit = policy_weights\[row \+ params\.input_size\];/g, "var logit = f32(policy_weights[row + params.input_size]);")
   .replace(/policy_weights\[row \+ input\]/g, "f32(policy_weights[row + input])")}`;
 
-function uniformU32(device: GPUDevice, values: number[]): GPUBuffer {
-  const data = new Uint32Array(values.map((value) => value >>> 0));
-  const buffer = device.createBuffer({ size: align4(data.byteLength), usage: usage.COPY_DST | usage.UNIFORM });
-  device.queue.writeBuffer(buffer, 0, data);
+function uniformBytes(device: GPUDevice, bytes: Uint8Array, engine?: ChronofishEngine): GPUBuffer {
+  const buffer = device.createBuffer({ size: align4(bytes.byteLength, engine), usage: usage.COPY_DST | usage.UNIFORM });
+  device.queue.writeBuffer(buffer, 0, bytes);
   return buffer;
 }
 
-function uniformMixed(device: GPUDevice, stateCount: number, rootColor: number, scale: number, bias: number, stateOffset: number): GPUBuffer {
+function u32Bytes(values: number[]): Uint8Array {
+  const data = new Uint32Array(values.map((value) => value >>> 0));
+  return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+}
+
+function frontierNeuralParams(
+  device: GPUDevice,
+  engine: ChronofishEngine | undefined,
+  stateCount: number,
+  stateStride: number,
+  boardOffset: number,
+  maxBoards: number,
+  stateOffset: number,
+  projectionSize: number,
+  projectionSeed: number,
+  targetDepth: number
+): GPUBuffer {
+  if (engine && typeof engine.chronofish_frontier_neural_params_bytes === "function") {
+    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_params_bytes(
+      stateCount,
+      stateStride,
+      boardOffset,
+      maxBoards,
+      stateOffset,
+      projectionSize,
+      projectionSeed,
+      targetDepth
+    )), engine);
+  }
+  return uniformBytes(device, u32Bytes([
+    stateCount,
+    stateStride,
+    boardOffset,
+    maxBoards,
+    stateOffset,
+    projectionSize,
+    projectionSeed,
+    targetDepth
+  ]));
+}
+
+function frontierNeuralApplyParams(
+  device: GPUDevice,
+  engine: ChronofishEngine | undefined,
+  stateCount: number,
+  rootColor: number,
+  scale: number,
+  bias: number,
+  stateOffset: number
+): GPUBuffer {
+  if (engine && typeof engine.chronofish_frontier_neural_apply_params_bytes === "function") {
+    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_apply_params_bytes(
+      stateCount,
+      rootColor,
+      scale,
+      bias,
+      stateOffset
+    )), engine);
+  }
   const data = new ArrayBuffer(32);
   const view = new DataView(data);
   view.setUint32(0, stateCount, true);
@@ -628,27 +663,81 @@ function uniformMixed(device: GPUDevice, stateCount: number, rootColor: number, 
   view.setFloat32(8, scale, true);
   view.setFloat32(12, bias, true);
   view.setUint32(16, stateOffset, true);
-  const buffer = device.createBuffer({ size: 32, usage: usage.COPY_DST | usage.UNIFORM });
-  device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return uniformBytes(device, new Uint8Array(data));
+}
+
+function frontierNeuralLayerParams(device: GPUDevice, engine: ChronofishEngine | undefined, sampleCount: number, inputSize: number, outputSize: number): GPUBuffer {
+  if (engine && typeof engine.chronofish_frontier_neural_layer_params_bytes === "function") {
+    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_layer_params_bytes(sampleCount, inputSize, outputSize)), engine);
+  }
+  return uniformBytes(device, u32Bytes([sampleCount, inputSize, outputSize, 0]));
+}
+
+function frontierNeuralEffectiveBatchSize(engine: ChronofishEngine, stateCount: number, requestedBatchSize: number): number {
+  return engine.chronofish_frontier_neural_effective_batch_size(stateCount, requestedBatchSize);
+}
+
+function frontierNeuralBatchCount(engine: ChronofishEngine, stateCount: number, stateOffset: number, effectiveBatchSize: number): number {
+  return engine.chronofish_frontier_neural_batch_count(stateCount, stateOffset, effectiveBatchSize);
+}
+
+function frontierNeuralCacheHitRate(hits: number, misses: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_frontier_neural_cache_hit_rate(hits, misses);
+  }
+  const lookups = hits + misses;
+  if (!Number.isFinite(hits) || !Number.isFinite(misses) || lookups <= 0) {
+    return 0;
+  }
+  return Math.round((hits / lookups) * 1000) / 1000;
+}
+
+function frontierNeuralSelectBoardWorkgroups(engine: ChronofishEngine, batchCount: number): number {
+  return engine.chronofish_frontier_neural_select_board_workgroups(batchCount);
+}
+
+function frontierNeuralProjectWorkgroupsX(engine: ChronofishEngine, batchCount: number): number {
+  return engine.chronofish_frontier_neural_project_workgroups_x(batchCount);
+}
+
+function frontierNeuralProjectWorkgroupsY(engine: ChronofishEngine, projectionSize: number): number {
+  return engine.chronofish_frontier_neural_project_workgroups_y(projectionSize);
+}
+
+function frontierNeuralLayerWorkgroupsX(engine: ChronofishEngine, batchCount: number): number {
+  return engine.chronofish_frontier_neural_layer_workgroups_x(batchCount);
+}
+
+function frontierNeuralLayerWorkgroupsY(engine: ChronofishEngine, outputSize: number): number {
+  return engine.chronofish_frontier_neural_layer_workgroups_y(outputSize);
+}
+
+function frontierNeuralOutputWorkgroups(engine: ChronofishEngine, batchCount: number): number {
+  return engine.chronofish_frontier_neural_output_workgroups(batchCount);
+}
+
+function frontierPolicyWorkgroups(engine: ChronofishEngine, candidateCount: number): number {
+  return engine.chronofish_frontier_policy_workgroups(candidateCount);
 }
 
 function policyParams(
   device: GPUDevice,
+  engine: ChronofishEngine | undefined,
   candidateCount: number,
   candidateStride: number,
   inputSize: number,
   scale: number
 ): GPUBuffer {
+  if (engine && typeof engine.chronofish_frontier_policy_params_bytes === "function") {
+    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_policy_params_bytes(candidateCount, candidateStride, inputSize, scale)), engine);
+  }
   const data = new ArrayBuffer(16);
   const view = new DataView(data);
   view.setUint32(0, candidateCount, true);
   view.setUint32(4, candidateStride, true);
   view.setUint32(8, inputSize, true);
   view.setFloat32(12, scale, true);
-  const buffer = device.createBuffer({ size: 16, usage: usage.COPY_DST | usage.UNIFORM });
-  device.queue.writeBuffer(buffer, 0, data);
-  return buffer;
+  return uniformBytes(device, new Uint8Array(data));
 }
 
 function destroyWorkspace(workspace: NeuralWorkspace): void {
@@ -659,6 +748,9 @@ function destroyWorkspace(workspace: NeuralWorkspace): void {
   workspace.predictions.destroy();
 }
 
-function align4(value: number): number {
+function align4(value: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_align4(value);
+  }
   return Math.ceil(value / 4) * 4;
 }

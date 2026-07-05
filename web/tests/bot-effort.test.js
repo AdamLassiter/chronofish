@@ -35,13 +35,19 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
-  assert.match(controller, /const targetDepth = searchDepthAtLeastOne\(effort\.depth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
-  assert.match(controller, /searchDepthAtLeastOne\(effort\.minDepth \?\? DEFAULT_MIN_BOT_SEARCH_DEPTH\)/);
+  assert.match(controller, /const searchConfig = botSearchConfig\(effort\)/);
+  assert.match(controller, /targetDepth: searchConfig\.targetDepth/);
+  assert.match(controller, /minDepth: searchConfig\.minDepth/);
+  assert.match(controller, /nodes: searchConfig\.nodes/);
+  assert.match(controller, /timeMs: searchConfig\.timeMs/);
+  assert.match(controller, /chronofish_bot_search_config_json\(/);
   assert.match(controller, /const nextDepth = nextBotSearchDepth\(pending\.currentDepth, pending\.targetDepth\)/);
   assert.match(controller, /chronofish_bot_next_search_depth\(currentDepth, targetDepth\)/);
-  assert.match(controller, /chronofish_bot_search_depth_at_least_one\(depth\)/);
   assert.match(controller, /chronofish_bot_worker_search_time_ms\(timeMs\)/);
   assert.match(controller, /chronofish_bot_completed_search_depth/);
+  assert.doesNotMatch(controller, /DEFAULT_MIN_BOT_SEARCH_DEPTH/);
+  assert.doesNotMatch(controller, /effort\.timeMs \?\? 10_000/);
+  assert.doesNotMatch(controller, /Math\.max\(1, effort\.nodes \?\? 64\)/);
   assert.doesNotMatch(controller, /return currentDepth <= 0 \? Math\.min\(2, targetDepth\) : Math\.min\(targetDepth, currentDepth \+ 2\)/);
   assert.doesNotMatch(controller, /const margin = Math\.min\(1000, Math\.max\(100, Math\.floor\(timeMs \* 0\.05\)\)\)/);
   assert.match(controller, /minDepth: Math\.min\(nextDepth, pending\.minDepth\)/);
@@ -63,14 +69,17 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /pending\.bestByDepth\.set\(entry\.depth, depthBest\)/);
   assert.match(controller, /\(bestResult\?\.depth \?\? 0\) >= pending\.targetDepth/);
   assert.match(engineSearch, /pub fn bot_search_depth_at_least_one/);
+  assert.match(engineSearch, /pub fn bot_search_config_json/);
   assert.match(engineSearch, /pub fn bot_next_search_depth/);
   assert.match(engineSearch, /pub fn bot_worker_search_time_ms/);
   assert.match(engineSearch, /pub fn bot_completed_search_depth/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_search_depth_at_least_one/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_bot_search_config_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_next_search_depth/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_worker_search_time_ms/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_completed_search_depth/);
   assert.match(engineTypes, /chronofish_bot_search_depth_at_least_one\(depth: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_search_config_json\(depth: number, minDepth: number, nodes: number, timeMs: number\): number/);
   assert.match(engineTypes, /chronofish_bot_next_search_depth\(currentDepth: number, targetDepth: number\): number/);
   assert.match(engineTypes, /chronofish_bot_worker_search_time_ms\(timeMs: number\): number/);
   assert.match(engineTypes, /chronofish_bot_completed_search_depth\(resultDepth: number, requestedDepth: number, resultEndsInRoyalCapture: number\): number/);
@@ -88,27 +97,45 @@ test("bot countdown switches to overtime after the nominal deadline", async () =
 
 test("bot search result ranking prefers deeper completed searches before score", async () => {
   const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
-  assert.match(controller, /function compareAiResultPreference/);
-  assert.match(controller, /function compareBotChoicePreference/);
-  assert.match(controller, /const depth = \(right\.depth \?\? 0\) - \(left\.depth \?\? 0\)/);
-  assert.match(controller, /const depth = botChoiceDepth\(right\) - botChoiceDepth\(left\)/);
-  assert.match(controller, /sort\(compareAiResultPreference\)/);
-  assert.match(controller, /compareBotChoicePreference\(next, current\) < 0/);
-  assert.match(controller, /sort\(compareBotChoicePreference\)/);
+  assert.match(controller, /chronofish_bot_ranked_choices_json\(ptr, len\)/);
+  assert.match(controller, /chronofish_bot_select_best_result_json\(ptr, len\)/);
+  assert.doesNotMatch(controller, /function compareAiResultPreference/);
+  assert.doesNotMatch(controller, /function compareBotChoicePreference/);
+  assert.doesNotMatch(controller, /function botChoiceScore/);
+  assert.doesNotMatch(controller, /function botChoiceDepth/);
+  assert.match(engineSearch, /pub fn bot_ranked_choices_json/);
+  assert.match(engineSearch, /pub fn bot_select_best_result_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_bot_ranked_choices_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_bot_select_best_result_json/);
+  assert.match(engineTypes, /chronofish_bot_ranked_choices_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_select_best_result_json\(ptr: number, length: number\): number/);
 });
 
 test("GPU worker honors minimum depth before applying its internal deadline", async () => {
   const worker = await readFile(path.join(webRoot, "src/ai-worker.ts"), "utf8");
   const workerTypes = await readFile(path.join(webRoot, "src/ai-worker-types.ts"), "utf8");
   const cpuWorker = await readFile(path.join(webRoot, "src/cpu-ai-worker.ts"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
   assert.match(workerTypes, /minDepth\?: number/);
-  assert.match(worker, /const requestedDepth = Math\.max\(1, depth \?\? 1\)/);
-  assert.match(worker, /const minimumDepth = Math\.min\(requestedDepth, Math\.max\(1, Math\.floor\(minDepth \?\? 1\)\)\)/);
-  assert.match(worker, /gpuDeadlineAt = minimumDepth >= requestedDepth/);
+  assert.match(worker, /const searchConfig = await engineGpuWorkerSearchConfig\(depth, minDepth, timeMs\)/);
+  assert.match(worker, /chronofish_gpu_worker_search_config_json\(/);
+  assert.match(worker, /gpuDeadlineAt = searchConfig\.deadlineDelayMs == null/);
   assert.match(worker, /Number\.POSITIVE_INFINITY/);
-  assert.match(worker, /depth: requestedDepth/);
+  assert.match(worker, /depth: searchConfig\.requestedDepth/);
+  assert.match(worker, /timeMs: searchConfig\.searchTimeMs/);
+  assert.doesNotMatch(worker, /const requestedDepth = Math\.max\(1, depth \?\? 1\)/);
+  assert.doesNotMatch(worker, /const minimumDepth = Math\.min\(requestedDepth, Math\.max\(1, Math\.floor\(minDepth \?\? 1\)\)\)/);
+  assert.doesNotMatch(worker, /Math\.floor\(searchTimeMs \* 0\.8\)/);
+  assert.match(engineSearch, /pub fn gpu_worker_search_config_json/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_worker_search_config_json/);
+  assert.match(engineTypes, /chronofish_gpu_worker_search_config_json\(depth: number, minDepth: number, timeMs: number\): number/);
   assert.match(workerTypes, /resultReason\?: SearchResultReason/);
   assert.match(worker, /resultReason: replayed\.result\?\.reason/);
   assert.match(worker, /gpuTerminal: result\.gpuTerminal === true \|\| replayed\.result\?\.reason === "royal-capture"/);
@@ -118,14 +145,18 @@ test("GPU worker honors minimum depth before applying its internal deadline", as
 test("bot move choice logging includes full principal variation plans", async () => {
   const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
   const worker = await readFile(path.join(webRoot, "src/ai-worker.ts"), "utf8");
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
   assert.match(controller, /plan: formatBotPlan\(choice\.principalVariation \?\? \[choice\.moves\], pending\.game\)/);
   assert.match(controller, /function formatBotPlan/);
-  assert.match(controller, /principalVariation: normalizePrincipalVariation\(choice\.principalVariation \?\? result\.principalVariation, moves\)/);
+  assert.match(controller, /chronofish_bot_ranked_choices_json\(ptr, len\)/);
+  assert.match(engineSearch, /fn bot_normalized_principal_variation/);
   assert.match(controller, /principalVariation: normalizePrincipalVariation\(choice\.principalVariation, choice\.moves\)/);
   assert.match(await readFile(path.join(webRoot, "src/ai-worker-types.ts"), "utf8"), /principalVariation\?: Move\[\]\[\] \| undefined/);
   assert.match(worker, /principalVariation,/);
-  assert.match(worker, /principalVariation: candidate\.principalVariation/);
+  assert.match(worker, /engine\.chronofish_gpu_selected_choice_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /await engineSummarizeSearchChoices\(candidates\)/);
+  assert.match(engineSearch, /"principalVariation"/);
 });
 
 test("post-match bot review opens principal variation suffixes from clicked boards", async () => {

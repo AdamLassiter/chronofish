@@ -10,6 +10,49 @@ pub(crate) const GPU_BOARD_RECORD_I32S: i32 = 12;
 pub(crate) const GPU_BOARD_SQUARE_I32S: i32 = 64;
 
 impl Game {
+    pub(crate) fn gpu_snapshot_json(&self) -> String {
+        let mut timelines = self.timelines.clone();
+        timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
+        let mut timeline_values = Vec::with_capacity(timelines.len());
+        let mut board_values = Vec::new();
+        for (timeline_index, timeline) in timelines.iter().enumerate() {
+            let mut boards = timeline.boards.clone();
+            boards.sort_by_key(|board| board.time);
+            let latest_time = boards.last().map_or(0, |board| board.time);
+            let timeline_boards = boards
+                .iter()
+                .map(|board| {
+                    gpu_snapshot_board_json(
+                        timeline_index as i32,
+                        timeline.id,
+                        board,
+                        board.time == latest_time,
+                    )
+                })
+                .collect::<Vec<_>>();
+            board_values.extend(timeline_boards.iter().cloned());
+            timeline_values.push(serde_json::json!({
+                "id": timeline.id,
+                "row": timeline.row,
+                "label": timeline.label,
+                "owner": owner_name(timeline.owner),
+                "boardCount": timeline_boards.len(),
+                "latestTime": latest_time,
+                "boards": timeline_boards,
+            }));
+        }
+        serde_json::json!({
+            "format": "engine-gpu-snapshot-v1",
+            "turn": color_name(self.turn),
+            "nextTimelineId": self.next_timeline_id,
+            "nextBlackTimelineId": self.next_black_timeline_id,
+            "royalCaptureBy": self.staged_royal_capture_by.map(color_name),
+            "timelines": timeline_values,
+            "boards": board_values,
+        })
+        .to_string()
+    }
+
     pub(crate) fn gpu_snapshot_bytes(&self) -> Vec<u8> {
         let mut timelines = self.timelines.clone();
         timelines.sort_by(|left, right| left.row.cmp(&right.row).then(left.id.cmp(&right.id)));
@@ -90,6 +133,63 @@ impl Game {
     }
 }
 
+fn gpu_snapshot_board_json(
+    timeline_index: i32,
+    timeline_id: i32,
+    board: &BoardSnapshot,
+    latest: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "timelineIndex": timeline_index,
+        "timelineId": timeline_id,
+        "time": board.time,
+        "sideToMove": color_name(board.side_to_move),
+        "castling": castling_code(board.castling),
+        "enPassant": board.en_passant.map(|target| serde_json::json!({
+            "x": target.x,
+            "y": target.y,
+            "capturedX": target.captured_x,
+            "capturedY": target.captured_y,
+        })),
+        "origin": origin_json(&board.origin),
+        "latest": latest,
+        "originKind": origin_code(&board.origin),
+        "squares": board_squares_json(board),
+    })
+}
+
+fn board_squares_json(board: &BoardSnapshot) -> serde_json::Value {
+    serde_json::Value::Array(
+        (0..8)
+            .flat_map(|y| (0..8).map(move |x| serde_json::json!(piece_code(board.board[y][x]))))
+            .collect(),
+    )
+}
+
+fn origin_json(origin: &Origin) -> serde_json::Value {
+    match origin {
+        Origin::None => serde_json::Value::Null,
+        Origin::Move {
+            from,
+            to,
+            move_type,
+        } => serde_json::json!({
+            "type": move_type,
+            "from": position_json(from),
+            "to": position_json(to),
+        }),
+    }
+}
+
+fn position_json(position: &Position) -> serde_json::Value {
+    serde_json::json!({
+        "timelineId": position.timeline_id,
+        "time": position.time,
+        "x": position.x,
+        "y": position.y,
+    })
+}
+
 fn push_i32(bytes: &mut Vec<u8>, value: i32) {
     bytes.extend_from_slice(&value.to_le_bytes());
 }
@@ -114,6 +214,21 @@ fn owner_code(owner: TimelineOwner) -> i32 {
         TimelineOwner::Neutral => 0,
         TimelineOwner::White => 1,
         TimelineOwner::Black => 2,
+    }
+}
+
+fn color_name(color: Color) -> &'static str {
+    match color {
+        Color::White => "white",
+        Color::Black => "black",
+    }
+}
+
+fn owner_name(owner: TimelineOwner) -> &'static str {
+    match owner {
+        TimelineOwner::Neutral => "neutral",
+        TimelineOwner::White => "white",
+        TimelineOwner::Black => "black",
     }
 }
 

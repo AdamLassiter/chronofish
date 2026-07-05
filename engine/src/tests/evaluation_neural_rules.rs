@@ -138,6 +138,47 @@ fn gpu_snapshot_binary_header_and_initial_board_are_stable() {
 }
 
 #[test]
+fn gpu_snapshot_json_matches_web_snapshot_contract() {
+    let game = Game::new();
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&game.gpu_snapshot_json()).expect("GPU snapshot JSON");
+
+    assert_eq!(snapshot["format"], "engine-gpu-snapshot-v1");
+    assert_eq!(snapshot["turn"], "white");
+    assert_eq!(snapshot["nextTimelineId"], 1);
+    assert_eq!(snapshot["nextBlackTimelineId"], -1);
+    assert_eq!(snapshot["royalCaptureBy"], serde_json::Value::Null);
+    assert_eq!(snapshot["timelines"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["timelines"][0]["id"], 0);
+    assert_eq!(snapshot["timelines"][0]["row"], 0);
+    assert_eq!(snapshot["timelines"][0]["owner"], "neutral");
+    assert_eq!(snapshot["timelines"][0]["boardCount"], 1);
+    assert_eq!(snapshot["timelines"][0]["latestTime"], 0);
+    assert_eq!(
+        snapshot["timelines"][0]["boards"].as_array().unwrap().len(),
+        1
+    );
+    assert_eq!(snapshot["boards"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["boards"][0]["timelineIndex"], 0);
+    assert_eq!(snapshot["boards"][0]["timelineId"], 0);
+    assert_eq!(snapshot["boards"][0]["sideToMove"], "white");
+    assert_eq!(snapshot["boards"][0]["latest"], true);
+    assert_eq!(snapshot["boards"][0]["origin"], serde_json::Value::Null);
+    assert_eq!(
+        snapshot["boards"][0]["squares"][0],
+        piece_type_code(PieceType::Rook)
+    );
+    assert_eq!(
+        snapshot["boards"][0]["squares"][4],
+        piece_type_code(PieceType::King)
+    );
+    assert_eq!(
+        snapshot["boards"][0]["squares"][7 * 8],
+        piece_type_code(PieceType::Rook) | (1 << 8)
+    );
+}
+
+#[test]
 fn branch_present_line_blocks_future_timeline_moves() {
     let mut game = Game::new();
     game.load_notation(

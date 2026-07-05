@@ -13,6 +13,10 @@ export function readWasmBytes(engine: ChronofishEngine, ptr: number): Uint8Array
 
 export function writeWasmString(engine: ChronofishEngine, value: string): WasmString {
   const bytes = new TextEncoder().encode(value);
+  return writeWasmBytes(engine, bytes);
+}
+
+export function writeWasmBytes(engine: ChronofishEngine, bytes: Uint8Array): WasmString {
   const ptr = engine.chronofish_alloc(bytes.length);
   new Uint8Array(engine.memory.buffer, ptr, bytes.length).set(bytes);
   return { ptr, len: bytes.length };

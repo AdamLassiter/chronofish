@@ -1,33 +1,47 @@
 use chronofish_engine::cpu::search::{
     bot_training_moves_key,
     breed_cpu_population,
+    cpu_candidate_scoring_plan,
     cpu_candidate_worker_count,
     cpu_label_worker_count,
     cpu_match_turn_time_ms,
+    cpu_paired_match_average_score,
+    cpu_paired_match_deadline_ms,
     cpu_parameters_key,
     cpu_reference_candidate_average,
+    cpu_reference_comparison_count,
     cpu_reference_score_delta,
+    cpu_reference_should_continue,
     cpu_reference_worker_count,
+    cpu_screening_game_count,
     cpu_screening_training_config,
     cpu_search_label_weight,
     cpu_training_adjudication_score,
     cpu_training_budget_ms,
     cpu_training_candidate_count,
+    cpu_training_candidate_improved,
     cpu_training_elite_count,
+    cpu_training_elites,
+    cpu_training_finalist_candidates,
     cpu_training_finalist_target,
+    cpu_training_next_stagnation,
     cpu_training_no_move_score,
     cpu_training_position_search_config,
     cpu_training_position_target,
     cpu_training_position_worker_count,
+    cpu_training_should_continue,
     cpu_training_winner_score,
     crossover_cpu_parameters,
     mode_label_target,
     move_agreement_bonus,
     mutate_cpu_parameters,
+    rank_cpu_scored_candidates,
     search,
     unique_cpu_parameters,
+    CpuFitnessEntry,
     CpuParameters,
     CpuReferenceScoreDelta,
+    CpuScoredCandidate,
     CpuSearchRequest,
     CpuTrainingMove,
     CpuTrainingPositionSearchConfig,
@@ -208,6 +222,17 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 4_000.0, 3), 500);
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 1_100.0, 3), 33);
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 2_000.0, 0), 500);
+    assert_eq!(
+        cpu_paired_match_deadline_ms(1_000.0, 2_000.0, 4, 0),
+        1_250.0
+    );
+    assert_eq!(
+        cpu_paired_match_deadline_ms(1_000.0, 2_000.0, 4, 3),
+        2_000.0
+    );
+    assert_eq!(cpu_paired_match_deadline_ms(1_000.0, 900.0, 4, 0), 900.0);
+    assert_eq!(cpu_paired_match_average_score(45.0, 3), 15.0);
+    assert!(cpu_paired_match_average_score(45.0, 0).is_nan());
 
     assert_eq!(mode_label_target(96, 3, 12), 8);
     assert_eq!(mode_label_target(96, 1, 12), 96);
@@ -246,6 +271,10 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     assert_eq!(cpu_training_candidate_count(0), 1);
     assert_eq!(cpu_training_candidate_count(8), 8);
     assert_eq!(cpu_training_candidate_count(300), 256);
+    assert_eq!(cpu_screening_game_count(0, 2), 0);
+    assert_eq!(cpu_screening_game_count(12, 0), 1);
+    assert_eq!(cpu_screening_game_count(12, 2), 2);
+    assert_eq!(cpu_screening_game_count(2, 12), 2);
     assert_eq!(cpu_training_finalist_target(20, 1, 4, 12), 4);
     assert_eq!(cpu_training_finalist_target(20, 8, 4, 12), 8);
     assert_eq!(cpu_training_finalist_target(20, 1, 12, 0), 12);
@@ -254,6 +283,112 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     assert_eq!(cpu_training_elite_count(0), 1);
     assert_eq!(cpu_training_elite_count(3), 3);
     assert_eq!(cpu_training_elite_count(99), 4);
+    assert!(cpu_training_candidate_improved(12.0, 10.0, 11.0));
+    assert!(!cpu_training_candidate_improved(10.0, 10.0, 9.0));
+    assert!(!cpu_training_candidate_improved(12.0, 10.0, 12.0));
+    assert!(!cpu_training_candidate_improved(f64::NAN, 10.0, 0.0));
+    assert_eq!(cpu_training_next_stagnation(12, true), 0);
+    assert_eq!(cpu_training_next_stagnation(12, false), 13);
+    assert_eq!(cpu_training_next_stagnation(usize::MAX, false), usize::MAX);
+    assert!(cpu_training_should_continue(1_000.0, 2_000.0, 3, 8));
+    assert!(!cpu_training_should_continue(2_000.0, 2_000.0, 3, 8));
+    assert!(!cpu_training_should_continue(1_000.0, 2_000.0, 8, 8));
+    assert_eq!(cpu_reference_comparison_count(12, 0), 12);
+    assert_eq!(cpu_reference_comparison_count(12, 5), 5);
+    assert_eq!(cpu_reference_comparison_count(3, 5), 3);
+    assert!(cpu_reference_should_continue(1_000.0, 2_000.0, 3, 8));
+    assert!(!cpu_reference_should_continue(2_000.0, 2_000.0, 3, 8));
+    assert!(!cpu_reference_should_continue(1_000.0, 2_000.0, 8, 8));
+
+    let baseline = parameters(&[("mobility", 1), ("tempo", 2)]);
+    let low = parameters(&[("mobility", 2), ("tempo", 3)]);
+    let high = parameters(&[("mobility", 3), ("tempo", 4)]);
+    let tied = parameters(&[("mobility", 4), ("tempo", 5)]);
+    let ranked = rank_cpu_scored_candidates(vec![
+        CpuScoredCandidate {
+            parameters: low.clone(),
+            score: 3.0,
+        },
+        CpuScoredCandidate {
+            parameters: high.clone(),
+            score: 12.0,
+        },
+        CpuScoredCandidate {
+            parameters: tied.clone(),
+            score: 12.0,
+        },
+    ]);
+    assert_eq!(ranked[0].parameters, high);
+    assert_eq!(ranked[1].parameters, tied);
+    assert_eq!(ranked[2].parameters, low);
+    assert_eq!(
+        cpu_training_elites(
+            &[
+                CpuScoredCandidate {
+                    parameters: baseline.clone(),
+                    score: 99.0,
+                },
+                CpuScoredCandidate {
+                    parameters: low.clone(),
+                    score: 3.0,
+                },
+                CpuScoredCandidate {
+                    parameters: high.clone(),
+                    score: 12.0,
+                },
+            ],
+            &baseline,
+            1,
+        ),
+        vec![high.clone()]
+    );
+    assert_eq!(
+        cpu_training_finalist_candidates(
+            &baseline,
+            &[
+                CpuScoredCandidate {
+                    parameters: low.clone(),
+                    score: 3.0,
+                },
+                CpuScoredCandidate {
+                    parameters: baseline.clone(),
+                    score: 99.0,
+                },
+                CpuScoredCandidate {
+                    parameters: high.clone(),
+                    score: 12.0,
+                },
+            ],
+            2,
+        ),
+        vec![baseline.clone(), high.clone()]
+    );
+    let scoring_plan = cpu_candidate_scoring_plan(
+        &[low.clone(), high.clone(), low.clone(), tied.clone()],
+        &[
+            CpuFitnessEntry {
+                key: cpu_parameters_key(&high),
+                score: 42.0,
+            },
+            CpuFitnessEntry {
+                key: cpu_parameters_key(&baseline),
+                score: 99.0,
+            },
+        ],
+    );
+    assert_eq!(
+        scoring_plan.unique_candidates,
+        vec![low.clone(), high.clone(), tied.clone()]
+    );
+    assert_eq!(
+        scoring_plan.cached_scores,
+        vec![CpuScoredCandidate {
+            parameters: high.clone(),
+            score: 42.0,
+        }]
+    );
+    assert_eq!(scoring_plan.uncached_candidates, vec![low, tied]);
+    assert_eq!(scoring_plan.cache_hits, 1);
 }
 
 #[test]

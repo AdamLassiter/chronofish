@@ -1,16 +1,18 @@
 import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SHADER, FORWARD_OUTPUT_SHADER, OUTPUT_DELTA_SHADER, HIDDEN_DELTA_SHADER, HIDDEN3_DELTA_SHADER, APPLY_LAYER_SHADER, APPLY_INDEXED_LAYER_SHADER, APPLY_OUTPUT_SHADER, POLICY_SHADER, POLICY_LOSS_SHADER, REDUCE_LOSS_SHADER } from "./training-shaders.js";
-import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES, OPTIMIZER_MOMENTUM, POLICY_BUCKETS, POLICY_STEPS_PER_SUBMIT, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, TILED_TRAINING_MIN_BATCH, VALUE_EPOCHS_PER_SUBMIT, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
-import { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
+import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES, OPTIMIZER_MOMENTUM, POLICY_BUCKETS, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
+import { align4, createComputePipelineChecked, denseKernelEntryPoint as fallbackDenseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
+import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
 import { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, moveOrCollapseValidationGroup, movePositionGroupToValidation, shuffledIndices, splitValidationSamples, trainingLabelPriority, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
 import type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
+import type { ChronofishEngine } from "./types.js";
 import type { SparseProjectionFeatures, TrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
 import type { ValidationSplit } from "./training-gpu-samples.js";
 export { VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
-export { align4, createComputePipelineChecked, denseKernelEntryPoint, formatBytes, formatShaderErrors, getGpuDevice, requestHighLimitDevice } from "./training-gpu-device.js";
-export { byteArraysEqual, compactModelIsFinite, decodeCompactModel, encodeCompactModel, writeAscii, writeF32, writeU32 } from "./training-gpu-model.js";
-export { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, shuffledIndices, splitValidationSamples, stableSampleHash, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
-export type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
+export { align4, createComputePipelineChecked, formatBytes, formatShaderErrors, getGpuDevice, requestHighLimitDevice } from "./training-gpu-device.js";
+export { byteArraysEqual, compactModelBytesAreFiniteWithEngine, compactModelIsFinite, decodeCompactFrontierModelLayoutWithEngine, decodeCompactModel, decodeCompactModelWithEngine, encodeCompactModel, encodeCompactModelWithEngine, writeAscii, writeF32, writeU32 } from "./training-gpu-model.js";
+export { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, shuffledIndices, splitValidationSamples, stableSampleHash, trainingLabelPriority, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
+export type { CompactFrontierModelLayout, CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
 export type { ValidationSplit } from "./training-gpu-samples.js";
 export type { SparseProjectionFeatures, TrainingConfig, TrainingLabelKind, TrainingMetrics, TrainingSample } from "./training-gpu-types.js";
 
@@ -86,7 +88,17 @@ interface PredictionModel {
   scale?: number;
 }
 
-function outputLayerSize(layers: number[] = HIDDEN_LAYERS): number {
+interface CompactTrainingLayout {
+  architectureMatches: boolean;
+  outputSize: number;
+  hiddenWeights: Float32Array;
+  outputWeights: Float32Array;
+}
+
+export function outputLayerSize(layers: number[] = HIDDEN_LAYERS, engine?: ChronofishEngine): number {
+  if (engine && isDefaultHiddenLayers(layers)) {
+    return engine.chronofish_default_output_layer_size();
+  }
   const size = layers[layers.length - 1];
   if (size === undefined) {
     throw new Error("Model must have at least one hidden layer.");
@@ -94,8 +106,16 @@ function outputLayerSize(layers: number[] = HIDDEN_LAYERS): number {
   return size;
 }
 
-function previousLayerSize(layers: number[], layerIndex: number, inputSize: number): number {
+export function previousLayerSize(layers: number[], layerIndex: number, inputSize: number, engine?: ChronofishEngine): number {
+  if (engine && isDefaultHiddenLayers(layers)) {
+    return engine.chronofish_default_previous_layer_size(layerIndex, inputSize);
+  }
   return layerIndex === 0 ? inputSize : layers[layerIndex - 1]!;
+}
+
+function isDefaultHiddenLayers(layers: number[]): boolean {
+  return layers.length === HIDDEN_LAYERS.length
+    && layers.every((layer, index) => layer === HIDDEN_LAYERS[index]);
 }
 
 function policyLogitsArray(model: CompactValueModel | null): Float32Array | null {
@@ -106,7 +126,24 @@ function policyLogitsArray(model: CompactValueModel | null): Float32Array | null
   return new Float32Array(Array.from(logits).slice(0, POLICY_BUCKETS));
 }
 
-function policyWeightsArray(model: CompactValueModel | null, inputSize: number): Float32Array | null {
+export function policyWeightsArray(model: CompactValueModel | null, inputSize: number, engine?: ChronofishEngine): Float32Array | null {
+  if (model && engine) {
+    const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
+    const input = writeWasmBytes(engine, modelBytes);
+    try {
+      const output = engine.chronofish_compact_value_model_policy_weights_bytes(
+        input.ptr,
+        input.len,
+        inputSize
+      );
+      if (output) {
+        const bytes = readWasmBytes(engine, output);
+        return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+      }
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   const expected = POLICY_BUCKETS * (inputSize + 1);
   if (model?.policyWeights?.length === expected) {
     return new Float32Array(model.policyWeights);
@@ -158,14 +195,15 @@ export async function train(
   samples: TrainingSample[],
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
-  progress: (message: Record<string, unknown>) => void
+  progress: (message: Record<string, unknown>) => void,
+  engine?: ChronofishEngine
 ): Promise<EncodedCompactModel> {
   if (!samples?.length) {
     throw new Error("No samples were collected.");
   }
-  if (uniqueTrainingPositionCount(samples, samples.map((_, index) => index)) <= CPU_HEAD_TRAINING_MAX_POSITIONS) {
+  if (uniqueTrainingPositionCount(samples, samples.map((_, index) => index), engine) <= cpuHeadTrainingMaxPositions(engine)) {
     return timed(config.metrics, "cpuHeadTrain", () =>
-      trainHeadsOnCpu(samples, config, activeModel, progress)
+      trainHeadsOnCpu(samples, config, activeModel, progress, engine)
     );
   }
   if (!globalThis.navigator?.gpu) {
@@ -176,16 +214,16 @@ export async function train(
   if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  const trainingSamples = selectTrainingWorkingSet(samples, device);
+  const trainingSamples = selectTrainingWorkingSet(samples, device, engine);
   const value = await timed(config.metrics, "valueTrain", () =>
-    trainValue(device, trainingSamples, config, activeModel, progress)
+    trainValue(device, trainingSamples, config, activeModel, progress, engine)
   );
   try {
-    const valueSplit = splitValidationSamples(trainingSamples, config.validationSplit);
+    const valueSplit = splitValidationSamples(trainingSamples, config.validationSplit, engine);
     const hiddenFeatures = trainingSamples.map((sample) =>
       hiddenFeaturesOnCpu(sample, PROJECTION_SIZE, PROJECTION_SEED, HIDDEN_LAYERS, value.hiddenWeights)
     );
-    const auxiliary = trainAuxiliaryValueHeadsOnCpu(trainingSamples, hiddenFeatures, config, activeModel, valueSplit);
+    const auxiliary = trainAuxiliaryValueHeadsOnCpu(trainingSamples, hiddenFeatures, config, activeModel, valueSplit, engine);
     const policy = await timed(config.metrics, "policyTrain", () =>
       trainPolicy(
         device,
@@ -193,7 +231,8 @@ export async function train(
         config,
         activeModel,
         value.policyFeatureBuffer,
-        outputLayerSize()
+        outputLayerSize(HIDDEN_LAYERS, engine),
+        engine
       )
     );
     const model: EncodedCompactModel = encodeCompactModel({
@@ -207,7 +246,7 @@ export async function train(
       scale: 1,
       bias: 0,
       outputActivation: "tanh"
-    });
+    }, engine);
     model.trainingLoss = value.loss;
     model.initialValidationLoss = value.initialValidationLoss;
     model.validationLoss = value.validationLoss;
@@ -222,10 +261,10 @@ export async function train(
     model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
     model.earlyStopReason = value.earlyStopReason;
     model.labelCounts = configuredLabelCounts(config);
-    model.nonZeroWeights = countNonZero(value.weights) + countNonZero(auxiliary.weights) + countNonZero(value.hiddenWeights) + countNonZero(policy.weights);
+    model.nonZeroWeights = countNonZero(value.weights, engine) + countNonZero(auxiliary.weights, engine) + countNonZero(value.hiddenWeights, engine) + countNonZero(policy.weights, engine);
     model.replayBufferSize = samples.length;
     model.trainingSampleCount = trainingSamples.length;
-    model.policyTrainingSampleCount = trainingSamples.filter(hasPolicyTrainingTarget).length;
+    model.policyTrainingSampleCount = policyTrainingIndices(trainingSamples, false, engine).length;
     model.hiddenLayersTrained = value.hiddenLayersTrained;
     return model;
   } finally {
@@ -237,30 +276,20 @@ export function trainHeadsOnCpu(
   samples: TrainingSample[],
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
-  progress: (message: Record<string, unknown>) => void = () => {}
+  progress: (message: Record<string, unknown>) => void = () => {},
+  engine?: ChronofishEngine
 ): EncodedCompactModel {
-  const split = splitValidationSamples(samples, config.validationSplit);
+  const split = splitValidationSamples(samples, config.validationSplit, engine);
   const trainIndices = split.trainIndices.length ? split.trainIndices : split.validationIndices;
   const validationIndices = split.validationIndices;
-  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
-  const batchSize = Math.min(config.batchSize, Math.max(1, trainIndices.length));
-  const hiddenWeights = modelArchitectureMatches(activeModel)
-    ? activeModel.hiddenWeights.slice()
-    : initialHiddenWeights(PROJECTION_SIZE, HIDDEN_LAYERS);
-  const hiddenFeatures = samples.map((sample) =>
-    hiddenFeaturesOnCpu(sample, PROJECTION_SIZE, PROJECTION_SEED, HIDDEN_LAYERS, hiddenWeights)
-  );
-  const outputSize = outputLayerSize();
-  const outputWeights = modelArchitectureMatches(activeModel)
-    && activeModel.outputWeights.length === outputSize + 1
-    ? activeModel.outputWeights.slice()
-    : new Float32Array(outputSize + 1);
-  if (!modelArchitectureMatches(activeModel)) {
-    outputWeights[outputSize] = inverseTanh(
-      samples.reduce((sum, sample) => sum + sample.label, 0) / samples.length
-    );
-  }
-  const labelWeights = Float32Array.from(samples, (sample) => Math.max(0, sample.labelWeight ?? 1));
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices, engine);
+  const batchSize = valueTrainingBatchSize(config.batchSize, trainIndices.length, engine);
+  const averageLabel = samples.reduce((sum, sample) => sum + sample.label, 0) / samples.length;
+  const layout = compactTrainingLayout(activeModel, averageLabel, engine);
+  const hiddenWeights = layout.hiddenWeights;
+  const hiddenFeatures = hiddenFeaturesForSamples(samples, hiddenWeights, engine);
+  const outputWeights = layout.outputWeights;
+  const labelWeights = Float32Array.from(samples, (sample) => trainingLabelWeight(sample.labelWeight, engine));
   const lossIndices = validationIndices.length ? validationIndices : trainIndices;
   const initialValidationLoss = valueHeadLossOnCpu(hiddenFeatures, samples, outputWeights, lossIndices);
   let bestValidationLoss = initialValidationLoss;
@@ -272,10 +301,10 @@ export function trainHeadsOnCpu(
   let epochsWithoutImprovement = 0;
   let earlyStopReason = "";
   const batchIndices = new Uint32Array(batchSize);
-  const validationInterval = Math.max(1, Math.min(config.epochs, config.validationInterval ?? 256));
+  const validationInterval = valueHeadValidationInterval(config.epochs, config.validationInterval, engine);
 
   for (let epoch = 1; epoch <= config.epochs; epoch += 1) {
-    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, epoch, split.seed, labelWeights);
+    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, epoch, split.seed, labelWeights, engine);
     applyValueHeadGradientOnCpu(
       hiddenFeatures,
       samples,
@@ -321,8 +350,8 @@ export function trainHeadsOnCpu(
     }
   }
 
-  const auxiliary = trainAuxiliaryValueHeadsOnCpu(samples, hiddenFeatures, config, activeModel, split);
-  const policy = trainPolicyHeadOnCpu(samples, hiddenFeatures, config, activeModel, split);
+  const auxiliary = trainAuxiliaryValueHeadsOnCpu(samples, hiddenFeatures, config, activeModel, split, engine);
+  const policy = trainPolicyHeadOnCpu(samples, hiddenFeatures, config, activeModel, split, engine);
   const model: EncodedCompactModel = encodeCompactModel({
     projectionSize: PROJECTION_SIZE,
     projectionSeed: PROJECTION_SEED,
@@ -334,7 +363,7 @@ export function trainHeadsOnCpu(
     scale: 1,
     bias: 0,
     outputActivation: "tanh"
-  });
+  }, engine);
   model.trainingLoss = lastTrainLoss;
   model.initialValidationLoss = initialValidationLoss;
   model.validationLoss = lastValidationLoss;
@@ -349,21 +378,64 @@ export function trainHeadsOnCpu(
   model.modelChanged = !activeModel?.bytes || !byteArraysEqual(model, activeModel.bytes);
   model.earlyStopReason = earlyStopReason;
   model.labelCounts = configuredLabelCounts(config);
-  model.nonZeroWeights = countNonZero(bestOutputWeights) + countNonZero(auxiliary.weights) + countNonZero(hiddenWeights) + countNonZero(policy.weights);
+  model.nonZeroWeights = countNonZero(bestOutputWeights, engine) + countNonZero(auxiliary.weights, engine) + countNonZero(hiddenWeights, engine) + countNonZero(policy.weights, engine);
   model.replayBufferSize = samples.length;
   model.trainingSampleCount = samples.length;
-  model.policyTrainingSampleCount = samples.filter(hasPolicyTrainingTarget).length;
+  model.policyTrainingSampleCount = policyTrainingIndices(samples, false, engine).length;
   model.hiddenLayersTrained = false;
   return model;
 }
 
-export function selectTrainingWorkingSet(samples: TrainingSample[], device: GPUDevice): TrainingSample[] {
-  const projectedBytes = samples.length * PROJECTION_SIZE * Float32Array.BYTES_PER_ELEMENT;
+export function selectTrainingWorkingSet(samples: TrainingSample[], device: GPUDevice, engine?: ChronofishEngine): TrainingSample[] {
+  const maxProjectedBytes = trainingWorkingSetMaxProjectedBytes(device);
+  if (engine) {
+    return selectTrainingWorkingSetWithEngine(samples, maxProjectedBytes, engine);
+  }
+  return selectTrainingWorkingSetFallback(samples, maxProjectedBytes);
+}
+
+function trainingWorkingSetMaxProjectedBytes(device: GPUDevice): number {
   const maxBindingSize = device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
-  if (projectedBytes <= maxBindingSize) {
+  return maxBindingSize;
+}
+
+function selectTrainingWorkingSetWithEngine(samples: TrainingSample[], maxProjectedBytes: number, engine: ChronofishEngine): TrainingSample[] {
+  const input = writeWasmString(engine, JSON.stringify(samples));
+  try {
+    const output = engine.chronofish_select_training_working_set_indexes_bytes(
+      input.ptr,
+      input.len,
+      maxProjectedBytes
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    const bytes = readWasmBytes(engine, output);
+    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new Error("Training working set index response is not i32-aligned.");
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const selected: TrainingSample[] = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
+      const index = view.getInt32(offset, true);
+      const sample = samples[index];
+      if (!sample) {
+        throw new Error(`Training working set index ${index} is out of range.`);
+      }
+      selected.push(sample);
+    }
+    return selected;
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+function selectTrainingWorkingSetFallback(samples: TrainingSample[], maxProjectedBytes: number): TrainingSample[] {
+  const projectedBytes = samples.length * PROJECTION_SIZE * Float32Array.BYTES_PER_ELEMENT;
+  if (projectedBytes <= maxProjectedBytes) {
     return samples;
   }
-  const maxProjectedSamples = Math.max(1, Math.floor(maxBindingSize / (PROJECTION_SIZE * Float32Array.BYTES_PER_ELEMENT)));
+  const maxProjectedSamples = Math.max(1, Math.floor(maxProjectedBytes / (PROJECTION_SIZE * Float32Array.BYTES_PER_ELEMENT)));
   const target = Math.max(1, Math.min(samples.length, maxProjectedSamples));
   const ranked = samples
     .map((sample, index) => ({
@@ -412,10 +484,10 @@ export function selectTrainingWorkingSet(samples: TrainingSample[], device: GPUD
     .map((entry) => entry.sample);
 }
 
-function trainingSamplePriority(sample: TrainingSample, index: number, total: number): number {
+function trainingSamplePriority(sample: TrainingSample, index: number, total: number, engine?: ChronofishEngine): number {
   const recency = total > 1 ? index / (total - 1) : 1;
-  return trainingLabelPriority(sample.labelKind, sample.pseudo) +
-    Math.max(0, sample.labelWeight ?? 1) +
+  return trainingLabelPriority(sample.labelKind, sample.pseudo, engine) +
+    trainingLabelWeight(sample.labelWeight, engine) +
     recency * 0.25;
 }
 
@@ -424,7 +496,8 @@ export async function trainValue(
   samples: TrainingSample[],
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
-  progress: (message: Record<string, unknown>) => void
+  progress: (message: Record<string, unknown>) => void,
+  engine?: ChronofishEngine
 ): Promise<TrainedValueWeights> {
   const firstSample = samples[0];
   if (!firstSample || !samples.every((sample) => sample.features.length === firstSample.features.length)) {
@@ -439,29 +512,22 @@ export async function trainValue(
     labels[sampleIndex] = sample.label;
     labelWeights[sampleIndex] = sample.labelWeight ?? 1;
   }
-  const split = splitValidationSamples(samples, config.validationSplit);
+  const split = splitValidationSamples(samples, config.validationSplit, engine);
   const trainIndices = split.trainIndices.length ? split.trainIndices : split.validationIndices;
   const validationIndices = split.validationIndices;
-  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
-  const hiddenLayersTrained = uniqueTrainingPositionCount(samples, trainIndices) >= MIN_HIDDEN_TRAINING_POSITIONS;
-  const batchSize = Math.min(config.batchSize, Math.max(1, trainIndices.length));
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices, engine);
+  const hiddenLayersTrained = uniqueTrainingPositionCount(samples, trainIndices, engine) >= minHiddenTrainingPositions(engine);
+  const batchSize = valueTrainingBatchSize(config.batchSize, trainIndices.length, engine);
 
-  const initialHidden = modelArchitectureMatches(activeModel)
-    ? activeModel.hiddenWeights
-    : initialHiddenWeights(PROJECTION_SIZE, HIDDEN_LAYERS);
-  const layerWeights = splitHiddenWeights(initialHidden, PROJECTION_SIZE, HIDDEN_LAYERS);
-  const outputSize = outputLayerSize();
-  const outputWeights = new Float32Array(outputSize + 1);
-  if (modelArchitectureMatches(activeModel) && activeModel.outputWeights?.length === outputWeights.length) {
-    outputWeights.set(activeModel.outputWeights);
-  } else {
-    outputWeights[outputSize] = inverseTanh(
-      labels.reduce((sum, value) => sum + value, 0) / labels.length
-    );
-  }
+  const averageLabel = labels.reduce((sum, value) => sum + value, 0) / labels.length;
+  const layout = compactTrainingLayout(activeModel, averageLabel, engine);
+  const initialHidden = layout.hiddenWeights;
+  const layerWeights = splitHiddenWeights(initialHidden, PROJECTION_SIZE, HIDDEN_LAYERS, engine);
+  const outputSize = layout.outputSize;
+  const outputWeights = layout.outputWeights;
 
   const featureBuffer = await timed(config.metrics, "projection", () =>
-    projectSamplesToBuffer(device, samples, PROJECTION_SIZE, PROJECTION_SEED)
+    projectSamplesToBuffer(device, samples, PROJECTION_SIZE, PROJECTION_SEED, engine)
   );
   const labelBuffer = storageBuffer(device, labels, gpuBufferUsage.STORAGE);
   const labelWeightBuffer = storageBuffer(device, labelWeights, gpuBufferUsage.STORAGE);
@@ -503,8 +569,8 @@ export async function trainValue(
     size: align4(batchSize * Float32Array.BYTES_PER_ELEMENT),
     usage: gpuBufferUsage.STORAGE
   });
-  const batchesPerSubmit = Math.min(VALUE_EPOCHS_PER_SUBMIT, Math.max(1, config.epochs));
-  const validationInterval = Math.max(batchesPerSubmit, config.validationInterval ?? 256);
+  const batchesPerSubmit = valueGpuBatchesPerSubmit(config.epochs, engine);
+  const validationInterval = valueGpuValidationInterval(batchesPerSubmit, config.validationInterval, engine);
   const batchIndexBuffers = Array.from({ length: batchesPerSubmit }, () => device.createBuffer({
     size: align4(batchSize * Uint32Array.BYTES_PER_ELEMENT),
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_DST
@@ -514,9 +580,12 @@ export async function trainValue(
     layerParamsBuffer(
       device,
       batchSize,
-      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE),
+      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine),
       layerSize,
-      0
+      0,
+      0,
+      0,
+      engine
     )
   );
   const applyLayerParams = hiddenLayersTrained
@@ -524,39 +593,41 @@ export async function trainValue(
       layerParamsBuffer(
         device,
         batchSize,
-        previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE),
+        previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine),
         layerSize,
         config.learningRate,
         config.weightDecay,
-        OPTIMIZER_MOMENTUM
+        OPTIMIZER_MOMENTUM,
+        engine
       )
     )
     : [];
-  const forwardOutputParams = outputParamsBuffer(device, batchSize, outputSize, 0);
+  const forwardOutputParams = outputParamsBuffer(device, batchSize, outputSize, 0, 0, 0, engine);
   const applyOutputParams = outputParamsBuffer(
     device,
     batchSize,
     outputSize,
     config.learningRate,
     config.weightDecay,
-    OPTIMIZER_MOMENTUM
+    OPTIMIZER_MOMENTUM,
+    engine
   );
   const outputDeltaParams = Array.from({ length: batchesPerSubmit }, () =>
-    outputDeltaParamsBuffer(device, batchSize, batchSize)
+    outputDeltaParamsBuffer(device, batchSize, batchSize, engine)
   );
   const lastHiddenDeltaParams = hiddenLayersTrained
-    ? hiddenDeltaParamsBuffer(device, batchSize, outputLayerSize(), 0)
+    ? hiddenDeltaParamsBuffer(device, batchSize, outputLayerSize(HIDDEN_LAYERS, engine), 0, engine)
     : null;
   const hiddenDeltaParams = hiddenLayersTrained
     ? HIDDEN_LAYERS.slice(0, -1).map((layerSize, layerIndex) =>
-      hiddenDeltaParamsBuffer(device, batchSize, layerSize, HIDDEN_LAYERS[layerIndex + 1]!)
+      hiddenDeltaParamsBuffer(device, batchSize, layerSize, HIDDEN_LAYERS[layerIndex + 1]!, engine)
     )
     : [];
 
-  const denseKernelSuffix = batchSize >= TILED_TRAINING_MIN_BATCH ? "tiled" : "naive";
-  const forwardLayerEntryPoint = denseKernelEntryPoint("forward_layer", batchSize);
-  const applyLayerEntryPoint = denseKernelEntryPoint("apply_layer", batchSize);
-  const hiddenDeltaEntryPoint = denseKernelEntryPoint("hidden_delta", batchSize);
+  const forwardLayerEntryPoint = denseKernelEntryPoint("forward_layer", batchSize, engine);
+  const applyLayerEntryPoint = denseKernelEntryPoint("apply_layer", batchSize, engine);
+  const hiddenDeltaEntryPoint = denseKernelEntryPoint("hidden_delta", batchSize, engine);
+  const denseKernelSuffix = denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint);
   const forwardIndexedLayerPipeline = await createComputePipelineChecked(device, `forward_indexed_layer_${denseKernelSuffix}`, FORWARD_INDEXED_LAYER_SHADER, forwardLayerEntryPoint);
   const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelSuffix}`, FORWARD_LAYER_SHADER, forwardLayerEntryPoint);
   const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
@@ -589,7 +660,8 @@ export async function trainValue(
       forwardIndexedLayerPipeline,
       forwardLayerPipeline,
       forwardOutputPipeline,
-      reduceLossPipeline
+      reduceLossPipeline,
+      engine
     )
   );
   let bestValidationLoss = initialValidationLoss;
@@ -605,15 +677,15 @@ export async function trainValue(
     for (; epoch <= batchEnd; epoch += 1) {
       const batchSlot = (epoch - 1) % batchesPerSubmit;
       const batchIndexBuffer = batchIndexBuffers[batchSlot]!;
-      const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, epoch, split.seed, labelWeights);
+      const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, epoch, split.seed, labelWeights, engine);
       device.queue.writeBuffer(batchIndexBuffer, 0, batchIndices);
       device.queue.writeBuffer(
         outputDeltaParams[batchSlot]!,
         0,
-        outputDeltaParamsData(batchSize, batchWeight)
+        outputDeltaParamsData(batchSize, batchWeight, engine)
       );
       for (let layerIndex = 0; layerIndex < HIDDEN_LAYERS.length; layerIndex += 1) {
-        const inputSize = previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE);
+        const inputSize = previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine);
         const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1]!;
         const outputSizeForLayer = HIDDEN_LAYERS[layerIndex]!;
         encodePipeline(device, encoder, layerIndex === 0 ? forwardIndexedLayerPipeline : forwardLayerPipeline, [
@@ -622,7 +694,7 @@ export async function trainValue(
           activationBuffers[layerIndex]!,
           forwardLayerParams[layerIndex]!,
           ...(layerIndex === 0 ? [batchIndexBuffer] : [])
-        ], Math.ceil(batchSize / 16), Math.ceil(outputSizeForLayer / 16));
+        ], trainingWorkgroups16(batchSize, engine), trainingWorkgroups16(outputSizeForLayer, engine));
       }
 
       encodePipeline(device, encoder, forwardOutputPipeline, [
@@ -630,7 +702,7 @@ export async function trainValue(
         outputWeightBuffer,
         predictionBuffer,
         forwardOutputParams
-      ], Math.ceil(batchSize / 64));
+      ], trainingWorkgroups64(batchSize, engine));
 
       encodePipeline(device, encoder, outputDeltaPipeline, [
         predictionBuffer,
@@ -639,7 +711,7 @@ export async function trainValue(
         outputDeltaParams[batchSlot]!,
         batchIndexBuffer,
         labelWeightBuffer
-      ], Math.ceil(batchSize / 64));
+      ], trainingWorkgroups64(batchSize, engine));
 
       if (hiddenLayersTrained) {
         const lastLayerIndex = HIDDEN_LAYERS.length - 1;
@@ -649,7 +721,7 @@ export async function trainValue(
           outputWeightBuffer,
           deltaBuffers[lastLayerIndex]!,
           lastHiddenDeltaParams!
-        ], Math.ceil(batchSize / 16), Math.ceil(HIDDEN_LAYERS[lastLayerIndex]! / 16));
+        ], trainingWorkgroups16(batchSize, engine), trainingWorkgroups16(HIDDEN_LAYERS[lastLayerIndex]!, engine));
 
         for (let layerIndex = HIDDEN_LAYERS.length - 2; layerIndex >= 0; layerIndex -= 1) {
           encodePipeline(device, encoder, hiddenDeltaPipeline!, [
@@ -658,7 +730,7 @@ export async function trainValue(
             weightBuffers[layerIndex + 1]!,
             deltaBuffers[layerIndex]!,
             hiddenDeltaParams[layerIndex]!
-          ], Math.ceil(batchSize / 16), Math.ceil(HIDDEN_LAYERS[layerIndex]! / 16));
+          ], trainingWorkgroups16(batchSize, engine), trainingWorkgroups16(HIDDEN_LAYERS[layerIndex]!, engine));
         }
       }
 
@@ -668,11 +740,11 @@ export async function trainValue(
         outputWeightBuffer,
         applyOutputParams,
         outputVelocityBuffer
-      ], Math.ceil((outputSize + 1) / 64));
+      ], trainingWorkgroups64(outputSize + 1, engine));
 
       if (hiddenLayersTrained) {
         for (let layerIndex = HIDDEN_LAYERS.length - 1; layerIndex >= 0; layerIndex -= 1) {
-          const inputSize = previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE);
+          const inputSize = previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine);
           const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1]!;
           const outputSizeForLayer = HIDDEN_LAYERS[layerIndex]!;
           encodePipeline(device, encoder, layerIndex === 0 ? applyIndexedLayerPipeline! : applyLayerPipeline!, [
@@ -683,7 +755,7 @@ export async function trainValue(
             ...(layerIndex === 0
               ? [batchIndexBuffer, velocityBuffers[layerIndex]!]
               : [velocityBuffers[layerIndex]!])
-          ], Math.ceil((inputSize + 1) / 16), Math.ceil(outputSizeForLayer / 16));
+          ], trainingWorkgroups16(inputSize + 1, engine), trainingWorkgroups16(outputSizeForLayer, engine));
         }
       }
     }
@@ -703,7 +775,8 @@ export async function trainValue(
         forwardIndexedLayerPipeline,
         forwardLayerPipeline,
         forwardOutputPipeline,
-        reduceLossPipeline
+        reduceLossPipeline,
+        engine
       )
     );
     lastValidationLoss = validationIndices.length
@@ -719,7 +792,8 @@ export async function trainValue(
           forwardIndexedLayerPipeline,
           forwardLayerPipeline,
           forwardOutputPipeline,
-          reduceLossPipeline
+          reduceLossPipeline,
+          engine
         )
       )
       : lastTrainLoss;
@@ -760,21 +834,23 @@ export async function trainValue(
   } = await timed(config.metrics, "bestWeightReadback", () =>
     readTrainingWeights(device, bestOutputWeightBuffer, bestWeightBuffers, layerWeights, outputWeights.byteLength)
   );
-  const policyFeatureKernelSuffix = sampleCount >= TILED_TRAINING_MIN_BATCH ? "tiled" : "naive";
+  const policyFeatureEntryPoint = denseKernelEntryPoint("forward_layer", sampleCount, engine);
+  const policyFeatureKernelSuffix = denseKernelLabelSuffix("forward_layer", policyFeatureEntryPoint);
   const policyFeatureForwardPipeline = await createComputePipelineChecked(
     device,
     `forward_layer_${policyFeatureKernelSuffix}`,
     FORWARD_LAYER_SHADER,
-    denseKernelEntryPoint("forward_layer", sampleCount)
+    policyFeatureEntryPoint
   );
   const policyFeatures = forwardHiddenFeaturesOnProjectedGpu(
     device,
     featureBuffer,
     bestWeightBuffers,
     sampleCount,
-    policyFeatureForwardPipeline
+    policyFeatureForwardPipeline,
+    engine
   );
-  const trainedHidden = concatFloat32(trainedLayerWeights);
+  const trainedHidden = concatFloat32(trainedLayerWeights, engine);
   return {
     featureCount: outputSize,
     weights: trainedOutput,
@@ -820,24 +896,22 @@ export async function trainPolicy(
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
   featureBuffer: GPUBuffer,
-  inputSize: number
+  inputSize: number,
+  engine?: ChronofishEngine
 ): Promise<TrainedPolicyWeights> {
-  const policyIndices: number[] = [];
+  const policyIndices = policyTrainingIndices(samples, true, engine);
   const targets = new Uint32Array(samples.length);
   const labelWeights = new Float32Array(samples.length);
   for (let index = 0; index < samples.length; index += 1) {
     const sample = samples[index]!;
-    if (!hasPolicyTrainingTarget(sample)) {
+    if (!hasPolicyTrainingTarget(sample, engine)) {
       continue;
     }
-    targets[index] = Math.min(POLICY_BUCKETS - 1, sample.policy ?? 0);
-    labelWeights[index] = Math.max(0, sample.labelWeight ?? 1);
-    if (labelWeights[index]! > 0) {
-      policyIndices.push(index);
-    }
+    targets[index] = policyTrainingTarget(sample.policy, engine);
+    labelWeights[index] = trainingLabelWeight(sample.labelWeight, engine);
   }
   const weightCount = POLICY_BUCKETS * (inputSize + 1);
-  const initialWeights = policyWeightsArray(activeModel, inputSize) ?? new Float32Array(weightCount);
+  const initialWeights = policyWeightsArray(activeModel, inputSize, engine) ?? new Float32Array(weightCount);
   if (!policyIndices.length) {
     return {
       weights: initialWeights,
@@ -847,14 +921,14 @@ export async function trainPolicy(
       checkpointImproved: false
     };
   }
-  const split = splitValidationSamples(samples, config.validationSplit);
-  const policySplit = splitPolicyTrainingIndices(samples, policyIndices, split, config.validationSplit ?? 0);
+  const split = splitValidationSamples(samples, config.validationSplit, engine);
+  const policySplit = splitPolicyTrainingIndices(samples, policyIndices, split, config.validationSplit ?? 0, engine);
   const trainIndices = policySplit.trainIndices.length ? policySplit.trainIndices : policyIndices;
   const validationIndices = policySplit.validationIndices;
-  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
-  const batchSize = Math.min(config.batchSize, trainIndices.length);
-  const steps = policyTrainingSteps(config.epochs);
-  const stepsPerSubmit = Math.min(POLICY_STEPS_PER_SUBMIT, steps);
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices, engine);
+  const batchSize = policyTrainingBatchSize(config.batchSize, trainIndices.length, engine);
+  const steps = policyTrainingSteps(config.epochs, engine);
+  const stepsPerSubmit = policyTrainingStepsPerSubmit(steps, engine);
   const targetBuffer = storageBuffer(device, targets, gpuBufferUsage.STORAGE);
   const labelWeightBuffer = storageBuffer(device, labelWeights, gpuBufferUsage.STORAGE);
   const policyWeightBuffer = storageBuffer(
@@ -881,13 +955,15 @@ export async function trainPolicy(
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_DST
   }));
   const paramsBuffers = Array.from({ length: stepsPerSubmit }, () =>
-    storageBuffer(device, policyParamsData(batchSize, inputSize, 1, config), gpuBufferUsage.UNIFORM)
+    storageBuffer(device, policyParamsData(batchSize, inputSize, 1, config, engine), gpuBufferUsage.UNIFORM)
   );
   const batchIndices = new Uint32Array(batchSize);
-  const policyKernelSuffix = batchSize >= TILED_TRAINING_MIN_BATCH ? "tiled" : "naive";
-  const forwardPipeline = await createComputePipelineChecked(device, `policy_forward_${policyKernelSuffix}`, POLICY_SHADER, denseKernelEntryPoint("forward_policy", batchSize));
+  const policyForwardEntryPoint = denseKernelEntryPoint("forward_policy", batchSize, engine);
+  const policyApplyEntryPoint = denseKernelEntryPoint("apply_policy", batchSize, engine);
+  const policyKernelSuffix = denseKernelLabelSuffix("forward_policy", policyForwardEntryPoint);
+  const forwardPipeline = await createComputePipelineChecked(device, `policy_forward_${policyKernelSuffix}`, POLICY_SHADER, policyForwardEntryPoint);
   const deltaPipeline = await createComputePipelineChecked(device, "policy_delta", POLICY_SHADER, "policy_delta");
-  const applyPipeline = await createComputePipelineChecked(device, `policy_apply_${policyKernelSuffix}`, POLICY_SHADER, denseKernelEntryPoint("apply_policy", batchSize));
+  const applyPipeline = await createComputePipelineChecked(device, `policy_apply_${policyKernelSuffix}`, POLICY_SHADER, policyApplyEntryPoint);
   const lossPipeline = await createComputePipelineChecked(device, "policy_loss", POLICY_LOSS_SHADER, "reduce_policy_loss");
   const lossIndices = validationIndices.length ? validationIndices : trainIndices;
   const initialValidationLoss = await policyLossOnGpu(
@@ -898,7 +974,8 @@ export async function trainPolicy(
     policyWeightBuffer,
     lossIndices,
     inputSize,
-    lossPipeline
+    lossPipeline,
+    engine
   );
   let lastValidationLoss = initialValidationLoss;
   let bestValidationLoss = initialValidationLoss;
@@ -913,13 +990,14 @@ export async function trainPolicy(
         trainGroups,
         step + 1,
         0x9e3779b9,
-        labelWeights
+        labelWeights,
+        engine
       );
       device.queue.writeBuffer(batchIndexBuffers[slot]!, 0, batchIndices);
       device.queue.writeBuffer(
         paramsBuffers[slot]!,
         0,
-        policyParamsData(batchSize, inputSize, batchWeight, config)
+        policyParamsData(batchSize, inputSize, batchWeight, config, engine)
       );
       encodePipelineBindings(device, encoder, forwardPipeline, [
         [0, featureBuffer],
@@ -927,7 +1005,7 @@ export async function trainPolicy(
         [4, logitsBuffer],
         [6, batchIndexBuffers[slot]!],
         [7, paramsBuffers[slot]!]
-      ], Math.ceil(batchSize / 16), Math.ceil(POLICY_BUCKETS / 16));
+      ], trainingWorkgroups16(batchSize, engine), trainingWorkgroups16(POLICY_BUCKETS, engine));
       encodePipelineBindings(device, encoder, deltaPipeline, [
         [1, targetBuffer],
         [2, labelWeightBuffer],
@@ -935,7 +1013,7 @@ export async function trainPolicy(
         [5, deltaBuffer],
         [6, batchIndexBuffers[slot]!],
         [7, paramsBuffers[slot]!]
-      ], Math.ceil(batchSize / 64));
+      ], trainingWorkgroups64(batchSize, engine));
       encodePipelineBindings(device, encoder, applyPipeline, [
         [0, featureBuffer],
         [3, policyWeightBuffer],
@@ -943,7 +1021,7 @@ export async function trainPolicy(
         [6, batchIndexBuffers[slot]!],
         [7, paramsBuffers[slot]!],
         [8, policyVelocityBuffer]
-      ], Math.ceil((inputSize + 1) / 16), Math.ceil(POLICY_BUCKETS / 16));
+      ], trainingWorkgroups16(inputSize + 1, engine), trainingWorkgroups16(POLICY_BUCKETS, engine));
     }
     device.queue.submit([encoder.finish()]);
     lastValidationLoss = await policyLossOnGpu(
@@ -954,7 +1032,8 @@ export async function trainPolicy(
       policyWeightBuffer,
       lossIndices,
       inputSize,
-      lossPipeline
+      lossPipeline,
+      engine
     );
     if (lastValidationLoss + 1e-6 < bestValidationLoss) {
       bestValidationLoss = lastValidationLoss;
@@ -991,13 +1070,99 @@ export async function trainPolicy(
   };
 }
 
-export function hasPolicyTrainingTarget(sample: TrainingSample): boolean {
+export function hasPolicyTrainingTarget(sample: TrainingSample, engine?: ChronofishEngine): boolean {
+  if (engine) {
+    const input = writeWasmString(engine, JSON.stringify(sample));
+    try {
+      return Boolean(engine.chronofish_has_policy_training_target_json(input.ptr, input.len));
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   return sample.labelKind !== "distilled"
     && Number.isInteger(sample.policy)
     && (sample.policy ?? -1) >= 0;
 }
 
+export function policyTrainingIndices(samples: TrainingSample[], requirePositiveWeight: boolean, engine?: ChronofishEngine): number[] {
+  if (engine) {
+    return policyTrainingIndicesWithEngine(samples, requirePositiveWeight, engine);
+  }
+  return samples
+    .map((sample, index) => ({ sample, index }))
+    .filter(({ sample }) =>
+      hasPolicyTrainingTarget(sample) && (!requirePositiveWeight || trainingLabelWeight(sample.labelWeight, engine) > 0)
+    )
+    .map(({ index }) => index);
+}
+
+function policyTrainingIndicesWithEngine(samples: TrainingSample[], requirePositiveWeight: boolean, engine: ChronofishEngine): number[] {
+  const input = writeWasmString(engine, JSON.stringify(samples));
+  try {
+    const output = engine.chronofish_policy_training_indices_bytes(
+      input.ptr,
+      input.len,
+      requirePositiveWeight ? 1 : 0
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    const bytes = readWasmBytes(engine, output);
+    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
+      throw new Error("Policy training index response is not i32-aligned.");
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const indices: number[] = [];
+    for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
+      indices.push(view.getInt32(offset, true));
+    }
+    return indices;
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
 export function splitPolicyTrainingIndices(
+  samples: TrainingSample[],
+  policyIndices: number[],
+  split: ValidationSplit,
+  validationSplit: number,
+  engine?: ChronofishEngine
+): ValidationSplit {
+  if (engine) {
+    return splitPolicyTrainingIndicesWithEngine(samples, policyIndices, split, validationSplit, engine);
+  }
+  return splitPolicyTrainingIndicesFallback(samples, policyIndices, split, validationSplit);
+}
+
+function splitPolicyTrainingIndicesWithEngine(
+  samples: TrainingSample[],
+  policyIndices: number[],
+  split: ValidationSplit,
+  validationSplit: number,
+  engine: ChronofishEngine
+): ValidationSplit {
+  const input = writeWasmString(engine, JSON.stringify({
+    samples,
+    policyIndices,
+    split
+  }));
+  try {
+    const output = engine.chronofish_split_policy_training_indices_json(
+      input.ptr,
+      input.len,
+      validationSplit
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as ValidationSplit;
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+function splitPolicyTrainingIndicesFallback(
   samples: TrainingSample[],
   policyIndices: number[],
   split: ValidationSplit,
@@ -1015,8 +1180,83 @@ export function splitPolicyTrainingIndices(
   return { trainIndices, validationIndices, seed: split.seed };
 }
 
-export function policyTrainingSteps(valueEpochs: number): number {
+export function policyTrainingSteps(valueEpochs: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_policy_training_steps(valueEpochs);
+  }
   return Math.max(16, Math.min(256, Math.ceil(valueEpochs / 64)));
+}
+
+export function policyTrainingTarget(policy: number | undefined, engine?: ChronofishEngine): number {
+  const value = policy ?? 0;
+  if (engine) {
+    return engine.chronofish_policy_training_target(value);
+  }
+  return Math.min(POLICY_BUCKETS - 1, value);
+}
+
+export function trainingLabelWeight(labelWeight: number | undefined, engine?: ChronofishEngine): number {
+  const value = labelWeight ?? 1;
+  if (engine) {
+    return engine.chronofish_training_label_weight(value);
+  }
+  return Math.max(0, value);
+}
+
+export function trainingWeightedAverage(total: number, totalWeight: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_training_weighted_average(total, totalWeight);
+  }
+  return totalWeight > 0 ? total / totalWeight : 0;
+}
+
+export function trainingBatchNormalization(batchWeight: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_training_batch_normalization(batchWeight);
+  }
+  return 1 / Math.max(batchWeight, 1e-6);
+}
+
+export function valueTrainingBatchSize(configBatchSize: number, trainingCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_value_training_batch_size(configBatchSize, trainingCount);
+  }
+  return Math.min(configBatchSize, Math.max(1, trainingCount));
+}
+
+export function policyTrainingBatchSize(configBatchSize: number, trainingCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_policy_training_batch_size(configBatchSize, trainingCount);
+  }
+  return Math.min(configBatchSize, trainingCount);
+}
+
+export function valueHeadValidationInterval(epochs: number, validationInterval?: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_value_head_validation_interval(epochs, validationInterval ?? -1);
+  }
+  return Math.max(1, Math.min(epochs, validationInterval ?? 256));
+}
+
+export function valueGpuBatchesPerSubmit(epochs: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_value_gpu_batches_per_submit(epochs);
+  }
+  return Math.min(64, Math.max(1, epochs));
+}
+
+export function valueGpuValidationInterval(batchesPerSubmit: number, validationInterval?: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_value_gpu_validation_interval(batchesPerSubmit, validationInterval ?? -1);
+  }
+  return Math.max(batchesPerSubmit, validationInterval ?? 256);
+}
+
+export function policyTrainingStepsPerSubmit(steps: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_policy_training_steps_per_submit(steps);
+  }
+  return Math.min(64, steps);
 }
 
 async function policyLossOnGpu(
@@ -1027,13 +1267,14 @@ async function policyLossOnGpu(
   policyWeightBuffer: GPUBuffer,
   indices: number[],
   inputSize: number,
-  pipeline: GPUComputePipeline
+  pipeline: GPUComputePipeline,
+  engine?: ChronofishEngine
 ): Promise<number> {
   if (!indices.length) {
     return 0;
   }
   const indexBuffer = storageBuffer(device, new Uint32Array(indices), gpuBufferUsage.STORAGE);
-  const partialCount = lossReductionWorkgroupCount(indices.length);
+  const partialCount = lossReductionWorkgroupCount(indices.length, engine);
   const partialBuffer = device.createBuffer({
     size: align4(partialCount * 2 * Float32Array.BYTES_PER_ELEMENT),
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC
@@ -1063,7 +1304,7 @@ async function policyLossOnGpu(
     totalWeight += partials[index + 1] ?? 0;
   }
   destroyBuffers([indexBuffer, partialBuffer, paramsBuffer]);
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 export function runPipeline(device: GPUDevice, pipeline: GPUComputePipeline, buffers: GPUBuffer[], workgroupsX: number, workgroupsY = 1): void {
@@ -1189,12 +1430,24 @@ export function paramsBuffer([first, second]: [number, number], learningRate: nu
   return params;
 }
 
-function policyParamsData(
+export function policyParamsData(
   batchCount: number,
   inputSize: number,
   totalWeight: number,
-  config: TrainingConfig
+  config: TrainingConfig,
+  engine?: ChronofishEngine
 ): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_policy_params_bytes(
+      batchCount,
+      inputSize,
+      totalWeight,
+      config.learningRate,
+      config.weightDecay,
+      OPTIMIZER_MOMENTUM
+    );
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, batchCount, true);
@@ -1207,7 +1460,11 @@ function policyParamsData(
   return params;
 }
 
-export function layerParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, outputSize: number, learningRate: number, weightDecay = 0, momentum = 0): GPUBuffer {
+export function layerParamsData(sampleCount: number, inputSize: number, outputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_layer_params_bytes(sampleCount, inputSize, outputSize, learningRate, weightDecay, momentum);
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
@@ -1216,10 +1473,18 @@ export function layerParamsBuffer(device: GPUDevice, sampleCount: number, inputS
   view.setFloat32(12, learningRate, true);
   view.setFloat32(16, weightDecay, true);
   view.setFloat32(20, momentum, true);
-  return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
+  return params;
 }
 
-export function outputParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, learningRate: number, weightDecay = 0, momentum = 0): GPUBuffer {
+export function layerParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, outputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): GPUBuffer {
+  return storageBuffer(device, layerParamsData(sampleCount, inputSize, outputSize, learningRate, weightDecay, momentum, engine), gpuBufferUsage.UNIFORM);
+}
+
+export function outputParamsData(sampleCount: number, inputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_output_params_bytes(sampleCount, inputSize, learningRate, weightDecay, momentum);
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
@@ -1227,14 +1492,22 @@ export function outputParamsBuffer(device: GPUDevice, sampleCount: number, input
   view.setFloat32(12, learningRate, true);
   view.setFloat32(16, weightDecay, true);
   view.setFloat32(20, momentum, true);
-  return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
+  return params;
 }
 
-export function outputDeltaParamsBuffer(device: GPUDevice, sampleCount: number, totalWeight = sampleCount): GPUBuffer {
-  return storageBuffer(device, outputDeltaParamsData(sampleCount, totalWeight), gpuBufferUsage.UNIFORM);
+export function outputParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): GPUBuffer {
+  return storageBuffer(device, outputParamsData(sampleCount, inputSize, learningRate, weightDecay, momentum, engine), gpuBufferUsage.UNIFORM);
 }
 
-function outputDeltaParamsData(sampleCount: number, totalWeight: number): ArrayBuffer {
+export function outputDeltaParamsBuffer(device: GPUDevice, sampleCount: number, totalWeight = sampleCount, engine?: ChronofishEngine): GPUBuffer {
+  return storageBuffer(device, outputDeltaParamsData(sampleCount, totalWeight, engine), gpuBufferUsage.UNIFORM);
+}
+
+export function outputDeltaParamsData(sampleCount: number, totalWeight: number, engine?: ChronofishEngine): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_output_delta_params_bytes(sampleCount, totalWeight);
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(16);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
@@ -1242,13 +1515,21 @@ function outputDeltaParamsData(sampleCount: number, totalWeight: number): ArrayB
   return params;
 }
 
-export function hiddenDeltaParamsBuffer(device: GPUDevice, sampleCount: number, currentSize: number, nextSize: number): GPUBuffer {
+export function hiddenDeltaParamsBuffer(device: GPUDevice, sampleCount: number, currentSize: number, nextSize: number, engine?: ChronofishEngine): GPUBuffer {
+  return storageBuffer(device, hiddenDeltaParamsData(sampleCount, currentSize, nextSize, engine), gpuBufferUsage.UNIFORM);
+}
+
+export function hiddenDeltaParamsData(sampleCount: number, currentSize: number, nextSize: number, engine?: ChronofishEngine): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_hidden_delta_params_bytes(sampleCount, currentSize, nextSize);
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(16);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
   view.setUint32(4, currentSize, true);
   view.setUint32(8, nextSize, true);
-  return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
+  return params;
 }
 
 export function storageBuffer(device: GPUDevice, data: ArrayBuffer | ArrayBufferView, usage: number): GPUBuffer {
@@ -1270,8 +1551,8 @@ function zeroStorageBuffer(device: GPUDevice, byteLength: number): GPUBuffer {
   });
 }
 
-export async function projectSamplesToBuffer(device: GPUDevice, samples: TrainingSample[], projectionSize: number, seed = PROJECTION_SEED): Promise<GPUBuffer> {
-  const inputSize = featureLength(samples);
+export async function projectSamplesToBuffer(device: GPUDevice, samples: TrainingSample[], projectionSize: number, seed = PROJECTION_SEED, engine?: ChronofishEngine): Promise<GPUBuffer> {
+  const inputSize = featureLength(samples, engine);
   const maxBindingSize = device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
   const projectedBytes = samples.length * projectionSize * Float32Array.BYTES_PER_ELEMENT;
   if (projectedBytes > maxBindingSize) {
@@ -1282,7 +1563,8 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC
   });
   const pipeline = await createComputePipelineChecked(device, "project_features", PROJECT_FEATURES_SHADER, "project_features");
-  const temporaryBudget = projectionTemporaryBudget(device);
+  const temporaryBudget = projectionTemporaryBudget(device, engine);
+  const projectionChunkSize = projectionBatchChunkSize(engine);
   let batchOffset = 0;
   while (batchOffset < samples.length) {
     const encoder = device.createCommandEncoder();
@@ -1290,8 +1572,8 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
     let temporaryBytes = 0;
     let offset = batchOffset;
     while (offset < samples.length) {
-      const chunkSamples = samples.slice(offset, offset + PROJECTION_CHUNK_SIZE);
-      const sparseFeatures = packSparseProjectionFeatures(chunkSamples, inputSize);
+      const chunkSamples = samples.slice(offset, offset + projectionChunkSize);
+      const sparseFeatures = packSparseProjectionFeatures(chunkSamples, inputSize, engine);
       if (temporaryBuffers.length && temporaryBytes + sparseFeatures.byteLength > temporaryBudget) {
         break;
       }
@@ -1307,7 +1589,8 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
         inputSize,
         projectionSize,
         seed,
-        offset
+        offset,
+        engine
       );
       temporaryBuffers.push(offsetBuffer, indexBuffer, valueBuffer, paramsBuffer);
       temporaryBytes += sparseFeatures.byteLength;
@@ -1316,8 +1599,8 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
         encoder,
         pipeline,
         [offsetBuffer, indexBuffer, valueBuffer, projectedBuffer, paramsBuffer],
-        Math.ceil(chunkSamples.length / 16),
-        Math.ceil(projectionSize / 16)
+        trainingWorkgroups16(chunkSamples.length, engine),
+        trainingWorkgroups16(projectionSize, engine)
       );
       offset += chunkSamples.length;
     }
@@ -1331,15 +1614,99 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
   return projectedBuffer;
 }
 
-function projectionTemporaryBudget(device: GPUDevice): number {
+export function projectionTemporaryBudget(device: GPUDevice, engine?: ChronofishEngine): number {
   const maxBufferSize = device.limits?.maxBufferSize ?? 256 * 1024 * 1024;
+  if (engine) {
+    return engine.chronofish_projection_temporary_budget(maxBufferSize);
+  }
   return Math.min(
     PROJECTION_TEMPORARY_BUDGET,
     Math.max(1, Math.floor(maxBufferSize / 2))
   );
 }
 
-export function packSparseProjectionFeatures(samples: TrainingSample[], inputSize = featureLength(samples)): SparseProjectionFeatures {
+export function cpuPredictionMaxBatch(engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_cpu_prediction_max_batch();
+  }
+  return CPU_PREDICTION_MAX_BATCH;
+}
+
+export function cpuHeadTrainingMaxPositions(engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_cpu_head_training_max_positions();
+  }
+  return CPU_HEAD_TRAINING_MAX_POSITIONS;
+}
+
+export function minHiddenTrainingPositions(engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_min_hidden_training_positions();
+  }
+  return MIN_HIDDEN_TRAINING_POSITIONS;
+}
+
+export function projectionBatchChunkSize(engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_projection_chunk_size();
+  }
+  return PROJECTION_CHUNK_SIZE;
+}
+
+export function packSparseProjectionFeatures(samples: TrainingSample[], inputSize?: number, engine?: ChronofishEngine): SparseProjectionFeatures {
+  const resolvedInputSize = inputSize ?? featureLength(samples, engine);
+  if (engine) {
+    return packSparseProjectionFeaturesWithEngine(samples, resolvedInputSize, engine);
+  }
+  return packSparseProjectionFeaturesFallback(samples, resolvedInputSize);
+}
+
+function packSparseProjectionFeaturesWithEngine(samples: TrainingSample[], inputSize: number, engine: ChronofishEngine): SparseProjectionFeatures {
+  const input = writeWasmString(engine, JSON.stringify(samples));
+  try {
+    const output = engine.chronofish_sparse_projection_features_bytes(input.ptr, input.len, inputSize);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return readSparseProjectionFeatures(readWasmBytes(engine, output));
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+function readSparseProjectionFeatures(bytes: Uint8Array): SparseProjectionFeatures {
+  if (bytes.byteLength < 16) {
+    throw new Error("Sparse projection feature response is truncated.");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const offsetsLength = view.getUint32(0, true);
+  const indicesLength = view.getUint32(4, true);
+  const valuesLength = view.getUint32(8, true);
+  const byteLength = view.getUint32(12, true);
+  const expectedLength = 16 + (offsetsLength + indicesLength + valuesLength) * Uint32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedLength) {
+    throw new Error(`Sparse projection feature response has ${bytes.byteLength} bytes but expected ${expectedLength}.`);
+  }
+  const offsets = new Uint32Array(offsetsLength);
+  const indices = new Uint32Array(indicesLength);
+  const values = new Float32Array(valuesLength);
+  let cursor = 16;
+  for (let index = 0; index < offsetsLength; index += 1) {
+    offsets[index] = view.getUint32(cursor, true);
+    cursor += 4;
+  }
+  for (let index = 0; index < indicesLength; index += 1) {
+    indices[index] = view.getUint32(cursor, true);
+    cursor += 4;
+  }
+  for (let index = 0; index < valuesLength; index += 1) {
+    values[index] = view.getFloat32(cursor, true);
+    cursor += 4;
+  }
+  return { offsets, indices, values, byteLength };
+}
+
+function packSparseProjectionFeaturesFallback(samples: TrainingSample[], inputSize: number): SparseProjectionFeatures {
   const offsets = new Uint32Array(samples.length + 1);
   let nonZeroCount = 0;
   for (let sampleIndex = 0; sampleIndex < samples.length; sampleIndex += 1) {
@@ -1377,7 +1744,11 @@ export function packSparseProjectionFeatures(samples: TrainingSample[], inputSiz
   };
 }
 
-export function projectionParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, projectionSize: number, seed: number, outputOffset = 0): GPUBuffer {
+export function projectionParamsData(sampleCount: number, inputSize: number, projectionSize: number, seed: number, outputOffset = 0, engine?: ChronofishEngine): ArrayBuffer {
+  if (engine) {
+    const output = engine.chronofish_projection_params_bytes(sampleCount, inputSize, projectionSize, seed >>> 0, outputOffset);
+    return readWasmBytes(engine, output).buffer;
+  }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
   view.setUint32(0, sampleCount, true);
@@ -1385,7 +1756,11 @@ export function projectionParamsBuffer(device: GPUDevice, sampleCount: number, i
   view.setUint32(8, projectionSize, true);
   view.setUint32(12, seed >>> 0, true);
   view.setUint32(16, outputOffset, true);
-  return storageBuffer(device, params, gpuBufferUsage.UNIFORM);
+  return params;
+}
+
+export function projectionParamsBuffer(device: GPUDevice, sampleCount: number, inputSize: number, projectionSize: number, seed: number, outputOffset = 0, engine?: ChronofishEngine): GPUBuffer {
+  return storageBuffer(device, projectionParamsData(sampleCount, inputSize, projectionSize, seed, outputOffset, engine), gpuBufferUsage.UNIFORM);
 }
 
 export async function readFloats(device: GPUDevice, buffer: GPUBuffer, byteLength: number): Promise<Float32Array<ArrayBuffer>> {
@@ -1404,17 +1779,17 @@ export async function readFloats(device: GPUDevice, buffer: GPUBuffer, byteLengt
   return copy;
 }
 
-export async function predictionLossOnGpu(device: GPUDevice, samples: TrainingSample[], model: PredictionModel): Promise<number> {
-  const predictions = await predictValuesOnGpu(device, samples, model);
+export async function predictionLossOnGpu(device: GPUDevice, samples: TrainingSample[], model: PredictionModel, engine?: ChronofishEngine): Promise<number> {
+  const predictions = await predictValuesOnGpu(device, samples, model, engine);
   let total = 0;
   let totalWeight = 0;
   for (let index = 0; index < samples.length; index += 1) {
     const error = predictions[index]! - samples[index]!.label;
-    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    const weight = trainingLabelWeight(samples[index]!.labelWeight);
     total += weight * error * error;
     totalWeight += weight;
   }
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 export async function predictionLossOnProjectedGpu(
@@ -1428,7 +1803,8 @@ export async function predictionLossOnProjectedGpu(
   forwardIndexedLayerPipeline: GPUComputePipeline,
   forwardLayerPipeline: GPUComputePipeline,
   forwardOutputPipeline: GPUComputePipeline,
-  reduceLossPipeline: GPUComputePipeline
+  reduceLossPipeline: GPUComputePipeline,
+  engine?: ChronofishEngine
 ): Promise<number> {
   if (!indices.length) {
     return 0;
@@ -1444,7 +1820,7 @@ export async function predictionLossOnProjectedGpu(
     size: align4(sampleCount * Float32Array.BYTES_PER_ELEMENT),
     usage: gpuBufferUsage.STORAGE
   });
-  const partialCount = lossReductionWorkgroupCount(sampleCount);
+  const partialCount = lossReductionWorkgroupCount(sampleCount, engine);
   const partialLossBuffer = device.createBuffer({
     size: align4(partialCount * 2 * Float32Array.BYTES_PER_ELEMENT),
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC
@@ -1453,12 +1829,15 @@ export async function predictionLossOnProjectedGpu(
     layerParamsBuffer(
       device,
       sampleCount,
-      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE),
+      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine),
       layerSize,
-      0
+      0,
+      0,
+      0,
+      engine
     )
   );
-  const forwardOutputParams = outputParamsBuffer(device, sampleCount, outputLayerSize(), 0);
+  const forwardOutputParams = outputParamsBuffer(device, sampleCount, outputLayerSize(HIDDEN_LAYERS, engine), 0, 0, 0, engine);
   const reduceLossParams = lossParamsBuffer(device, sampleCount);
   const encoder = device.createCommandEncoder();
   for (let layerIndex = 0; layerIndex < HIDDEN_LAYERS.length; layerIndex += 1) {
@@ -1470,14 +1849,14 @@ export async function predictionLossOnProjectedGpu(
       activationBuffers[layerIndex]!,
       forwardLayerParams[layerIndex]!,
       ...(layerIndex === 0 ? [batchIndexBuffer] : [])
-    ], Math.ceil(sampleCount / 16), Math.ceil(outputSizeForLayer / 16));
+    ], trainingWorkgroups16(sampleCount, engine), trainingWorkgroups16(outputSizeForLayer, engine));
   }
   encodePipeline(device, encoder, forwardOutputPipeline, [
     activationBuffers[activationBuffers.length - 1]!,
     outputWeightBuffer,
     predictionBuffer,
     forwardOutputParams
-  ], Math.ceil(sampleCount / 64));
+  ], trainingWorkgroups64(sampleCount, engine));
   encodePipeline(device, encoder, reduceLossPipeline, [
     predictionBuffer,
     labelBuffer,
@@ -1507,7 +1886,7 @@ export async function predictionLossOnProjectedGpu(
     forwardOutputParams,
     reduceLossParams
   ]);
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 function forwardHiddenFeaturesOnProjectedGpu(
@@ -1515,7 +1894,8 @@ function forwardHiddenFeaturesOnProjectedGpu(
   featureBuffer: GPUBuffer,
   weightBuffers: GPUBuffer[],
   sampleCount: number,
-  forwardLayerPipeline: GPUComputePipeline
+  forwardLayerPipeline: GPUComputePipeline,
+  engine?: ChronofishEngine
 ): { featureBuffer: GPUBuffer; resources: GPUBuffer[] } {
   const activationBuffers = HIDDEN_LAYERS.map((layerSize) => device.createBuffer({
     size: align4(sampleCount * layerSize * Float32Array.BYTES_PER_ELEMENT),
@@ -1525,9 +1905,12 @@ function forwardHiddenFeaturesOnProjectedGpu(
     layerParamsBuffer(
       device,
       sampleCount,
-      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE),
+      previousLayerSize(HIDDEN_LAYERS, layerIndex, PROJECTION_SIZE, engine),
       layerSize,
-      0
+      0,
+      0,
+      0,
+      engine
     )
   );
   const encoder = device.createCommandEncoder();
@@ -1538,7 +1921,7 @@ function forwardHiddenFeaturesOnProjectedGpu(
       weightBuffers[layerIndex]!,
       activationBuffers[layerIndex]!,
       params[layerIndex]!
-    ], Math.ceil(sampleCount / 16), Math.ceil(HIDDEN_LAYERS[layerIndex]! / 16));
+    ], trainingWorkgroups16(sampleCount, engine), trainingWorkgroups16(HIDDEN_LAYERS[layerIndex]!, engine));
   }
   device.queue.submit([encoder.finish()]);
   return {
@@ -1547,15 +1930,65 @@ function forwardHiddenFeaturesOnProjectedGpu(
   };
 }
 
-export function lossReductionWorkgroupCount(sampleCount: number): number {
+export function lossReductionWorkgroupCount(sampleCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_loss_reduction_workgroup_count(sampleCount);
+  }
   return Math.max(1, Math.ceil(sampleCount / 64));
+}
+
+export function trainingWorkgroups16(itemCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_training_workgroups_16(itemCount);
+  }
+  return Math.ceil(itemCount / 16);
+}
+
+export function trainingWorkgroups64(itemCount: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_training_workgroups_64(itemCount);
+  }
+  return Math.ceil(itemCount / 64);
+}
+
+export function denseKernelEntryPoint(entryPoint: string, sampleCount: number, engine?: ChronofishEngine): string {
+  if (engine) {
+    const input = writeWasmString(engine, entryPoint);
+    try {
+      const output = engine.chronofish_dense_kernel_entry_point_bytes(input.ptr, input.len, sampleCount);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return readWasmString(engine, output);
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
+  return fallbackDenseKernelEntryPoint(entryPoint, sampleCount);
+}
+
+function denseKernelLabelSuffix(entryPoint: string, selectedEntryPoint: string): string {
+  return selectedEntryPoint === entryPoint ? "tiled" : "naive";
 }
 
 function lossParamsBuffer(device: GPUDevice, sampleCount: number): GPUBuffer {
   return storageBuffer(device, new Uint32Array([sampleCount, 0, 0, 0]), gpuBufferUsage.UNIFORM);
 }
 
-export function splitHiddenWeights(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number[]): Float32Array[] {
+export function splitHiddenWeights(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number[], engine?: ChronofishEngine): Float32Array[] {
+  if (engine) {
+    const request = hiddenWeightSplitRequestBytes(hiddenWeights, inputSize, hiddenLayers);
+    const input = writeWasmBytes(engine, request);
+    try {
+      const output = engine.chronofish_split_hidden_weights_bytes(input.ptr, input.len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return readSplitHiddenWeights(readWasmBytes(engine, output));
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   const layers: Float32Array[] = [];
   let cursor = 0;
   let previousSize = inputSize;
@@ -1568,7 +2001,74 @@ export function splitHiddenWeights(hiddenWeights: Float32Array, inputSize: numbe
   return layers;
 }
 
-export function concatFloat32(arrays: Float32Array[]): Float32Array {
+function hiddenWeightSplitRequestBytes(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number[]): Uint8Array {
+  const byteLength = 12 + hiddenLayers.length * Uint32Array.BYTES_PER_ELEMENT + hiddenWeights.byteLength;
+  const bytes = new Uint8Array(byteLength);
+  const view = new DataView(bytes.buffer);
+  let cursor = 0;
+  view.setUint32(cursor, inputSize, true);
+  cursor += 4;
+  view.setUint32(cursor, hiddenLayers.length, true);
+  cursor += 4;
+  view.setUint32(cursor, hiddenWeights.length, true);
+  cursor += 4;
+  for (const layerSize of hiddenLayers) {
+    view.setUint32(cursor, layerSize, true);
+    cursor += 4;
+  }
+  bytes.set(new Uint8Array(hiddenWeights.buffer, hiddenWeights.byteOffset, hiddenWeights.byteLength), cursor);
+  return bytes;
+}
+
+function readSplitHiddenWeights(bytes: Uint8Array): Float32Array[] {
+  if (bytes.byteLength < 4) {
+    throw new Error("Hidden weight split response is truncated.");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const layerCount = view.getUint32(0, true);
+  const headerLength = 4 + layerCount * Uint32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength < headerLength) {
+    throw new Error("Hidden weight split response is missing layer lengths.");
+  }
+  const lengths: number[] = [];
+  let cursor = 4;
+  let valueCount = 0;
+  for (let index = 0; index < layerCount; index += 1) {
+    const length = view.getUint32(cursor, true);
+    lengths.push(length);
+    valueCount += length;
+    cursor += 4;
+  }
+  const expectedLength = headerLength + valueCount * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedLength) {
+    throw new Error(`Hidden weight split response has ${bytes.byteLength} bytes but expected ${expectedLength}.`);
+  }
+  const layers: Float32Array[] = [];
+  for (const length of lengths) {
+    const layer = new Float32Array(length);
+    for (let index = 0; index < length; index += 1) {
+      layer[index] = view.getFloat32(cursor, true);
+      cursor += 4;
+    }
+    layers.push(layer);
+  }
+  return layers;
+}
+
+export function concatFloat32(arrays: Float32Array[], engine?: ChronofishEngine): Float32Array {
+  if (engine) {
+    const request = concatFloat32RequestBytes(arrays);
+    const input = writeWasmBytes(engine, request);
+    try {
+      const output = engine.chronofish_concat_f32_bytes(input.ptr, input.len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return float32ArrayFromBytes(readWasmBytes(engine, output));
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   const length = arrays.reduce((sum, array) => sum + array.length, 0);
   const result = new Float32Array(length);
   let cursor = 0;
@@ -1579,7 +2079,41 @@ export function concatFloat32(arrays: Float32Array[]): Float32Array {
   return result;
 }
 
-export function countNonZero(values: ArrayLike<number>): number {
+function concatFloat32RequestBytes(arrays: Float32Array[]): Uint8Array {
+  const valueBytes = arrays.reduce((sum, array) => sum + array.byteLength, 0);
+  const bytes = new Uint8Array(4 + arrays.length * Uint32Array.BYTES_PER_ELEMENT + valueBytes);
+  const view = new DataView(bytes.buffer);
+  let cursor = 0;
+  view.setUint32(cursor, arrays.length, true);
+  cursor += 4;
+  for (const array of arrays) {
+    view.setUint32(cursor, array.length, true);
+    cursor += 4;
+  }
+  for (const array of arrays) {
+    bytes.set(new Uint8Array(array.buffer, array.byteOffset, array.byteLength), cursor);
+    cursor += array.byteLength;
+  }
+  return bytes;
+}
+
+function float32ArrayFromBytes(bytes: Uint8Array): Float32Array {
+  if (bytes.byteLength % Float32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Float32 response length is not a multiple of f32 size.");
+  }
+  return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+}
+
+export function countNonZero(values: ArrayLike<number>, engine?: ChronofishEngine): number {
+  if (engine) {
+    const array = values instanceof Float32Array ? values : Float32Array.from(Array.from(values));
+    const input = writeWasmBytes(engine, new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
+    try {
+      return engine.chronofish_count_non_zero_f32_bytes(input.ptr, input.len);
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   let count = 0;
   for (let index = 0; index < values.length; index += 1) {
     if ((values[index] ?? 0) !== 0) {
@@ -1589,14 +2123,17 @@ export function countNonZero(values: ArrayLike<number>): number {
   return count;
 }
 
-export async function predictValues(samples: TrainingSample[], model: CompactValueModel | null): Promise<number[]> {
+export async function predictValues(samples: TrainingSample[], model: CompactValueModel | null, engine?: ChronofishEngine): Promise<number[]> {
   if (!samples.length) {
     return [];
   }
-  if (!modelArchitectureMatches(model)) {
+  if (!modelArchitectureMatches(model, engine)) {
     throw new Error("GPU batch prediction unavailable.");
   }
-  if (samples.length <= CPU_PREDICTION_MAX_BATCH) {
+  if (samples.length <= cpuPredictionMaxBatch(engine)) {
+    if (engine) {
+      return predictValuesWithEngine(engine, samples, model);
+    }
     return Array.from(predictValuesOnCpu(samples, model));
   }
   if (!globalThis.navigator?.gpu) {
@@ -1606,7 +2143,104 @@ export async function predictValues(samples: TrainingSample[], model: CompactVal
   if (!device) {
     throw new Error("No WebGPU adapter is available.");
   }
-  return Array.from(await predictValuesOnGpu(device, samples, model));
+  return Array.from(await predictValuesOnGpu(device, samples, model, engine));
+}
+
+function compactTrainingLayoutWithEngine(engine: ChronofishEngine, activeModel: CompactValueModel | null, averageLabel: number): CompactTrainingLayout {
+  const modelBytes = activeModel?.bytes ?? (activeModel ? encodeCompactModel(activeModel, engine) : new Uint8Array());
+  const modelInput = writeWasmBytes(engine, modelBytes);
+  try {
+    const output = engine.chronofish_compact_value_model_training_layout_bytes(
+      modelInput.ptr,
+      modelInput.len,
+      averageLabel
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return readCompactTrainingLayout(readWasmBytes(engine, output));
+  } finally {
+    engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
+  }
+}
+
+function compactTrainingLayoutFallback(activeModel: CompactValueModel | null, averageLabel: number): CompactTrainingLayout {
+  const active = modelArchitectureMatches(activeModel);
+  const hiddenWeights = active
+    ? activeModel.hiddenWeights.slice()
+    : initialHiddenWeights(PROJECTION_SIZE, HIDDEN_LAYERS);
+  const outputSize = outputLayerSize();
+  const outputWeights = active && activeModel.outputWeights.length === outputSize + 1
+    ? activeModel.outputWeights.slice()
+    : new Float32Array(outputSize + 1);
+  if (!active || activeModel.outputWeights.length !== outputSize + 1) {
+    outputWeights[outputSize] = inverseTanh(averageLabel);
+  }
+  return {
+    architectureMatches: active,
+    outputSize,
+    hiddenWeights,
+    outputWeights
+  };
+}
+
+function compactTrainingLayout(activeModel: CompactValueModel | null, averageLabel: number, engine?: ChronofishEngine): CompactTrainingLayout {
+  return engine
+    ? compactTrainingLayoutWithEngine(engine, activeModel, averageLabel)
+    : compactTrainingLayoutFallback(activeModel, averageLabel);
+}
+
+function readCompactTrainingLayout(bytes: Uint8Array): CompactTrainingLayout {
+  if (bytes.byteLength < 16) {
+    throw new Error("Compact value model training layout is truncated.");
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const architectureMatches = view.getUint32(0, true) !== 0;
+  const outputSize = view.getUint32(4, true);
+  const hiddenLength = view.getUint32(8, true);
+  const outputLength = view.getUint32(12, true);
+  const expectedLength = 16 + (hiddenLength + outputLength) * Float32Array.BYTES_PER_ELEMENT;
+  if (bytes.byteLength !== expectedLength) {
+    throw new Error(`Compact value model training layout has ${bytes.byteLength} bytes but expected ${expectedLength}.`);
+  }
+  const hiddenWeights = new Float32Array(hiddenLength);
+  const outputWeights = new Float32Array(outputLength);
+  let cursor = 16;
+  for (let index = 0; index < hiddenLength; index += 1) {
+    hiddenWeights[index] = view.getFloat32(cursor, true);
+    cursor += 4;
+  }
+  for (let index = 0; index < outputLength; index += 1) {
+    outputWeights[index] = view.getFloat32(cursor, true);
+    cursor += 4;
+  }
+  return {
+    architectureMatches,
+    outputSize,
+    hiddenWeights,
+    outputWeights
+  };
+}
+
+function predictValuesWithEngine(engine: ChronofishEngine, samples: TrainingSample[], model: CompactValueModel): number[] {
+  const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
+  const modelInput = writeWasmBytes(engine, modelBytes);
+  const sampleInput = writeWasmString(engine, JSON.stringify(samples));
+  try {
+    const output = engine.chronofish_compact_value_model_predict_values_json(
+      modelInput.ptr,
+      modelInput.len,
+      sampleInput.ptr,
+      sampleInput.len
+    );
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as number[];
+  } finally {
+    engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
+    engine.chronofish_dealloc(sampleInput.ptr, sampleInput.len);
+  }
 }
 
 function hiddenFeaturesOnCpu(
@@ -1634,6 +2268,42 @@ function hiddenFeaturesOnCpu(
     activations = next;
   }
   return activations;
+}
+
+function hiddenFeaturesForSamples(samples: TrainingSample[], hiddenWeights: Float32Array, engine?: ChronofishEngine): Float32Array[] {
+  if (engine) {
+    const model = encodeCompactModel({
+      projectionSize: PROJECTION_SIZE,
+      projectionSeed: PROJECTION_SEED,
+      hiddenLayers: HIDDEN_LAYERS,
+      hiddenWeights,
+      outputWeights: new Float32Array(outputLayerSize(HIDDEN_LAYERS, engine) + 1),
+      scale: 1,
+      bias: 0,
+      outputActivation: "tanh"
+    }, engine);
+    const modelInput = writeWasmBytes(engine, model);
+    const sampleInput = writeWasmString(engine, JSON.stringify(samples));
+    try {
+      const output = engine.chronofish_compact_value_model_hidden_features_json(
+        modelInput.ptr,
+        modelInput.len,
+        sampleInput.ptr,
+        sampleInput.len
+      );
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return (JSON.parse(readWasmString(engine, output)) as number[][])
+        .map((features) => Float32Array.from(features));
+    } finally {
+      engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
+      engine.chronofish_dealloc(sampleInput.ptr, sampleInput.len);
+    }
+  }
+  return samples.map((sample) =>
+    hiddenFeaturesOnCpu(sample, PROJECTION_SIZE, PROJECTION_SEED, HIDDEN_LAYERS, hiddenWeights)
+  );
 }
 
 export function predictValuesOnCpu(samples: TrainingSample[], model: CompactValueModel): Float32Array {
@@ -1672,12 +2342,12 @@ function valueHeadLossOnCpu(
       logit += feature[input]! * (weights[input] ?? 0);
     }
     const prediction = Math.tanh(logit);
-    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    const weight = trainingLabelWeight(samples[index]!.labelWeight);
     const error = prediction - samples[index]!.label;
     total += weight * error * error;
     totalWeight += weight;
   }
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 function applyValueHeadGradientOnCpu(
@@ -1699,7 +2369,7 @@ function applyValueHeadGradientOnCpu(
       logit += feature[input]! * (weights[input] ?? 0);
     }
     const prediction = Math.tanh(logit);
-    const scale = 2 * Math.max(0, samples[sampleIndex]!.labelWeight ?? 1)
+    const scale = 2 * trainingLabelWeight(samples[sampleIndex]!.labelWeight)
       * (prediction - samples[sampleIndex]!.label)
       * (1 - prediction * prediction);
     for (let input = 0; input < feature.length; input += 1) {
@@ -1707,7 +2377,7 @@ function applyValueHeadGradientOnCpu(
     }
     gradient[biasIndex] = (gradient[biasIndex] ?? 0) + scale;
   }
-  const normalization = 1 / Math.max(batchWeight, 1e-6);
+  const normalization = trainingBatchNormalization(batchWeight);
   for (let input = 0; input < weights.length; input += 1) {
     const decay = input === biasIndex ? 0 : weightDecay * weights[input]!;
     const update = gradient[input]! * normalization + decay;
@@ -1721,12 +2391,13 @@ function trainAuxiliaryValueHeadsOnCpu(
   features: Float32Array[],
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
-  valueSplit: ValidationSplit
+  valueSplit: ValidationSplit,
+  engine?: ChronofishEngine
 ): TrainedAuxiliaryValueWeights {
-  const inputSize = features[0]?.length ?? outputLayerSize();
+  const inputSize = features[0]?.length ?? outputLayerSize(HIDDEN_LAYERS, engine);
   const rowSize = inputSize + 1;
   const expected = AUXILIARY_VALUE_HEADS.length * rowSize;
-  const weights = modelArchitectureMatches(activeModel)
+  const weights = modelArchitectureMatches(activeModel, engine)
     && activeModel?.auxiliaryValueWeights?.length === expected
     ? activeModel.auxiliaryValueWeights.slice()
     : new Float32Array(expected);
@@ -1736,19 +2407,41 @@ function trainAuxiliaryValueHeadsOnCpu(
   if (!trainIndices.length) {
     return { weights, validationLoss: 0 };
   }
-  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
-  const batchSize = Math.min(config.batchSize, Math.max(1, trainIndices.length));
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices, engine);
+  const batchSize = valueTrainingBatchSize(config.batchSize, trainIndices.length, engine);
   const batchIndices = new Uint32Array(batchSize);
-  const labelWeights = Float32Array.from(samples, (sample) => Math.max(0, sample.labelWeight ?? 1));
-  const steps = Math.max(1, Math.min(config.epochs, policyTrainingSteps(config.epochs)));
+  const labelWeights = Float32Array.from(samples, (sample) => trainingLabelWeight(sample.labelWeight, engine));
+  const targets = auxiliaryValueTargetsForSamples(samples, engine);
+  const steps = Math.max(1, Math.min(config.epochs, policyTrainingSteps(config.epochs, engine)));
   for (let step = 1; step <= steps; step += 1) {
-    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, step, valueSplit.seed ^ 0xa77a11, labelWeights);
-    applyAuxiliaryValueHeadGradientOnCpu(features, samples, weights, batchIndices, batchWeight, config, velocity);
+    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, step, valueSplit.seed ^ 0xa77a11, labelWeights, engine);
+    applyAuxiliaryValueHeadGradientOnCpu(features, samples, targets, weights, batchIndices, batchWeight, config, velocity);
   }
   return {
     weights,
-    validationLoss: auxiliaryValueHeadLossOnCpu(features, samples, weights, validationIndices)
+    validationLoss: auxiliaryValueHeadLossOnCpu(features, samples, targets, weights, validationIndices)
   };
+}
+
+export function auxiliaryValueTargetsForSamples(samples: TrainingSample[], engine?: ChronofishEngine): Float32Array {
+  if (engine) {
+    const input = writeWasmString(engine, JSON.stringify(samples));
+    try {
+      const output = engine.chronofish_auxiliary_value_targets_bytes(input.ptr, input.len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      const bytes = readWasmBytes(engine, output);
+      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
+  const targets = new Float32Array(samples.length * AUXILIARY_VALUE_HEADS.length);
+  for (let index = 0; index < samples.length; index += 1) {
+    targets.set(auxiliaryValueTargets(samples[index]!), index * AUXILIARY_VALUE_HEADS.length);
+  }
+  return targets;
 }
 
 function auxiliaryValueTargets(sample: TrainingSample): number[] {
@@ -1812,6 +2505,7 @@ function encodedPieceValue(pieceType: number): number {
 function auxiliaryValueHeadLossOnCpu(
   features: Float32Array[],
   samples: TrainingSample[],
+  targets: Float32Array,
   weights: Float32Array,
   indices: number[]
 ): number {
@@ -1821,8 +2515,8 @@ function auxiliaryValueHeadLossOnCpu(
   let totalWeight = 0;
   for (const index of indices) {
     const feature = features[index]!;
-    const targets = auxiliaryValueTargets(samples[index]!);
-    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    const weight = trainingLabelWeight(samples[index]!.labelWeight);
+    const targetOffset = index * AUXILIARY_VALUE_HEADS.length;
     for (let head = 0; head < AUXILIARY_VALUE_HEADS.length; head += 1) {
       const row = head * rowSize;
       let logit = weights[row + inputSize] ?? 0;
@@ -1830,17 +2524,18 @@ function auxiliaryValueHeadLossOnCpu(
         logit += feature[input]! * (weights[row + input] ?? 0);
       }
       const prediction = Math.tanh(logit);
-      const error = prediction - (targets[head] ?? 0);
+      const error = prediction - (targets[targetOffset + head] ?? 0);
       total += weight * error * error;
       totalWeight += weight;
     }
   }
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 function applyAuxiliaryValueHeadGradientOnCpu(
   features: Float32Array[],
   samples: TrainingSample[],
+  targets: Float32Array,
   weights: Float32Array,
   batchIndices: Uint32Array,
   batchWeight: number,
@@ -1852,8 +2547,8 @@ function applyAuxiliaryValueHeadGradientOnCpu(
   const gradient = new Float32Array(weights.length);
   for (const sampleIndex of batchIndices) {
     const feature = features[sampleIndex]!;
-    const targets = auxiliaryValueTargets(samples[sampleIndex]!);
-    const sampleWeight = Math.max(0, samples[sampleIndex]!.labelWeight ?? 1);
+    const sampleWeight = trainingLabelWeight(samples[sampleIndex]!.labelWeight);
+    const targetOffset = sampleIndex * AUXILIARY_VALUE_HEADS.length;
     for (let head = 0; head < AUXILIARY_VALUE_HEADS.length; head += 1) {
       const row = head * rowSize;
       let logit = weights[row + inputSize] ?? 0;
@@ -1861,14 +2556,14 @@ function applyAuxiliaryValueHeadGradientOnCpu(
         logit += feature[input]! * (weights[row + input] ?? 0);
       }
       const prediction = Math.tanh(logit);
-      const scale = 2 * sampleWeight * (prediction - (targets[head] ?? 0)) * (1 - prediction * prediction);
+      const scale = 2 * sampleWeight * (prediction - (targets[targetOffset + head] ?? 0)) * (1 - prediction * prediction);
       for (let input = 0; input < inputSize; input += 1) {
         gradient[row + input] = (gradient[row + input] ?? 0) + scale * feature[input]!;
       }
       gradient[row + inputSize] = (gradient[row + inputSize] ?? 0) + scale;
     }
   }
-  const normalization = 1 / Math.max(batchWeight, 1e-6);
+  const normalization = trainingBatchNormalization(batchWeight);
   for (let index = 0; index < weights.length; index += 1) {
     const isBias = index % rowSize === inputSize;
     const decay = isBias ? 0 : config.weightDecay * weights[index]!;
@@ -1883,16 +2578,12 @@ function trainPolicyHeadOnCpu(
   features: Float32Array[],
   config: TrainingConfig,
   activeModel: CompactValueModel | null,
-  valueSplit: ValidationSplit
+  valueSplit: ValidationSplit,
+  engine?: ChronofishEngine
 ): TrainedPolicyWeights {
-  const policyIndices = samples
-    .map((sample, index) => ({ sample, index }))
-    .filter(({ sample }) =>
-      hasPolicyTrainingTarget(sample) && Math.max(0, sample.labelWeight ?? 1) > 0
-    )
-    .map(({ index }) => index);
-  const inputSize = features[0]?.length ?? outputLayerSize();
-  const initialWeights = policyWeightsArray(activeModel, inputSize)
+  const policyIndices = policyTrainingIndices(samples, true, engine);
+  const inputSize = features[0]?.length ?? outputLayerSize(HIDDEN_LAYERS, engine);
+  const initialWeights = policyWeightsArray(activeModel, inputSize, engine)
     ?? new Float32Array(POLICY_BUCKETS * (inputSize + 1));
   if (!policyIndices.length) {
     return {
@@ -1903,13 +2594,13 @@ function trainPolicyHeadOnCpu(
       checkpointImproved: false
     };
   }
-  const split = splitPolicyTrainingIndices(samples, policyIndices, valueSplit, config.validationSplit ?? 0);
+  const split = splitPolicyTrainingIndices(samples, policyIndices, valueSplit, config.validationSplit ?? 0, engine);
   const trainIndices = split.trainIndices.length ? split.trainIndices : policyIndices;
   const validationIndices = split.validationIndices;
-  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices);
-  const batchSize = Math.min(config.batchSize, trainIndices.length);
+  const trainGroups = groupTrainingIndicesByPosition(samples, trainIndices, engine);
+  const batchSize = policyTrainingBatchSize(config.batchSize, trainIndices.length, engine);
   const batchIndices = new Uint32Array(batchSize);
-  const labelWeights = Float32Array.from(samples, (sample) => Math.max(0, sample.labelWeight ?? 1));
+  const labelWeights = Float32Array.from(samples, (sample) => trainingLabelWeight(sample.labelWeight, engine));
   const weights = initialWeights.slice();
   const velocity = new Float32Array(weights.length);
   let bestWeights = weights.slice();
@@ -1918,9 +2609,9 @@ function trainPolicyHeadOnCpu(
   let validationLoss = initialValidationLoss;
   let bestValidationLoss = initialValidationLoss;
   let checkpointImproved = false;
-  const steps = policyTrainingSteps(config.epochs);
+  const steps = policyTrainingSteps(config.epochs, engine);
   for (let step = 1; step <= steps; step += 1) {
-    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, step, split.seed, labelWeights);
+    const batchWeight = fillGroupedTrainingBatchIndices(batchIndices, trainGroups, step, split.seed, labelWeights, engine);
     applyPolicyHeadGradientOnCpu(samples, features, weights, batchIndices, batchWeight, config, velocity);
     validationLoss = policyHeadLossOnCpu(samples, features, weights, lossIndices);
     if (validationLoss + 1e-6 < bestValidationLoss) {
@@ -1965,12 +2656,12 @@ function policyHeadLossOnCpu(
     for (const logit of logits) {
       denominator += Math.exp(logit - maxLogit);
     }
-    const target = Math.min(POLICY_BUCKETS - 1, samples[index]!.policy ?? 0);
-    const weight = Math.max(0, samples[index]!.labelWeight ?? 1);
+    const target = policyTrainingTarget(samples[index]!.policy);
+    const weight = trainingLabelWeight(samples[index]!.labelWeight);
     total += weight * (Math.log(Math.max(denominator, 1e-12)) - (logits[target]! - maxLogit));
     totalWeight += weight;
   }
-  return totalWeight > 0 ? total / totalWeight : 0;
+  return trainingWeightedAverage(total, totalWeight);
 }
 
 function applyPolicyHeadGradientOnCpu(
@@ -2003,8 +2694,8 @@ function applyPolicyHeadGradientOnCpu(
       logits[bucket] = Math.exp(logits[bucket]! - maxLogit);
       denominator += logits[bucket]!;
     }
-    const target = Math.min(POLICY_BUCKETS - 1, samples[sampleIndex]!.policy ?? 0);
-    const sampleWeight = Math.max(0, samples[sampleIndex]!.labelWeight ?? 1);
+    const target = policyTrainingTarget(samples[sampleIndex]!.policy);
+    const sampleWeight = trainingLabelWeight(samples[sampleIndex]!.labelWeight);
     for (let bucket = 0; bucket < POLICY_BUCKETS; bucket += 1) {
       const delta = ((logits[bucket]! / denominator) - (bucket === target ? 1 : 0)) * sampleWeight;
       const row = bucket * rowSize;
@@ -2014,7 +2705,7 @@ function applyPolicyHeadGradientOnCpu(
       gradient[row + inputSize] = (gradient[row + inputSize] ?? 0) + delta;
     }
   }
-  const normalization = 1 / Math.max(batchWeight, 1e-6);
+  const normalization = trainingBatchNormalization(batchWeight);
   for (let index = 0; index < weights.length; index += 1) {
     const isBias = index % rowSize === inputSize;
     const decay = isBias ? 0 : config.weightDecay * weights[index]!;
@@ -2024,23 +2715,38 @@ function applyPolicyHeadGradientOnCpu(
   }
 }
 
-export function optimizerVelocity(previous: number, gradient: number, momentum = OPTIMIZER_MOMENTUM): number {
+export function optimizerVelocity(previous: number, gradient: number, momentum = OPTIMIZER_MOMENTUM, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_optimizer_velocity(previous, gradient, momentum);
+  }
   return momentum * previous + (1 - momentum) * gradient;
 }
 
-export function boundedValue(value: number): number {
+export function boundedValue(value: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_bounded_value(value);
+  }
   return Math.max(-1, Math.min(1, Number.isFinite(value) ? value : 0));
 }
 
-export function normalizedSearchScore(score: number): number {
+export function normalizedSearchScore(score: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_normalized_search_score(score);
+  }
   return boundedValue(score / VALUE_SCORE_SCALE);
 }
 
-export function denormalizedSearchScore(value: number): number {
+export function denormalizedSearchScore(value: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_denormalized_search_score(value);
+  }
   return Math.round(boundedValue(value) * VALUE_SCORE_SCALE);
 }
 
-export function inverseTanh(value: number): number {
+export function inverseTanh(value: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_inverse_tanh(value);
+  }
   const bounded = Math.max(-0.999999, Math.min(0.999999, value));
   return 0.5 * Math.log((1 + bounded) / (1 - bounded));
 }
@@ -2068,17 +2774,18 @@ function projectSampleOnCpu(sample: TrainingSample, projectionSize: number, seed
   return projected;
 }
 
-export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSample[], model: CompactValueModel): Promise<Float32Array> {
+export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSample[], model: CompactValueModel, engine?: ChronofishEngine): Promise<Float32Array> {
   const sampleCount = samples.length;
   const featureBuffer = await projectSamplesToBuffer(
     device,
     samples,
     model.projectionSize,
-    model.projectionSeed
+    model.projectionSeed,
+    engine
   );
   const hiddenLayers = model.hiddenLayers;
-  const finalHiddenSize = outputLayerSize(hiddenLayers);
-  const layerWeights = splitHiddenWeights(model.hiddenWeights, model.projectionSize, hiddenLayers);
+  const finalHiddenSize = outputLayerSize(hiddenLayers, engine);
+  const layerWeights = splitHiddenWeights(model.hiddenWeights, model.projectionSize, hiddenLayers, engine);
   const weightBuffers = layerWeights.map((weights) => storageBuffer(device, weights, gpuBufferUsage.STORAGE));
   const outputWeightBuffer = storageBuffer(device, model.outputWeights, gpuBufferUsage.STORAGE);
   const activationBuffers = hiddenLayers.map((layerSize) => device.createBuffer({
@@ -2093,14 +2800,14 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
     layerParamsBuffer(
       device,
       sampleCount,
-      previousLayerSize(hiddenLayers, layerIndex, model.projectionSize),
+      previousLayerSize(hiddenLayers, layerIndex, model.projectionSize, engine),
       layerSize,
       0
     )
   );
-  const forwardOutputParams = outputParamsBuffer(device, sampleCount, finalHiddenSize, 0);
-  const kernelSuffix = sampleCount >= TILED_TRAINING_MIN_BATCH ? "tiled" : "naive";
-  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${kernelSuffix}`, FORWARD_LAYER_SHADER, denseKernelEntryPoint("forward_layer", sampleCount));
+  const forwardOutputParams = outputParamsBuffer(device, sampleCount, finalHiddenSize, 0, engine);
+  const forwardLayerEntryPoint = denseKernelEntryPoint("forward_layer", sampleCount, engine);
+  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint)}`, FORWARD_LAYER_SHADER, forwardLayerEntryPoint);
   const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
   const encoder = device.createCommandEncoder();
   for (let layerIndex = 0; layerIndex < hiddenLayers.length; layerIndex += 1) {
@@ -2110,20 +2817,20 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
       weightBuffers[layerIndex]!,
       activationBuffers[layerIndex]!,
       forwardLayerParams[layerIndex]!
-    ], Math.ceil(sampleCount / 16), Math.ceil(hiddenLayers[layerIndex]! / 16));
+    ], trainingWorkgroups16(sampleCount, engine), trainingWorkgroups16(hiddenLayers[layerIndex]!, engine));
   }
   encodePipeline(device, encoder, forwardOutputPipeline, [
     activationBuffers[activationBuffers.length - 1]!,
     outputWeightBuffer,
     predictionBuffer,
     forwardOutputParams
-  ], Math.ceil(sampleCount / 64));
+  ], trainingWorkgroups64(sampleCount, engine));
   device.queue.submit([encoder.finish()]);
   const predictions = await readFloats(device, predictionBuffer, sampleCount * Float32Array.BYTES_PER_ELEMENT);
   const scale = model.scale ?? 1;
   const bias = model.bias ?? 0;
   for (let index = 0; index < predictions.length; index += 1) {
-    predictions[index] = boundedValue((predictions[index] ?? 0) * scale + bias);
+    predictions[index] = boundedValue((predictions[index] ?? 0) * scale + bias, engine);
   }
   destroyBuffers([
     featureBuffer,
@@ -2137,7 +2844,16 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
   return predictions;
 }
 
-export function modelArchitectureMatches(model: CompactValueModel | null | undefined): model is CompactValueModel {
+export function modelArchitectureMatches(model: CompactValueModel | null | undefined, engine?: ChronofishEngine): model is CompactValueModel {
+  if (model && engine) {
+    const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
+    const input = writeWasmBytes(engine, modelBytes);
+    try {
+      return Boolean(engine.chronofish_compact_value_model_architecture_matches_bytes(input.ptr, input.len));
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   return Boolean(model
     && model.projectionSize === PROJECTION_SIZE
     && model.projectionSeed === PROJECTION_SEED
@@ -2147,7 +2863,10 @@ export function modelArchitectureMatches(model: CompactValueModel | null | undef
     && compactModelIsFinite(model));
 }
 
-export function projectionHash(rawIndex: number, projectionIndex: number, seed: number): number {
+export function projectionHash(rawIndex: number, projectionIndex: number, seed: number, engine?: ChronofishEngine): number {
+  if (engine) {
+    return engine.chronofish_projection_hash(rawIndex, projectionIndex, seed) >>> 0;
+  }
   let hash = (seed ^ rawIndex) >>> 0;
   hash = Math.imul(hash, 16777619) >>> 0;
   hash = (hash ^ projectionIndex) >>> 0;
@@ -2156,7 +2875,29 @@ export function projectionHash(rawIndex: number, projectionIndex: number, seed: 
   return hash;
 }
 
-export function initialHiddenWeights(inputSize: number, hiddenLayers: number[]): Float32Array {
+export function initialHiddenWeights(inputSize: number, hiddenLayers: number[], engine?: ChronofishEngine): Float32Array {
+  if (engine) {
+    if (inputSize === PROJECTION_SIZE && isDefaultHiddenLayers(hiddenLayers)) {
+      const output = engine.chronofish_default_initial_hidden_weights_bytes();
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      const bytes = readWasmBytes(engine, output);
+      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+    }
+    const request = initialHiddenWeightsRequestBytes(inputSize, hiddenLayers);
+    const input = writeWasmBytes(engine, request);
+    try {
+      const output = engine.chronofish_initial_hidden_weights_bytes(input.ptr, input.len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      const bytes = readWasmBytes(engine, output);
+      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+    } finally {
+      engine.chronofish_dealloc(input.ptr, input.len);
+    }
+  }
   const weights: number[] = [];
   let previous = inputSize;
   for (let layerIndex = 0; layerIndex < hiddenLayers.length; layerIndex += 1) {
@@ -2172,4 +2913,19 @@ export function initialHiddenWeights(inputSize: number, hiddenLayers: number[]):
     previous = layerSize;
   }
   return new Float32Array(weights);
+}
+
+function initialHiddenWeightsRequestBytes(inputSize: number, hiddenLayers: number[]): Uint8Array {
+  const bytes = new Uint8Array((2 + hiddenLayers.length) * Uint32Array.BYTES_PER_ELEMENT);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let offset = 0;
+  view.setUint32(offset, inputSize, true);
+  offset += 4;
+  view.setUint32(offset, hiddenLayers.length, true);
+  offset += 4;
+  for (const layerSize of hiddenLayers) {
+    view.setUint32(offset, layerSize, true);
+    offset += 4;
+  }
+  return bytes;
 }

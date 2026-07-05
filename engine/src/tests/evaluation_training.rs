@@ -1,5 +1,5 @@
 use super::*;
-use crate::{cpu::*, cpu::training::*};
+use crate::cpu::{training::*, *};
 
 fn trainer_test_config() -> TrainerConfig {
     TrainerConfig {
@@ -173,6 +173,225 @@ fn trainer_parses_sweep_and_genetic_strategy_options() {
             SweepParameterGroup::AlternateBasic
         ]
     );
+}
+
+#[test]
+fn compact_value_model_json_boundary_matches_cfnn_codec() {
+    let input = serde_json::json!({
+        "projectionSize": 4,
+        "projectionSeed": 9,
+        "hiddenLayers": [2],
+        "hiddenWeights": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        "outputWeights": [0.25, -0.5, 0.75],
+        "policyWeights": [0.125, -0.25, 0.5],
+        "auxiliaryValueWeights": [0.0625, -0.125],
+        "scale": 1.5,
+        "bias": -0.25,
+        "outputActivation": "tanh"
+    });
+    let bytes =
+        crate::gpu::training::compact_value_model_bytes_from_json(&input.to_string()).unwrap();
+    assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 5);
+    assert!(crate::gpu::training::compact_value_model_is_finite_bytes(
+        &bytes
+    ));
+
+    let output: serde_json::Value =
+        serde_json::from_str(&crate::gpu::training::compact_value_model_json(&bytes).unwrap())
+            .unwrap();
+    assert_eq!(output["projectionSize"], 4);
+    assert_eq!(output["projectionSeed"], 9);
+    assert_eq!(output["hiddenLayers"], serde_json::json!([2]));
+    assert_eq!(output["outputActivation"], "tanh");
+    assert_eq!(
+        output["policyWeights"],
+        serde_json::json!([0.125, -0.25, 0.5])
+    );
+    assert_eq!(
+        output["auxiliaryValueWeights"],
+        serde_json::json!([0.0625, -0.125])
+    );
+
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(crate::gpu::training::compact_value_model_json(&trailing)
+        .unwrap_err()
+        .contains("trailing"));
+
+    let mut non_finite = bytes;
+    non_finite[48..52].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert!(!crate::gpu::training::compact_value_model_is_finite_bytes(
+        &non_finite
+    ));
+    assert!(crate::gpu::training::compact_value_model_json(&non_finite).is_err());
+}
+
+#[test]
+fn compact_value_model_frontier_layout_expands_search_model_buffers() {
+    let input_size = crate::gpu::training::DEFAULT_PROJECTION_SIZE;
+    let hidden_layers = crate::gpu::training::DEFAULT_HIDDEN_LAYERS;
+    let hidden_len = hidden_layers
+        .iter()
+        .copied()
+        .fold((0usize, input_size), |(total, previous), layer| {
+            (total + layer as usize * (previous + 1), layer as usize)
+        })
+        .0;
+    let output_size = *hidden_layers.last().unwrap() as usize;
+    let policy_weight_len = crate::gpu::training::POLICY_BUCKETS as usize * (output_size + 1);
+    let input = serde_json::json!({
+        "projectionSize": input_size,
+        "projectionSeed": crate::gpu::training::DEFAULT_PROJECTION_SEED,
+        "hiddenLayers": hidden_layers,
+        "hiddenWeights": vec![0.0; hidden_len],
+        "outputWeights": vec![0.0; output_size + 1],
+        "policyWeights": vec![0.25; policy_weight_len],
+        "scale": 1.0,
+        "bias": 0.0,
+        "outputActivation": "tanh"
+    });
+    let bytes =
+        crate::gpu::training::compact_value_model_bytes_from_json(&input.to_string()).unwrap();
+    let layout: serde_json::Value = serde_json::from_str(
+        &crate::gpu::training::compact_value_model_frontier_layout_json(&bytes).unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(layout["architectureMatches"], true);
+    assert_eq!(layout["outputLayerSize"], output_size);
+    assert_eq!(
+        layout["hiddenLayerWeights"].as_array().unwrap().len(),
+        hidden_layers.len()
+    );
+    assert_eq!(
+        layout["hiddenLayerWeights"][0].as_array().unwrap().len(),
+        hidden_layers[0] as usize * (input_size + 1)
+    );
+    let policy_weights = layout["policyWeights"].as_array().unwrap();
+    assert_eq!(policy_weights.len(), policy_weight_len);
+    assert_eq!(policy_weights[output_size], serde_json::json!(0.25));
+    assert_eq!(
+        policy_weights
+            [(crate::gpu::training::POLICY_BUCKETS as usize - 1) * (output_size + 1) + output_size],
+        serde_json::json!(0.25)
+    );
+
+    let invalid = serde_json::json!({
+        "projectionSize": 4,
+        "projectionSeed": crate::gpu::training::DEFAULT_PROJECTION_SEED,
+        "hiddenLayers": hidden_layers,
+        "hiddenWeights": [0.0],
+        "outputWeights": [0.0],
+        "outputActivation": "tanh"
+    });
+    let invalid_bytes =
+        crate::gpu::training::compact_value_model_bytes_from_json(&invalid.to_string()).unwrap();
+    let invalid_layout: serde_json::Value = serde_json::from_str(
+        &crate::gpu::training::compact_value_model_frontier_layout_json(&invalid_bytes).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(invalid_layout["architectureMatches"], false);
+}
+
+#[test]
+fn compact_value_model_predicts_values_from_samples() {
+    let seed = 17;
+    let projected = [0, 1].map(|output| {
+        if crate::gpu::training::projection_hash(0, output, seed) & 1 == 0 {
+            1.0
+        } else {
+            -1.0
+        }
+    });
+    let hidden = 0.0_f32.max(projected[0] + projected[1] * 2.0 + 0.5);
+    let model = crate::gpu::training::CompactValueModel {
+        version: 4,
+        projection_size: 2,
+        projection_seed: seed,
+        hidden_layers: vec![1],
+        hidden_weights: vec![1.0, 2.0, 0.5],
+        output_weights: vec![3.0, 1.0],
+        policy_logits: Vec::new(),
+        policy_weights: Vec::new(),
+        auxiliary_value_weights: Vec::new(),
+        scale: 0.1,
+        bias: 0.2,
+        output_activation: crate::gpu::training::OutputActivation::Tanh,
+    };
+    let sample = crate::gpu::training::TrainingSample {
+        side_to_move: None,
+        board_count: None,
+        position_key: Some("predict".to_string()),
+        features: vec![1.0, 0.0],
+        label: 0.0,
+        label_kind: None,
+        label_weight: 1.0,
+        base_label_weight: None,
+        label_mass: None,
+        observation_count: None,
+        policy: None,
+        pseudo: None,
+    };
+    let predictions = model.predict_values([sample.features.as_slice()]);
+    let expected = ((hidden * 3.0 + 1.0).tanh() * 0.1 + 0.2).clamp(-1.0, 1.0);
+    assert_eq!(predictions.len(), 1);
+    assert!((predictions[0] - expected).abs() < 1e-6);
+}
+
+#[test]
+fn compact_value_model_training_layout_bytes_initializes_defaults() {
+    let bytes = crate::gpu::training::compact_value_model_training_layout_bytes(None, 0.5).unwrap();
+    let header = bytes[..16]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(header[0], 0);
+    assert_eq!(header[1], 256);
+    assert_eq!(
+        header[2] as usize,
+        crate::gpu::training::default_initial_hidden_weights().len()
+    );
+    assert_eq!(header[3], 257);
+    let output_start = 16 + header[2] as usize * 4;
+    let output_bias_offset = output_start + header[1] as usize * 4;
+    let output_bias = f32::from_le_bytes(
+        bytes[output_bias_offset..output_bias_offset + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert!((output_bias - crate::gpu::training::inverse_tanh(0.5)).abs() < 1e-6);
+
+    let model = crate::gpu::training::CompactValueModel {
+        version: 4,
+        projection_size: crate::gpu::training::DEFAULT_PROJECTION_SIZE as u32,
+        projection_seed: crate::gpu::training::DEFAULT_PROJECTION_SEED,
+        hidden_layers: crate::gpu::training::DEFAULT_HIDDEN_LAYERS.to_vec(),
+        hidden_weights: crate::gpu::training::default_initial_hidden_weights(),
+        output_weights: vec![0.25; 257],
+        policy_logits: Vec::new(),
+        policy_weights: Vec::new(),
+        auxiliary_value_weights: Vec::new(),
+        scale: 1.0,
+        bias: 0.0,
+        output_activation: crate::gpu::training::OutputActivation::Tanh,
+    };
+    let active = crate::gpu::training::compact_value_model_training_layout_bytes(
+        Some(&model.encode()),
+        -0.5,
+    )
+    .unwrap();
+    let active_header = active[..16]
+        .chunks_exact(4)
+        .map(|chunk| u32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect::<Vec<_>>();
+    assert_eq!(active_header[0], 1);
+    let active_output_start = 16 + active_header[2] as usize * 4;
+    let first_output = f32::from_le_bytes(
+        active[active_output_start..active_output_start + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(first_output, 0.25);
 }
 
 #[test]
@@ -818,7 +1037,7 @@ fn training_search_profile_caps_late_game_branching() {
 }
 
 #[test]
-#[ignore = "reported overnight seed throughput smoke test; run in release mode with --ignored --nocapture"]
+#[ignore = "reported overnight seed throughput smoke test; run with --ignored --nocapture"]
 fn reported_seed_reaches_late_training_turns_with_bounded_search() {
     let mut config = trainer_test_config();
     config.nodes = 2_000;

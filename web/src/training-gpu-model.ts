@@ -1,3 +1,6 @@
+import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import type { ChronofishEngine } from "./types.js";
+
 export interface CompactValueModel {
   projectionSize: number;
   projectionSeed: number;
@@ -12,6 +15,13 @@ export interface CompactValueModel {
   bias?: number;
   outputActivation?: "linear" | "tanh";
   bytes?: Uint8Array;
+}
+
+export interface CompactFrontierModelLayout {
+  model: CompactValueModel;
+  outputLayerSize: number;
+  hiddenLayerWeights: Float32Array[];
+  policyWeights: Float32Array | null;
 }
 
 export interface EncodedCompactModel extends Uint8Array {
@@ -69,6 +79,73 @@ export function compactModelIsFinite(model: CompactValueModel): boolean {
   return finite;
 }
 
+export function compactModelBytesAreFiniteWithEngine(engine: ChronofishEngine, bytes: ArrayBuffer | Uint8Array): boolean {
+  const input = writeWasmBytes(engine, bytesForWasm(bytes));
+  try {
+    return Boolean(engine.chronofish_compact_value_model_is_finite_bytes(input.ptr, input.len));
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+export function encodeCompactModelWithEngine(engine: ChronofishEngine, model: EncodableCompactModel): EncodedCompactModel | null {
+  const json = JSON.stringify({
+    projectionSize: model.projectionSize,
+    projectionSeed: model.projectionSeed,
+    hiddenLayers: Array.from(model.hiddenLayers),
+    hiddenWeights: Array.from(model.hiddenWeights),
+    outputWeights: Array.from(model.outputWeights),
+    auxiliaryValueWeights: Array.from(model.auxiliaryValueWeights ?? []),
+    policyWeights: Array.from(model.policyWeights ?? []),
+    policyLogits: Array.from(model.policyLogits ?? []),
+    scale: model.scale,
+    bias: model.bias,
+    outputActivation: model.outputActivation
+  });
+  const input = writeWasmString(engine, json);
+  try {
+    const output = engine.chronofish_compact_value_model_bytes_json(input.ptr, input.len);
+    return output ? readWasmBytes(engine, output) as EncodedCompactModel : null;
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+export function decodeCompactModelWithEngine(engine: ChronofishEngine, buffer: ArrayBuffer | Uint8Array): CompactValueModel | null {
+  const input = writeWasmBytes(engine, bytesForWasm(buffer));
+  try {
+    const output = engine.chronofish_compact_value_model_json(input.ptr, input.len);
+    if (!output) {
+      return null;
+    }
+    return compactModelFromJson(JSON.parse(readWasmString(engine, output)) as CompactValueModelJson);
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
+export function decodeCompactFrontierModelLayoutWithEngine(engine: ChronofishEngine, buffer: ArrayBuffer | Uint8Array): CompactFrontierModelLayout | null {
+  const input = writeWasmBytes(engine, bytesForWasm(buffer));
+  try {
+    const output = engine.chronofish_compact_value_model_frontier_layout_json(input.ptr, input.len);
+    if (!output) {
+      return null;
+    }
+    const value = JSON.parse(readWasmString(engine, output)) as CompactFrontierModelLayoutJson;
+    if (!value.architectureMatches || !value.model) {
+      return null;
+    }
+    return {
+      model: compactModelFromJson(value.model),
+      outputLayerSize: value.outputLayerSize ?? 0,
+      hiddenLayerWeights: (value.hiddenLayerWeights ?? []).map((weights) => new Float32Array(weights)),
+      policyWeights: value.policyWeights ? new Float32Array(value.policyWeights) : null
+    };
+  } finally {
+    engine.chronofish_dealloc(input.ptr, input.len);
+  }
+}
+
 function finiteArray(values: ArrayLike<number>): boolean {
   for (let index = 0; index < values.length; index += 1) {
     if (!Number.isFinite(values[index])) {
@@ -78,7 +155,13 @@ function finiteArray(values: ArrayLike<number>): boolean {
   return true;
 }
 
-export function encodeCompactModel(model: EncodableCompactModel): EncodedCompactModel {
+export function encodeCompactModel(model: EncodableCompactModel, engine?: ChronofishEngine): EncodedCompactModel {
+  if (engine && typeof engine.chronofish_compact_value_model_bytes_json === "function") {
+    const encoded = encodeCompactModelWithEngine(engine, model);
+    if (encoded) {
+      return encoded;
+    }
+  }
   const hiddenWeights = Array.from(model.hiddenWeights);
   const outputWeights = Array.from(model.outputWeights);
   const auxiliaryValueWeights = Array.from(model.auxiliaryValueWeights ?? []);
@@ -243,4 +326,49 @@ export function decodeCompactModel(buffer: ArrayBuffer): CompactValueModel | nul
     outputActivation: version >= 4 ? "tanh" : "linear"
   };
   return compactModelIsFinite(model) ? model : null;
+}
+
+interface CompactValueModelJson {
+  projectionSize: number;
+  projectionSeed: number;
+  hiddenLayers: number[];
+  hiddenWeights: number[];
+  outputWeights: number[];
+  auxiliaryValueWeights?: number[];
+  policyWeights?: number[];
+  policyLogits?: number[];
+  scale?: number;
+  bias?: number;
+  outputActivation?: "linear" | "tanh";
+}
+
+interface CompactFrontierModelLayoutJson {
+  architectureMatches: boolean;
+  model?: CompactValueModelJson;
+  outputLayerSize?: number;
+  hiddenLayerWeights?: number[][];
+  policyWeights?: number[] | null;
+}
+
+function compactModelFromJson(value: CompactValueModelJson): CompactValueModel {
+  return {
+    projectionSize: value.projectionSize,
+    projectionSeed: value.projectionSeed,
+    hiddenLayers: value.hiddenLayers,
+    hiddenWeights: new Float32Array(value.hiddenWeights),
+    outputWeights: new Float32Array(value.outputWeights),
+    auxiliaryValueWeights: new Float32Array(value.auxiliaryValueWeights ?? []),
+    policyWeights: new Float32Array(value.policyWeights ?? []),
+    policyLogits: new Float32Array(value.policyLogits ?? []),
+    scale: value.scale,
+    bias: value.bias,
+    outputActivation: value.outputActivation
+  };
+}
+
+function bytesForWasm(buffer: ArrayBuffer | Uint8Array): Uint8Array {
+  if (buffer instanceof Uint8Array) {
+    return buffer;
+  }
+  return new Uint8Array(buffer);
 }
