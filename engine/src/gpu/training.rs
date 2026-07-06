@@ -388,6 +388,167 @@ pub fn distill_training_samples(
         .collect()
 }
 
+pub fn distill_training_samples_with_labels(
+    samples: &[TrainingSample],
+    labels: &[Option<f32>],
+) -> Vec<TrainingSample> {
+    samples
+        .iter()
+        .enumerate()
+        .map(|(index, sample)| {
+            let mut distilled = sample.clone();
+            distilled.label = labels
+                .get(index)
+                .and_then(|label| *label)
+                .filter(|label| label.is_finite())
+                .unwrap_or(0.0);
+            distilled.policy = None;
+            distilled.label_kind = Some("distilled".to_string());
+            distilled.label_weight = DISTILLED_LABEL_WEIGHT;
+            distilled.pseudo = Some(true);
+            distilled
+        })
+        .collect()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DistillTrainingSamplesWithLabelsRequest {
+    samples: Vec<TrainingSample>,
+    labels: Vec<Option<f32>>,
+}
+
+pub fn distill_training_samples_with_labels_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<DistillTrainingSamplesWithLabelsRequest>(request_json)
+        .map_err(|error| format!("Distilled sample request is not valid JSON: {error}"))?;
+    serde_json::to_string(&distill_training_samples_with_labels(
+        &request.samples,
+        &request.labels,
+    ))
+    .map_err(|error| format!("Distilled sample response failed to encode: {error}"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultLabelSampleRequest {
+    sample: TrainingSample,
+    score: Option<i32>,
+    first_move: Option<SearchResultMoveJson>,
+    label_kind: String,
+    label_weight: f32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultMoveJson {
+    from: SearchResultMovePositionJson,
+    to: SearchResultMovePositionJson,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultMovePositionJson {
+    timeline_id: i32,
+    time: i32,
+    x: i32,
+    y: i32,
+}
+
+pub fn search_result_label_sample(
+    mut sample: TrainingSample,
+    score: Option<i32>,
+    first_move: Option<impl Into<SearchResultPolicyMove>>,
+    label_kind: impl Into<String>,
+    label_weight: f32,
+) -> TrainingSample {
+    sample.label = normalized_search_score(score.unwrap_or(0));
+    sample.policy = first_move.map(|movement| {
+        let movement = movement.into();
+        policy_bucket_from_move_values(
+            movement.from.timeline_id,
+            movement.from.time,
+            movement.from.x,
+            movement.from.y,
+            movement.to.timeline_id,
+            movement.to.time,
+            movement.to.x,
+            movement.to.y,
+            0,
+        )
+    });
+    sample.label_kind = Some(label_kind.into());
+    sample.label_weight = label_weight;
+    sample.pseudo = Some(false);
+    sample
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchResultPolicyMove {
+    from: SearchResultPolicyPosition,
+    to: SearchResultPolicyPosition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchResultPolicyPosition {
+    timeline_id: i32,
+    time: i32,
+    x: i32,
+    y: i32,
+}
+
+impl From<SearchResultMoveJson> for SearchResultPolicyMove {
+    fn from(movement: SearchResultMoveJson) -> Self {
+        Self {
+            from: SearchResultPolicyPosition {
+                timeline_id: movement.from.timeline_id,
+                time: movement.from.time,
+                x: movement.from.x,
+                y: movement.from.y,
+            },
+            to: SearchResultPolicyPosition {
+                timeline_id: movement.to.timeline_id,
+                time: movement.to.time,
+                x: movement.to.x,
+                y: movement.to.y,
+            },
+        }
+    }
+}
+
+impl From<MoveStep> for SearchResultPolicyMove {
+    fn from(movement: MoveStep) -> Self {
+        Self {
+            from: SearchResultPolicyPosition {
+                timeline_id: movement.from.timeline_id,
+                time: movement.from.time,
+                x: movement.from.x,
+                y: movement.from.y,
+            },
+            to: SearchResultPolicyPosition {
+                timeline_id: movement.to.timeline_id,
+                time: movement.to.time,
+                x: movement.to.x,
+                y: movement.to.y,
+            },
+        }
+    }
+}
+
+pub fn search_result_label_sample_json(request_json: &str) -> Result<String, String> {
+    let request =
+        serde_json::from_str::<SearchResultLabelSampleRequest>(request_json).map_err(|error| {
+            format!("Search result label sample request is not valid JSON: {error}")
+        })?;
+    serde_json::to_string(&search_result_label_sample(
+        request.sample,
+        request.score,
+        request.first_move,
+        request.label_kind,
+        request.label_weight,
+    ))
+    .map_err(|error| format!("Search result label sample response failed to encode: {error}"))
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrainingSample {
@@ -1483,6 +1644,10 @@ pub fn gpu_rollout_max_plies(target: usize, worker_index: usize) -> usize {
     MAX_PLAYOUT_PLIES.max(target.saturating_add(worker_index))
 }
 
+pub fn gpu_rollout_ply_offset(ply: usize, worker_index: usize) -> usize {
+    ply.saturating_add(worker_index.saturating_mul(gpu_rollout_max_plies(0, 0)))
+}
+
 pub fn gpu_warmup_search_config(
     depth: i32,
     nodes: i32,
@@ -1524,6 +1689,263 @@ pub fn worker_search_time_ms(nodes: i64, time_ms: i64) -> u64 {
     worker_request_timeout_ms(nodes, time_ms)
         .saturating_sub(1_000)
         .max(1_000)
+}
+
+pub fn worker_request_timeout_ms_json(request_json: &str) -> Result<u64, String> {
+    let (nodes, time_ms) = worker_timeout_request_values(request_json)?;
+    Ok(worker_request_timeout_ms(nodes, time_ms))
+}
+
+pub fn worker_search_time_ms_json(request_json: &str) -> Result<u64, String> {
+    let (nodes, time_ms) = worker_timeout_request_values(request_json)?;
+    Ok(worker_search_time_ms(nodes, time_ms))
+}
+
+pub fn loss_log_replay_logs_json(request_json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LossLogReplayRequest {
+        logs: Option<Vec<serde_json::Value>>,
+        limit: Option<f64>,
+    }
+
+    let request = serde_json::from_str::<LossLogReplayRequest>(request_json)
+        .map_err(|error| format!("loss-log replay request is invalid: {error}"))?;
+    let limit = request
+        .limit
+        .filter(|limit| limit.is_finite())
+        .map(|limit| limit.floor().max(0.0) as usize)
+        .unwrap_or(0);
+    let logs = request
+        .logs
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|log| {
+            log.get("decisions")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|decisions| !decisions.is_empty())
+        })
+        .take(limit)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&logs)
+        .map_err(|error| format!("loss-log replay response failed to encode: {error}"))
+}
+
+pub fn loss_log_validation_update_json(request_json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct LossLogValidationUpdateRequest {
+        validation: Option<serde_json::Value>,
+        event: Option<String>,
+        example: Option<serde_json::Value>,
+    }
+
+    let request = serde_json::from_str::<LossLogValidationUpdateRequest>(request_json)
+        .map_err(|error| format!("loss-log validation update request is invalid: {error}"))?;
+    let mut validation = loss_log_validation_value(request.validation.as_ref());
+    match request.event.as_deref().unwrap_or("finalize") {
+        "skip" => increment_json_counter(&mut validation, "skipped"),
+        "unchanged" => {
+            increment_json_counter(&mut validation, "checked");
+            increment_json_counter(&mut validation, "unchanged");
+        }
+        "changed" => {
+            increment_json_counter(&mut validation, "checked");
+            increment_json_counter(&mut validation, "changed");
+            if let Some(example) = request.example {
+                if let Some(examples) = validation
+                    .entry("examples".to_string())
+                    .or_insert_with(|| serde_json::json!([]))
+                    .as_array_mut()
+                {
+                    examples.push(example);
+                }
+            }
+        }
+        "finalize" => {}
+        event => return Err(format!("loss-log validation event is invalid: {event}")),
+    }
+    let checked = json_counter(&validation, "checked");
+    let changed = json_counter(&validation, "changed");
+    validation.insert(
+        "failed".to_string(),
+        serde_json::json!(checked > 0 && changed == 0),
+    );
+    serde_json::to_string(&serde_json::Value::Object(validation))
+        .map_err(|error| format!("loss-log validation update failed to encode: {error}"))
+}
+
+pub fn training_metrics_summary_json(request_json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TrainingMetricsSummaryRequest {
+        started_at: Option<f64>,
+        now_ms: Option<f64>,
+        phases: Option<serde_json::Map<String, serde_json::Value>>,
+        sample_counts: Option<serde_json::Map<String, serde_json::Value>>,
+        search_position_count: Option<f64>,
+        search_label_count: Option<f64>,
+        loss_log_validation: Option<serde_json::Value>,
+    }
+
+    let request = serde_json::from_str::<TrainingMetricsSummaryRequest>(request_json)
+        .map_err(|error| format!("training metrics summary request is invalid: {error}"))?;
+    let phases = request.phases.unwrap_or_default();
+    let mut rounded_phases = serde_json::Map::new();
+    for (name, value) in &phases {
+        rounded_phases.insert(
+            name.clone(),
+            serde_json::json!(round_millis(json_number(value).unwrap_or(0.0))),
+        );
+    }
+
+    let mut sample_rates = serde_json::Map::new();
+    for (kind, count) in request.sample_counts.unwrap_or_default() {
+        let phase_name = format!("{kind}Labels");
+        let phase_ms = phases
+            .get(&phase_name)
+            .and_then(json_number)
+            .or_else(|| phases.get("collect").and_then(json_number))
+            .unwrap_or(0.0);
+        if phase_ms > 0.0 {
+            sample_rates.insert(
+                kind,
+                serde_json::json!(round_rate(json_number(&count).unwrap_or(0.0), phase_ms)),
+            );
+        }
+    }
+
+    if let (Some(count), Some(phase_ms)) = (
+        finite_positive(request.search_position_count),
+        phases
+            .get("searchPositions")
+            .and_then(json_number)
+            .filter(|value| *value > 0.0),
+    ) {
+        sample_rates.insert(
+            "searchPositions".to_string(),
+            serde_json::json!(round_rate(count, phase_ms)),
+        );
+    }
+    if let (Some(count), Some(phase_ms)) = (
+        finite_positive(request.search_label_count),
+        phases
+            .get("searchLabels")
+            .and_then(json_number)
+            .filter(|value| *value > 0.0),
+    ) {
+        sample_rates.insert(
+            "searchLabels".to_string(),
+            serde_json::json!(round_rate(count, phase_ms)),
+        );
+    }
+
+    let started_at = request
+        .started_at
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    let now_ms = request
+        .now_ms
+        .filter(|value| value.is_finite())
+        .unwrap_or(started_at);
+    serde_json::to_string(&serde_json::json!({
+        "totalMs": round_millis(now_ms - started_at),
+        "phases": rounded_phases,
+        "sampleRates": sample_rates,
+        "lossLogValidation": request.loss_log_validation.unwrap_or(serde_json::Value::Null),
+    }))
+    .map_err(|error| format!("training metrics summary response failed to encode: {error}"))
+}
+
+fn json_number(value: &serde_json::Value) -> Option<f64> {
+    value.as_f64().filter(|value| value.is_finite())
+}
+
+fn finite_positive(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+fn round_millis(value: f64) -> i64 {
+    value.round() as i64
+}
+
+fn round_rate(count: f64, phase_ms: f64) -> f64 {
+    ((count / (phase_ms / 1000.0)) * 100.0).round() / 100.0
+}
+
+fn loss_log_validation_value(
+    value: Option<&serde_json::Value>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut validation = serde_json::Map::new();
+    if let Some(existing) = value.and_then(serde_json::Value::as_object) {
+        validation.extend(
+            existing
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+    }
+    for key in ["checked", "changed", "unchanged", "skipped"] {
+        validation
+            .entry(key.to_string())
+            .or_insert_with(|| serde_json::json!(0));
+    }
+    validation
+        .entry("failed".to_string())
+        .or_insert_with(|| serde_json::json!(false));
+    validation
+        .entry("examples".to_string())
+        .or_insert_with(|| serde_json::json!([]));
+    validation
+}
+
+fn json_counter(validation: &serde_json::Map<String, serde_json::Value>, key: &str) -> u64 {
+    validation
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
+}
+
+fn increment_json_counter(validation: &mut serde_json::Map<String, serde_json::Value>, key: &str) {
+    let value = json_counter(validation, key).saturating_add(1);
+    validation.insert(key.to_string(), serde_json::json!(value));
+}
+
+fn worker_timeout_request_values(request_json: &str) -> Result<(i64, i64), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct WorkerTimeoutRequest {
+        nodes: Option<serde_json::Value>,
+        time_ms: Option<serde_json::Value>,
+    }
+
+    let request = serde_json::from_str::<WorkerTimeoutRequest>(request_json)
+        .map_err(|error| format!("training worker timeout request is invalid: {error}"))?;
+    let nodes = browser_number_value(request.nodes.as_ref())
+        .filter(|value| *value != 0.0)
+        .unwrap_or(1.0);
+    let time_ms = browser_number_value(request.time_ms.as_ref())
+        .filter(|value| *value != 0.0)
+        .unwrap_or(0.0);
+    Ok((truncate_f64_to_i64(nodes)?, truncate_f64_to_i64(time_ms)?))
+}
+
+fn browser_number_value(value: Option<&serde_json::Value>) -> Option<f64> {
+    match value? {
+        serde_json::Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
+        serde_json::Value::String(text) => {
+            text.parse::<f64>().ok().filter(|value| value.is_finite())
+        }
+        serde_json::Value::Bool(value) => Some(if *value { 1.0 } else { 0.0 }),
+        _ => None,
+    }
+}
+
+fn truncate_f64_to_i64(value: f64) -> Result<i64, String> {
+    let value = value.trunc();
+    if value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Err("training worker timeout value exceeds i64 range.".to_string());
+    }
+    Ok(value as i64)
 }
 
 pub fn clamp_training_number(value: Option<f64>, min: f64, max: f64, fallback: f64) -> f64 {
@@ -1689,6 +2111,49 @@ pub fn tactical_search_config(
             .max(0.4 + attempt as f32 * 0.1)
             .min(0.8),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TacticalPositionSelection {
+    pub use_generated: bool,
+    pub next_priority: i32,
+    pub complete: bool,
+}
+
+pub fn tactical_position_attempt_count(index: usize) -> usize {
+    1 + (index % 4)
+}
+
+pub fn tactical_position_use_best_source(best_priority: i32) -> bool {
+    best_priority > 0
+}
+
+pub fn tactical_position_selection(
+    best_priority: i32,
+    generated_priority: i32,
+) -> TacticalPositionSelection {
+    let use_generated = generated_priority > best_priority;
+    TacticalPositionSelection {
+        use_generated,
+        next_priority: if use_generated {
+            generated_priority
+        } else {
+            best_priority
+        },
+        complete: generated_priority >= 4,
+    }
+}
+
+pub fn tactical_position_selection_json(
+    best_priority: i32,
+    generated_priority: i32,
+) -> Result<String, String> {
+    serde_json::to_string(&tactical_position_selection(
+        best_priority,
+        generated_priority,
+    ))
+    .map_err(|error| format!("Tactical position selection response failed to encode: {error}"))
 }
 
 pub fn is_training_subject(value: &str) -> bool {
@@ -2589,20 +3054,25 @@ fn playout_search_position_with_config(
 fn tactical_search_position(base: &Game, index: usize, request: &SearchLabelBatchRequest) -> Game {
     let mut best = base.clone();
     let mut best_priority = tactical_position_priority(&best);
-    let attempts = 1 + (index % 4);
+    let attempts = tactical_position_attempt_count(index);
     for attempt in 0..attempts {
         let generated = playout_search_position_with_config(
-            if best_priority > 0 { &best } else { base },
+            if tactical_position_use_best_source(best_priority) {
+                &best
+            } else {
+                base
+            },
             index + attempt * request.max_plies.max(1),
             request,
             tactical_search_config(request.position_depth, request.position_nodes, 0.0, attempt),
         );
         let priority = tactical_position_priority(&generated);
-        if priority > best_priority {
+        let selection = tactical_position_selection(best_priority, priority);
+        if selection.use_generated {
             best = generated;
-            best_priority = priority;
+            best_priority = selection.next_priority;
         }
-        if priority >= 4 {
+        if selection.complete {
             break;
         }
     }

@@ -8,6 +8,7 @@ use crate::{
     Game,
     Origin,
     PieceType,
+    Position,
     TimelineOwner,
 };
 
@@ -78,6 +79,7 @@ pub const MAX_CANDIDATES: usize = 65_536;
 pub const MAX_SELECTION_SCAN: usize = 2048;
 
 pub const GPU_CANDIDATE_STRIDE: usize = 24;
+pub const GPU_CANDIDATE_COLOR_OFFSET: usize = 1;
 pub const GPU_SOURCE_STRIDE: usize = 10;
 pub const GPU_TARGET_STRIDE: usize = 10;
 pub const GPU_BOARD_STRIDE: usize = 73;
@@ -1410,7 +1412,7 @@ struct GpuSearchSelectionRequest {
     candidates: Vec<GpuSearchSelectionCandidate>,
     temperature: Option<f64>,
     #[serde(rename = "randomSeed")]
-    random_seed: Option<i64>,
+    random_seed: Option<f64>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1418,7 +1420,7 @@ struct GpuSearchChoiceSelectionRequest {
     candidates: Vec<serde_json::Value>,
     temperature: Option<f64>,
     #[serde(rename = "randomSeed")]
-    random_seed: Option<i64>,
+    random_seed: Option<f64>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -1444,7 +1446,7 @@ pub fn gpu_search_select_candidate_json(request_json: &str) -> Result<String, St
     let response = gpu_search_select_candidate(
         request.candidates,
         request.temperature.unwrap_or(0.0),
-        request.random_seed.unwrap_or(0),
+        gpu_search_random_seed(request.random_seed)?,
     );
     serde_json::to_string(&response)
         .map_err(|error| format!("GPU search selection response failed to encode: {error}"))
@@ -1457,7 +1459,7 @@ pub fn gpu_search_select_choice_json(request_json: &str) -> Result<String, Strin
     let response = gpu_search_select_candidate(
         candidates,
         request.temperature.unwrap_or(0.0),
-        request.random_seed.unwrap_or(0),
+        gpu_search_random_seed(request.random_seed)?,
     );
     serde_json::to_string(&response)
         .map_err(|error| format!("GPU search choice selection response failed to encode: {error}"))
@@ -1470,7 +1472,7 @@ pub fn gpu_search_selected_choice_json(request_json: &str) -> Result<String, Str
     let response = gpu_search_select_candidate(
         selection_candidates,
         request.temperature.unwrap_or(0.0),
-        request.random_seed.unwrap_or(0),
+        gpu_search_random_seed(request.random_seed)?,
     );
     let Some(selected_index) = response.selected_index else {
         return Ok("null".to_string());
@@ -1493,6 +1495,17 @@ pub fn gpu_search_selected_choice_json(request_json: &str) -> Result<String, Str
     } else {
         Ok("null".to_string())
     }
+}
+
+fn gpu_search_random_seed(random_seed: Option<f64>) -> Result<i64, String> {
+    let Some(random_seed) = random_seed.filter(|random_seed| random_seed.is_finite()) else {
+        return Ok(0);
+    };
+    let truncated = random_seed.trunc();
+    if truncated < i64::MIN as f64 || truncated > i64::MAX as f64 {
+        return Err("GPU search random seed exceeds i64 range.".to_string());
+    }
+    Ok(truncated as i64)
 }
 
 fn gpu_search_choice_selection_candidates(
@@ -1555,6 +1568,32 @@ pub fn gpu_turn_status_json_from_i32s(words: &[i32]) -> Result<String, String> {
         .map_err(|error| format!("GPU turn-status response failed to encode: {error}"))
 }
 
+pub fn gpu_turn_status_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuTurnStatusRequest>(request_json)
+        .map_err(|error| format!("GPU turn-status JSON request is invalid: {error}"))?;
+    gpu_turn_status_json_from_i32s(&request.records)
+}
+
+pub fn gpu_full_search_precondition_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuFullSearchPreconditionRequest>(request_json)
+        .map_err(|error| format!("GPU full-search precondition request is invalid: {error}"))?;
+    serde_json::to_string(&gpu_full_search_precondition(
+        request.status.pending_present_board_count,
+    ))
+    .map_err(|error| format!("GPU full-search precondition response failed to encode: {error}"))
+}
+
+fn gpu_full_search_precondition(
+    pending_present_board_count: Option<i32>,
+) -> GpuFullSearchPreconditionResponse {
+    let supported = pending_present_board_count == Some(1);
+    GpuFullSearchPreconditionResponse {
+        supported,
+        error: (!supported)
+            .then_some("Full GPU search currently requires one pending present board."),
+    }
+}
+
 pub fn gpu_ranked_candidate_indexes_from_i32s(words: &[i32]) -> Result<Vec<i32>, String> {
     Ok(gpu_ranked_candidate_entries_from_i32s(words)?
         .ranked
@@ -1582,6 +1621,69 @@ pub fn gpu_ranked_candidates_json_from_i32s(words: &[i32]) -> Result<String, Str
         .collect::<Vec<_>>();
     serde_json::to_string(&candidates)
         .map_err(|error| format!("GPU ranked candidate response failed to encode: {error}"))
+}
+
+pub fn gpu_ranked_candidates_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuRankedCandidatesRequest>(request_json)
+        .map_err(|error| format!("GPU ranked candidates JSON request is invalid: {error}"))?;
+    let candidate_count = request.scores.len();
+    let expected_record_len = candidate_count
+        .checked_mul(GPU_CANDIDATE_STRIDE)
+        .ok_or_else(|| "GPU ranked candidates JSON record length overflowed.".to_string())?;
+    if request.records.len() < expected_record_len {
+        return Err(format!(
+            "GPU ranked candidates JSON record length mismatch: expected at least {expected_record_len}, got {}.",
+            request.records.len()
+        ));
+    }
+    let mut words = Vec::with_capacity(
+        4 + candidate_count + expected_record_len + request.pending_boards.len() * 2,
+    );
+    words.push(
+        i32::try_from(candidate_count)
+            .map_err(|_| "GPU ranked candidates count exceeds i32 range.".to_string())?,
+    );
+    words.push(
+        i32::try_from(request.limit)
+            .map_err(|_| "GPU ranked candidates limit exceeds i32 range.".to_string())?,
+    );
+    words.push(
+        i32::try_from(request.pending_boards.len())
+            .map_err(|_| "GPU ranked candidates pending count exceeds i32 range.".to_string())?,
+    );
+    words.push(if request.require_pending { 1 } else { 0 });
+    words.extend(request.scores);
+    words.extend(request.records.into_iter().take(expected_record_len));
+    for board in request.pending_boards {
+        words.push(board.timeline_id);
+        words.push(board.time);
+    }
+    gpu_ranked_candidates_json_from_i32s(&words)
+}
+
+pub fn gpu_mutation_selected_candidates_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuMutationSelectedCandidatesRequest>(request_json)
+        .map_err(|error| format!("GPU mutation selected candidates request is invalid: {error}"))?;
+    let selected = request
+        .ranked
+        .into_iter()
+        .take(request.limit)
+        .collect::<Vec<_>>();
+    serde_json::to_string(&selected).map_err(|error| {
+        format!("GPU mutation selected candidates response failed to encode: {error}")
+    })
+}
+
+pub fn gpu_candidate_indexes_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuCandidateIndexesRequest>(request_json)
+        .map_err(|error| format!("GPU candidate indexes request is invalid: {error}"))?;
+    let indexes = request
+        .candidates
+        .iter()
+        .map(gpu_candidate_json_index)
+        .collect::<Result<Vec<_>, _>>()?;
+    serde_json::to_string(&indexes)
+        .map_err(|error| format!("GPU candidate indexes response failed to encode: {error}"))
 }
 
 struct GpuRankedCandidateEntries<'a> {
@@ -1693,6 +1795,37 @@ pub fn gpu_scoring_summary_from_i32s(words: &[i32]) -> Result<String, String> {
     ))
 }
 
+pub fn gpu_scoring_summary_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuScoringSummaryRequest>(request_json)
+        .map_err(|error| format!("GPU scoring summary JSON request is invalid: {error}"))?;
+    let candidate_count = request.scores.len();
+    let expected_record_len = candidate_count
+        .checked_mul(GPU_CANDIDATE_STRIDE)
+        .ok_or_else(|| "GPU scoring summary JSON record length overflowed.".to_string())?;
+    if request.records.len() < expected_record_len {
+        return Err(format!(
+            "GPU scoring summary JSON record length mismatch: expected at least {expected_record_len}, got {}.",
+            request.records.len()
+        ));
+    }
+    let mut words = Vec::with_capacity(
+        2 + candidate_count + expected_record_len + request.pending_boards.len() * 2,
+    );
+    words.push(candidate_count as i32);
+    words.push(
+        i32::try_from(request.pending_boards.len()).map_err(|_| {
+            "GPU scoring summary pending board count exceeds i32 range.".to_string()
+        })?,
+    );
+    words.extend(request.scores);
+    words.extend(request.records.into_iter().take(expected_record_len));
+    for board in request.pending_boards {
+        words.push(board.timeline_id);
+        words.push(board.time);
+    }
+    gpu_scoring_summary_from_i32s(&words)
+}
+
 pub fn gpu_mutation_summary_from_i32s(statuses: &[i32]) -> String {
     if statuses.is_empty() {
         return "none".to_string();
@@ -1708,6 +1841,12 @@ pub fn gpu_mutation_summary_from_i32s(statuses: &[i32]) -> String {
         .join(",")
 }
 
+pub fn gpu_mutation_summary_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuMutationSummaryRequest>(request_json)
+        .map_err(|error| format!("GPU mutation summary JSON request is invalid: {error}"))?;
+    Ok(gpu_mutation_summary_from_i32s(&request.statuses))
+}
+
 #[derive(serde::Deserialize)]
 struct GpuPendingBoardRefJson {
     #[serde(rename = "timelineId")]
@@ -1715,7 +1854,7 @@ struct GpuPendingBoardRefJson {
     time: i32,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct GpuMovePositionJson {
     #[serde(rename = "timelineId")]
     timeline_id: i32,
@@ -1724,10 +1863,21 @@ struct GpuMovePositionJson {
     y: i32,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, serde::Deserialize, serde::Serialize)]
 struct GpuMoveJson {
     from: GpuMovePositionJson,
     to: GpuMovePositionJson,
+}
+
+impl From<GpuMovePositionJson> for Position {
+    fn from(position: GpuMovePositionJson) -> Self {
+        Position {
+            timeline_id: position.timeline_id,
+            time: position.time,
+            x: position.x,
+            y: position.y,
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -1778,6 +1928,108 @@ struct GpuPostableSearchResultJson {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct GpuValidateSearchResultRequest {
+    game: serde_json::Value,
+    result: serde_json::Value,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuReplyPressureRankedRootsRequest {
+    ranked_roots: Vec<serde_json::Value>,
+    pair_scores: Vec<i32>,
+    reply_count: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuScoringSummaryRequest {
+    scores: Vec<i32>,
+    records: Vec<i32>,
+    pending_boards: Vec<GpuPendingBoardRefJson>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuRankedCandidatesRequest {
+    scores: Vec<i32>,
+    records: Vec<i32>,
+    pending_boards: Vec<GpuPendingBoardRefJson>,
+    require_pending: bool,
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuMutationSelectedCandidatesRequest {
+    ranked: Vec<serde_json::Value>,
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuCandidateIndexesRequest {
+    candidates: Vec<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuTurnStatusRequest {
+    records: Vec<i32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuFullSearchPreconditionRequest {
+    status: GpuTurnCompletionStepStatus,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuFullSearchPreconditionResponse {
+    supported: bool,
+    error: Option<&'static str>,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuMutationSummaryRequest {
+    statuses: Vec<i32>,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuPickCandidateRecordsRequest {
+    records: Vec<i32>,
+    indices: Vec<f64>,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuMutationTurnCodeRequest {
+    records: Vec<i32>,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuCandidateIndexRequest {
+    records: Vec<i32>,
+    #[serde(rename = "move")]
+    movement: GpuMoveJson,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuSupportedMutationCandidatesRequest {
+    candidates: Vec<GpuSupportedMutationCandidateRequest>,
+    limit: Option<f64>,
+    require_child_boards: Option<bool>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuSupportedMutationCandidateRequest {
+    mutation_status: i32,
+    has_child_boards: bool,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GpuCompletedTurnChoiceRequest {
     result: serde_json::Value,
     moves: Vec<serde_json::Value>,
@@ -1785,15 +2037,162 @@ struct GpuCompletedTurnChoiceRequest {
     principal_variation: Option<serde_json::Value>,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuValidateFirstFrontierTurnRequest {
+    game: serde_json::Value,
+    moves: Vec<GpuMoveJson>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuValidatedFrontierChoiceRequest {
+    candidate: serde_json::Value,
+    moves: Vec<serde_json::Value>,
+    seen_keys: Vec<String>,
+    choice_count: usize,
+    choice_limit: usize,
+    gpu_search: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuValidatedFrontierChoiceResponse {
+    accepted: bool,
+    key: Option<String>,
+    choice: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuFrontierChoiceDiagnosticsRequest {
+    selected: serde_json::Value,
+    choices: Vec<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuFrontierChoiceDiagnosticsResponse {
+    legal_choice_count: usize,
+    legal_tactical_choice_count: usize,
+    selected_move_pruned_risk: i32,
+    selected_move_tactical: i32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuTurnCompletionStepStatus {
+    complete: bool,
+    pending_present_board_count: Option<i32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuTurnCompletionStepRequest {
+    snapshot: GpuSnapshotJson,
+    moves_length: usize,
+    pending_boards: Vec<GpuPendingBoardRefJson>,
+    status: GpuTurnCompletionStepStatus,
+    visited_keys: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuIncompleteTurnPendingCountRequest {
+    pending_boards: Vec<GpuPendingBoardRefJson>,
+    status: GpuTurnCompletionStepStatus,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuTurnCompletionStepResponse {
+    action: &'static str,
+    state_key: Option<String>,
+    max_moves: usize,
+}
+
 pub fn gpu_turn_completion_key_json(request_json: &str) -> Result<String, String> {
-    let mut pending = serde_json::from_str::<Vec<GpuPendingBoardRefJson>>(request_json)
+    let pending = serde_json::from_str::<Vec<GpuPendingBoardRefJson>>(request_json)
         .map_err(|error| format!("GPU turn completion key request is invalid: {error}"))?;
+    Ok(gpu_turn_completion_key_from_refs(pending))
+}
+
+fn gpu_turn_completion_key_from_refs(mut pending: Vec<GpuPendingBoardRefJson>) -> String {
     pending.sort_by_key(|board| (board.timeline_id, board.time));
-    Ok(pending
+    pending
         .into_iter()
         .map(|board| format!("{}:{}", board.timeline_id, board.time))
         .collect::<Vec<_>>()
-        .join("|"))
+        .join("|")
+}
+
+pub fn gpu_turn_completion_step_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuTurnCompletionStepRequest>(request_json)
+        .map_err(|error| format!("GPU turn completion step request is invalid: {error}"))?;
+    let max_moves =
+        gpu_turn_completion_max_moves(request.moves_length, request.snapshot.timelines.len());
+    let response = if request.snapshot.royal_capture_by.is_some() {
+        GpuTurnCompletionStepResponse {
+            action: "terminal",
+            state_key: None,
+            max_moves,
+        }
+    } else if request.pending_boards.is_empty()
+        && (request.status.complete || request.status.pending_present_board_count == Some(0))
+    {
+        GpuTurnCompletionStepResponse {
+            action: "complete",
+            state_key: None,
+            max_moves,
+        }
+    } else if request.moves_length >= max_moves {
+        GpuTurnCompletionStepResponse {
+            action: "maxMoves",
+            state_key: None,
+            max_moves,
+        }
+    } else {
+        let state_key = gpu_turn_completion_key_from_refs(request.pending_boards);
+        let visited = request.visited_keys.unwrap_or_default();
+        if visited.iter().any(|key| key == &state_key) {
+            GpuTurnCompletionStepResponse {
+                action: "loop",
+                state_key: Some(state_key),
+                max_moves,
+            }
+        } else {
+            GpuTurnCompletionStepResponse {
+                action: "search",
+                state_key: Some(state_key),
+                max_moves,
+            }
+        }
+    };
+    serde_json::to_string(&response)
+        .map_err(|error| format!("GPU turn completion step response failed to encode: {error}"))
+}
+
+pub fn gpu_incomplete_turn_pending_present_board_count_json(
+    request_json: &str,
+) -> Result<usize, String> {
+    let request = serde_json::from_str::<GpuIncompleteTurnPendingCountRequest>(request_json)
+        .map_err(|error| {
+            format!("GPU incomplete turn pending count request is invalid: {error}")
+        })?;
+    Ok(gpu_incomplete_turn_pending_present_board_count(
+        request.status.pending_present_board_count,
+        request.pending_boards.len(),
+    ))
+}
+
+pub fn gpu_incomplete_turn_pending_present_board_count(
+    status_pending_count: Option<i32>,
+    pending_board_count: usize,
+) -> usize {
+    status_pending_count
+        .and_then(|count| usize::try_from(count).ok())
+        .unwrap_or(0)
+        .max(pending_board_count)
 }
 
 pub fn gpu_choice_agreement_json(request_json: &str) -> Result<String, String> {
@@ -1973,6 +2372,94 @@ pub fn gpu_postable_search_result_json(request_json: &str) -> Result<bool, Strin
         .unwrap_or(false))
 }
 
+pub fn gpu_validate_first_frontier_turn_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuValidateFirstFrontierTurnRequest>(request_json)
+        .map_err(|error| format!("GPU validate first frontier turn request is invalid: {error}"))?;
+    let mut game = parse_game_snapshot(&request.game.to_string())?;
+    let mut accepted = Vec::new();
+    for movement in request.moves {
+        if game.apply_move(movement.from.into(), movement.to.into()) == 0 {
+            return Ok("[]".to_string());
+        }
+        accepted.push(movement);
+        if game.submit_turn() != 0 {
+            return serde_json::to_string(&accepted).map_err(|error| {
+                format!("GPU validate first frontier turn response failed to encode: {error}")
+            });
+        }
+    }
+    Ok("[]".to_string())
+}
+
+pub fn gpu_validate_search_result_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuValidateSearchResultRequest>(request_json)
+        .map_err(|error| format!("GPU validate search result request is invalid: {error}"))?;
+    if !gpu_postable_search_result_json(&request.result.to_string())? {
+        return Ok("null".to_string());
+    }
+    let mut result = request.result;
+    let Some(moves_value) = result.get("moves").and_then(|moves| moves.as_array()) else {
+        return Ok("null".to_string());
+    };
+    let moves = moves_value
+        .iter()
+        .cloned()
+        .map(serde_json::from_value::<GpuMoveJson>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("GPU validate search result moves are invalid: {error}"))?;
+    let mut game = parse_game_snapshot(&request.game.to_string())?;
+    for (index, movement) in moves.iter().enumerate() {
+        if game.apply_move(movement.from.into(), movement.to.into()) == 0 {
+            return Ok("null".to_string());
+        }
+        if game.submit_turn() != 0 {
+            if index != moves.len().saturating_sub(1) {
+                return Ok("null".to_string());
+            }
+            let Some(object) = result.as_object_mut() else {
+                return Ok("null".to_string());
+            };
+            object.insert("authoritativeReplay".to_string(), serde_json::json!(true));
+            object.insert(
+                "terminal".to_string(),
+                serde_json::json!(game.result.is_some()),
+            );
+            if let Some(result) = game.result {
+                if let Some(winner) = result.winner {
+                    object.insert("winner".to_string(), serde_json::json!(winner.as_str()));
+                }
+                object.insert(
+                    "resultReason".to_string(),
+                    serde_json::json!(result.reason.as_str()),
+                );
+                let was_gpu_terminal = object
+                    .get("gpuTerminal")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                object.insert(
+                    "gpuTerminal".to_string(),
+                    serde_json::json!(
+                        was_gpu_terminal || result.reason.as_str() == "royal-capture"
+                    ),
+                );
+            } else {
+                let was_gpu_terminal = object
+                    .get("gpuTerminal")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false);
+                object.insert(
+                    "gpuTerminal".to_string(),
+                    serde_json::json!(was_gpu_terminal),
+                );
+            }
+            return serde_json::to_string(&object).map_err(|error| {
+                format!("GPU validate search result response failed to encode: {error}")
+            });
+        }
+    }
+    Ok("null".to_string())
+}
+
 pub fn gpu_search_failure_summary_json(snapshot_json: &str) -> Result<String, String> {
     let snapshot = serde_json::from_str::<GpuSnapshotJson>(snapshot_json)
         .map_err(|error| format!("GPU search failure summary snapshot JSON is invalid: {error}"))?;
@@ -2081,6 +2568,121 @@ pub fn gpu_completed_turn_choice_json(request_json: &str) -> Result<String, Stri
 
     serde_json::to_string(&serde_json::Value::Object(result))
         .map_err(|error| format!("GPU completed-turn choice response failed to encode: {error}"))
+}
+
+pub fn gpu_validated_frontier_choice_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuValidatedFrontierChoiceRequest>(request_json)
+        .map_err(|error| format!("GPU validated frontier choice request is invalid: {error}"))?;
+    let moves = normalize_move_values(&request.moves);
+    let response = if request.choice_count >= request.choice_limit || moves.is_empty() {
+        GpuValidatedFrontierChoiceResponse {
+            accepted: false,
+            key: None,
+            choice: None,
+        }
+    } else {
+        let parsed_moves =
+            serde_json::from_value::<Vec<GpuMoveJson>>(serde_json::Value::Array(moves.clone()))
+                .map_err(|error| {
+                    format!("GPU validated frontier choice moves are invalid: {error}")
+                })?;
+        let key = gpu_move_plan_key(&parsed_moves);
+        if request.seen_keys.iter().any(|seen| seen == &key) {
+            GpuValidatedFrontierChoiceResponse {
+                accepted: false,
+                key: Some(key),
+                choice: None,
+            }
+        } else {
+            let mut choice = request
+                .candidate
+                .as_object()
+                .cloned()
+                .unwrap_or_else(serde_json::Map::new);
+            choice.insert("status".to_string(), serde_json::json!("ok"));
+            choice.insert("moves".to_string(), serde_json::Value::Array(moves.clone()));
+            choice.insert(
+                "principalVariation".to_string(),
+                serde_json::Value::Array(vec![serde_json::Value::Array(moves)]),
+            );
+            choice.insert("gpu".to_string(), serde_json::Value::Bool(true));
+            choice.insert("gpuMode".to_string(), serde_json::json!("full"));
+            choice.insert(
+                "gpuSearch".to_string(),
+                serde_json::Value::String(request.gpu_search),
+            );
+            GpuValidatedFrontierChoiceResponse {
+                accepted: true,
+                key: Some(key),
+                choice: Some(serde_json::Value::Object(choice)),
+            }
+        }
+    };
+    serde_json::to_string(&response).map_err(|error| {
+        format!("GPU validated frontier choice response failed to encode: {error}")
+    })
+}
+
+pub fn gpu_frontier_choice_diagnostics_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuFrontierChoiceDiagnosticsRequest>(request_json)
+        .map_err(|error| format!("GPU frontier choice diagnostics request is invalid: {error}"))?;
+    let selected_tactical = request
+        .selected
+        .get("tactical")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let response = GpuFrontierChoiceDiagnosticsResponse {
+        legal_choice_count: request.choices.len(),
+        legal_tactical_choice_count: request
+            .choices
+            .iter()
+            .filter(|choice| {
+                choice
+                    .get("tactical")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .count(),
+        selected_move_pruned_risk: if selected_tactical { 0 } else { 1 },
+        selected_move_tactical: if selected_tactical { 1 } else { 0 },
+    };
+    serde_json::to_string(&response).map_err(|error| {
+        format!("GPU frontier choice diagnostics response failed to encode: {error}")
+    })
+}
+
+pub fn gpu_normalize_principal_variation_json(request_json: &str) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(request_json)
+        .map_err(|error| format!("GPU principal variation request is invalid: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "GPU principal variation request must be an object.".to_string())?;
+    let mut cleaned = Vec::new();
+    if let Some(turns) = object
+        .get("variation")
+        .and_then(serde_json::Value::as_array)
+    {
+        for turn in turns {
+            let Some(moves) = turn.as_array() else {
+                continue;
+            };
+            let valid = normalize_move_values(moves);
+            if !valid.is_empty() {
+                cleaned.push(serde_json::Value::Array(valid));
+            }
+        }
+    }
+    if cleaned.is_empty() {
+        cleaned.push(serde_json::Value::Array(normalize_move_values(
+            object
+                .get("fallback")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )));
+    }
+    serde_json::to_string(&serde_json::Value::Array(cleaned))
+        .map_err(|error| format!("GPU principal variation response failed to encode: {error}"))
 }
 
 pub fn gpu_summarize_search_choices_json(request_json: &str) -> Result<String, String> {
@@ -2385,6 +2987,14 @@ fn gpu_choice_moves(candidate: &serde_json::Value) -> Result<Vec<GpuMoveJson>, S
         .map_err(|error| format!("GPU search choice moves are invalid: {error}"))
 }
 
+fn normalize_move_values(moves: &[serde_json::Value]) -> Vec<serde_json::Value> {
+    moves
+        .iter()
+        .filter(|movement| serde_json::from_value::<GpuMoveJson>((*movement).clone()).is_ok())
+        .cloned()
+        .collect()
+}
+
 fn gpu_choice_agreements(
     selected: &[GpuMoveJson],
     choices: &[Vec<GpuMoveJson>],
@@ -2466,6 +3076,62 @@ pub fn gpu_pick_candidate_records_from_i32s(words: &[i32]) -> Result<Vec<i32>, S
     Ok(picked)
 }
 
+pub fn gpu_pick_candidate_records_json(request_json: &str) -> Result<Vec<i32>, String> {
+    let request = serde_json::from_str::<GpuPickCandidateRecordsRequest>(request_json)
+        .map_err(|error| format!("GPU candidate record pick JSON request is invalid: {error}"))?;
+    let record_count = request.records.len() / GPU_CANDIDATE_STRIDE;
+    let record_len = record_count * GPU_CANDIDATE_STRIDE;
+    let mut words = Vec::with_capacity(2 + record_len + request.indices.len());
+    words.push(
+        i32::try_from(record_count)
+            .map_err(|_| "GPU candidate record pick count exceeds i32 range.".to_string())?,
+    );
+    words.push(
+        i32::try_from(request.indices.len())
+            .map_err(|_| "GPU candidate record pick index count exceeds i32 range.".to_string())?,
+    );
+    words.extend(request.records.into_iter().take(record_len));
+    let indices = request
+        .indices
+        .into_iter()
+        .map(gpu_candidate_record_pick_index)
+        .collect::<Result<Vec<_>, _>>()?;
+    words.extend(indices);
+    gpu_pick_candidate_records_from_i32s(&words)
+}
+
+pub fn gpu_mutation_turn_code_from_records(records: &[i32]) -> i32 {
+    records
+        .get(GPU_CANDIDATE_COLOR_OFFSET)
+        .copied()
+        .unwrap_or(0)
+}
+
+pub fn gpu_mutation_turn_code_json(request_json: &str) -> Result<i32, String> {
+    let request = serde_json::from_str::<GpuMutationTurnCodeRequest>(request_json)
+        .map_err(|error| format!("GPU mutation turn-code request is invalid: {error}"))?;
+    Ok(gpu_mutation_turn_code_from_records(&request.records))
+}
+
+fn gpu_candidate_record_pick_index(index: f64) -> Result<i32, String> {
+    if !index.is_finite() {
+        return Err("GPU candidate record pick index is not finite.".to_string());
+    }
+    let truncated = index.trunc();
+    if truncated < i32::MIN as f64 || truncated > i32::MAX as f64 {
+        return Err("GPU candidate record pick index exceeds i32 range.".to_string());
+    }
+    Ok(truncated as i32)
+}
+
+fn gpu_candidate_json_index(candidate: &serde_json::Value) -> Result<i32, String> {
+    let index = candidate
+        .get("index")
+        .and_then(serde_json::Value::as_f64)
+        .ok_or_else(|| "GPU candidate index is missing.".to_string())?;
+    gpu_candidate_record_pick_index(index)
+}
+
 pub fn gpu_candidate_index_from_i32s(words: &[i32]) -> Result<i32, String> {
     if words.len() < 10 {
         return Err("GPU candidate index request is truncated.".to_string());
@@ -2491,6 +3157,35 @@ pub fn gpu_candidate_index_from_i32s(words: &[i32]) -> Result<i32, String> {
         }
     }
     Ok(-1)
+}
+
+pub fn gpu_candidate_index_json(request_json: &str) -> Result<i32, String> {
+    let request = serde_json::from_str::<GpuCandidateIndexRequest>(request_json)
+        .map_err(|error| format!("GPU candidate index JSON request is invalid: {error}"))?;
+    let record_count = request.records.len() / GPU_CANDIDATE_STRIDE;
+    if record_count * GPU_CANDIDATE_STRIDE != request.records.len() {
+        return Err(format!(
+            "GPU candidate index JSON records are not stride-aligned: got {} i32s.",
+            request.records.len()
+        ));
+    }
+    let mut words = Vec::with_capacity(9 + request.records.len());
+    words.push(
+        i32::try_from(record_count)
+            .map_err(|_| "GPU candidate index record count exceeds i32 range.".to_string())?,
+    );
+    words.extend([
+        request.movement.from.timeline_id,
+        request.movement.from.time,
+        request.movement.from.x,
+        request.movement.from.y,
+        request.movement.to.timeline_id,
+        request.movement.to.time,
+        request.movement.to.x,
+        request.movement.to.y,
+    ]);
+    words.extend(request.records);
+    gpu_candidate_index_from_i32s(&words)
 }
 
 pub fn gpu_reply_pressure_ranked_roots_from_i32s(words: &[i32]) -> Result<Vec<i32>, String> {
@@ -2541,6 +3236,57 @@ pub fn gpu_reply_pressure_ranked_roots_from_i32s(words: &[i32]) -> Result<Vec<i3
         .into_iter()
         .flat_map(|(index, score)| [index, score])
         .collect())
+}
+
+pub fn gpu_reply_pressure_ranked_roots_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuReplyPressureRankedRootsRequest>(request_json)
+        .map_err(|error| format!("GPU reply pressure JSON request is invalid: {error}"))?;
+    let pair_count = request
+        .ranked_roots
+        .len()
+        .checked_mul(request.reply_count)
+        .ok_or_else(|| "GPU reply pressure pair count overflowed.".to_string())?;
+    if request.pair_scores.len() != pair_count {
+        return Err(format!(
+            "GPU reply pressure JSON request length mismatch: expected {pair_count} pair scores, got {}.",
+            request.pair_scores.len()
+        ));
+    }
+    let mut ranked = request
+        .ranked_roots
+        .into_iter()
+        .enumerate()
+        .filter_map(|(root_index, mut root)| {
+            let index = root.get("index").and_then(serde_json::Value::as_i64)?;
+            let score = root
+                .get("score")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(-2_147_483_647);
+            let offset = root_index * request.reply_count;
+            let max_pressure = request
+                .pair_scores
+                .get(offset..offset + request.reply_count)
+                .unwrap_or(&[])
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .max(0) as i64;
+            let adjusted = score.saturating_sub(max_pressure);
+            if let Some(object) = root.as_object_mut() {
+                object.insert("score".to_string(), serde_json::json!(adjusted));
+            }
+            Some((index, adjusted, root))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    serde_json::to_string(
+        &ranked
+            .into_iter()
+            .map(|(_, _, root)| root)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| format!("GPU reply pressure JSON response failed to encode: {error}"))
 }
 
 fn non_negative_usize(value: i32, label: &str) -> Result<usize, String> {
@@ -3594,6 +4340,10 @@ pub fn gpu_search_reply_limit(nodes: f64) -> usize {
     gpu_nodes_limit(nodes, DEFAULT_BOT_SEARCH_NODES, 4, 12)
 }
 
+pub fn gpu_reply_pressure_reply_limit() -> usize {
+    512
+}
+
 pub fn gpu_search_validation_limit(nodes: f64) -> usize {
     gpu_nodes_limit(nodes, DEFAULT_BOT_SEARCH_NODES, 8, 32)
 }
@@ -3630,8 +4380,54 @@ pub fn gpu_supported_mutation_candidate_indexes_from_i32s(
     Ok(indexes)
 }
 
+pub fn gpu_supported_mutation_candidate_indexes_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuSupportedMutationCandidatesRequest>(request_json)
+        .map_err(|error| format!("GPU supported mutation JSON request is invalid: {error}"))?;
+    let limit = gpu_supported_mutation_limit(request.limit)?;
+    let mut words = Vec::with_capacity(3 + request.candidates.len() * 2);
+    words
+        .push(i32::try_from(request.candidates.len()).map_err(|_| {
+            "GPU supported mutation candidate count exceeds i32 range.".to_string()
+        })?);
+    words.push(limit);
+    words.push(i32::from(request.require_child_boards.unwrap_or(true)));
+    for candidate in request.candidates {
+        words.push(candidate.mutation_status);
+        words.push(i32::from(candidate.has_child_boards));
+    }
+    let indexes = gpu_supported_mutation_candidate_indexes_from_i32s(&words)?;
+    serde_json::to_string(&indexes)
+        .map_err(|error| format!("GPU supported mutation JSON response failed to encode: {error}"))
+}
+
+fn gpu_supported_mutation_limit(limit: Option<f64>) -> Result<i32, String> {
+    let Some(limit) = limit.filter(|limit| limit.is_finite()) else {
+        return Ok(0);
+    };
+    if limit <= 0.0 {
+        return Ok(0);
+    }
+    if limit.floor() > i32::MAX as f64 {
+        return Err("GPU supported mutation limit exceeds i32 range.".to_string());
+    }
+    Ok(limit.floor() as i32)
+}
+
+pub fn gpu_mutation_status_is_terminal(status: i32) -> bool {
+    status == GPU_MUTATION_STATUS_ROYAL_CAPTURE
+        || status == GPU_MUTATION_STATUS_BRANCH_ROYAL_CAPTURE
+}
+
 pub fn gpu_full_search_reported_depth(requested_depth: i32) -> i32 {
     requested_depth.min(2)
+}
+
+pub fn gpu_completed_reply_should_search(
+    royal_capture_present: bool,
+    now_ms: f64,
+    deadline_at_ms: f64,
+) -> bool {
+    !royal_capture_present && now_ms < deadline_at_ms
 }
 
 pub fn gpu_diagnostic_rate(numerator: f64, denominator: f64) -> f64 {
@@ -3778,6 +4574,38 @@ pub fn bot_completed_search_depth(
     } else {
         0
     }
+}
+
+pub fn bot_result_ends_in_royal_capture(
+    result_reason: Option<&str>,
+    gpu_terminal: bool,
+    terminal: bool,
+) -> bool {
+    result_reason == Some("royal-capture")
+        || gpu_terminal
+        || (terminal && result_reason == Some("royal-capture"))
+}
+
+pub fn bot_result_ends_in_royal_capture_json(request_json: &str) -> Result<bool, String> {
+    let value: serde_json::Value = serde_json::from_str(request_json)
+        .map_err(|error| format!("Bot result terminal request is not valid JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Bot result terminal request must be an object.".to_string())?;
+    Ok(bot_result_ends_in_royal_capture(
+        object
+            .get("resultReason")
+            .or_else(|| object.get("reason"))
+            .and_then(serde_json::Value::as_str),
+        object
+            .get("gpuTerminal")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        object
+            .get("terminal")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    ))
 }
 
 fn origin_code(origin: &Origin) -> i32 {

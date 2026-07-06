@@ -39,6 +39,8 @@ use chronofish_engine::gpu::training::{
     denormalized_search_score,
     dense_kernel_entry_point,
     distill_training_samples,
+    distill_training_samples_with_labels,
+    distill_training_samples_with_labels_json,
     encode_compact_value_model,
     f32_to_f16_bits,
     f32_to_f16_upload_bytes,
@@ -49,6 +51,7 @@ use chronofish_engine::gpu::training::{
     format_bytes,
     gpu_position_generation_search_config,
     gpu_rollout_max_plies,
+    gpu_rollout_ply_offset,
     gpu_training_worker_count,
     gpu_warmup_plies,
     gpu_warmup_search_config,
@@ -66,6 +69,8 @@ use chronofish_engine::gpu::training::{
     legacy_training_modes,
     legacy_training_subject,
     load_compact_value_model,
+    loss_log_replay_logs_json,
+    loss_log_validation_update_json,
     loss_reduction_workgroup_count,
     min_hidden_training_positions,
     model_architecture_matches,
@@ -102,6 +107,7 @@ use chronofish_engine::gpu::training::{
     sample_seed,
     samples_from_partial_outcome,
     search_label_sample,
+    search_result_label_sample_json,
     search_seed_json,
     select_training_working_set_for_projection,
     select_training_working_set_indices_for_projection,
@@ -115,8 +121,12 @@ use chronofish_engine::gpu::training::{
     split_validation_samples,
     split_work,
     stable_sample_hash,
+    tactical_position_attempt_count,
     tactical_position_priority_from_counts,
     tactical_position_priority_snapshot_json,
+    tactical_position_selection,
+    tactical_position_selection_json,
+    tactical_position_use_best_source,
     tactical_search_config,
     take_training_sample_batches,
     train_policy_head_cpu,
@@ -127,6 +137,7 @@ use chronofish_engine::gpu::training::{
     training_label_priority,
     training_label_weight,
     training_label_worker_count,
+    training_metrics_summary_json,
     training_mode_count,
     training_mode_enabled,
     training_weighted_average,
@@ -138,7 +149,9 @@ use chronofish_engine::gpu::training::{
     value_head_validation_interval,
     value_training_batch_size,
     worker_request_timeout_ms,
+    worker_request_timeout_ms_json,
     worker_search_time_ms,
+    worker_search_time_ms_json,
     xorshift32,
     CompactValueModelError,
     OutputActivation,
@@ -345,6 +358,32 @@ fn distills_training_samples_with_compact_value_model() {
     assert_eq!(distilled[0].label_kind.as_deref(), Some("distilled"));
     assert_eq!(distilled[0].label_weight, 0.25);
     assert_eq!(distilled[0].pseudo, Some(true));
+
+    let label_distilled =
+        distill_training_samples_with_labels(&[sample.clone(), sample.clone()], &[Some(0.75)]);
+    assert_eq!(label_distilled.len(), 2);
+    assert_eq!(label_distilled[0].label, 0.75);
+    assert_eq!(label_distilled[0].policy, None);
+    assert_eq!(label_distilled[0].label_kind.as_deref(), Some("distilled"));
+    assert_eq!(label_distilled[0].label_weight, 0.25);
+    assert_eq!(label_distilled[0].pseudo, Some(true));
+    assert_eq!(label_distilled[1].label, 0.0);
+
+    let response = distill_training_samples_with_labels_json(
+        &serde_json::json!({
+            "samples": [sample],
+            "labels": [null]
+        })
+        .to_string(),
+    )
+    .expect("distill samples with labels JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("distill samples with labels response");
+    assert_eq!(value[0]["label"], 0.0);
+    assert_eq!(value[0]["policy"], serde_json::Value::Null);
+    assert_eq!(value[0]["labelKind"], "distilled");
+    assert_eq!(value[0]["labelWeight"], 0.25);
+    assert_eq!(value[0]["pseudo"], true);
 }
 
 #[test]
@@ -594,6 +633,9 @@ fn training_worker_scheduling_helpers_match_browser_policy() {
     assert_eq!(gpu_rollout_max_plies(0, 0), 10);
     assert_eq!(gpu_rollout_max_plies(8, 1), 10);
     assert_eq!(gpu_rollout_max_plies(12, 3), 15);
+    assert_eq!(gpu_rollout_ply_offset(0, 0), 0);
+    assert_eq!(gpu_rollout_ply_offset(4, 0), 4);
+    assert_eq!(gpu_rollout_ply_offset(4, 3), 34);
 
     assert_eq!(
         gpu_warmup_search_config(5, 50_000, 29_000, 0.25),
@@ -644,6 +686,151 @@ fn training_worker_timeout_helpers_match_browser_policy() {
     assert_eq!(worker_search_time_ms(1, 0), 29_000);
     assert_eq!(worker_search_time_ms(10, 500), 29_000);
     assert_eq!(worker_search_time_ms(10, 125_000), 125_000);
+
+    assert_eq!(
+        worker_request_timeout_ms_json(r#"{"nodes":"20000","timeMs":"0"}"#)
+            .expect("JSON request timeout"),
+        60_000
+    );
+    assert_eq!(
+        worker_request_timeout_ms_json(r#"{"nodes":0,"timeMs":false}"#)
+            .expect("zero JSON request timeout"),
+        30_000
+    );
+    assert_eq!(
+        worker_search_time_ms_json(r#"{"nodes":true,"timeMs":"125000.9"}"#)
+            .expect("JSON search timeout"),
+        125_000
+    );
+}
+
+#[test]
+fn loss_log_replay_selection_matches_browser_policy() {
+    let selected = loss_log_replay_logs_json(
+        r#"{
+            "limit": 2,
+            "logs": [
+                { "logPath": "empty", "decisions": [] },
+                { "logPath": "missing" },
+                { "logPath": "first", "decisions": [{}] },
+                { "logPath": "second", "decisions": [{}, {}] },
+                { "logPath": "third", "decisions": [{}] }
+            ]
+        }"#,
+    )
+    .expect("loss-log replay selection");
+    let value: serde_json::Value =
+        serde_json::from_str(&selected).expect("loss-log replay selection JSON");
+    assert_eq!(value.as_array().map(Vec::len), Some(2));
+    assert_eq!(value[0]["logPath"], "first");
+    assert_eq!(value[1]["logPath"], "second");
+
+    let empty = loss_log_replay_logs_json(r#"{"limit":0,"logs":[{"decisions":[{}]}]}"#)
+        .expect("empty loss-log replay selection");
+    assert_eq!(empty, "[]");
+}
+
+#[test]
+fn loss_log_validation_update_matches_browser_policy() {
+    let skipped = loss_log_validation_update_json(
+        r#"{
+            "validation": {
+                "checked": 0,
+                "changed": 0,
+                "unchanged": 0,
+                "skipped": 0,
+                "failed": false,
+                "examples": []
+            },
+            "event": "skip"
+        }"#,
+    )
+    .expect("skip validation update");
+    let skipped_value: serde_json::Value =
+        serde_json::from_str(&skipped).expect("skip validation JSON");
+    assert_eq!(skipped_value["skipped"], 1);
+    assert_eq!(skipped_value["failed"], false);
+
+    let changed = loss_log_validation_update_json(
+        r#"{
+            "validation": {
+                "checked": 1,
+                "changed": 0,
+                "unchanged": 1,
+                "skipped": 1,
+                "failed": true,
+                "examples": []
+            },
+            "event": "changed",
+            "example": {
+                "logPath": "loss.log",
+                "ply": 12,
+                "botColor": "white",
+                "previous": "a",
+                "current": "b",
+                "previousScore": 1,
+                "currentScore": 2
+            }
+        }"#,
+    )
+    .expect("changed validation update");
+    let changed_value: serde_json::Value =
+        serde_json::from_str(&changed).expect("changed validation JSON");
+    assert_eq!(changed_value["checked"], 2);
+    assert_eq!(changed_value["changed"], 1);
+    assert_eq!(changed_value["failed"], false);
+    assert_eq!(changed_value["examples"].as_array().map(Vec::len), Some(1));
+
+    let failed = loss_log_validation_update_json(
+        r#"{
+            "validation": {
+                "checked": 3,
+                "changed": 0,
+                "unchanged": 3,
+                "skipped": 2,
+                "failed": false,
+                "examples": []
+            },
+            "event": "finalize"
+        }"#,
+    )
+    .expect("final validation update");
+    let failed_value: serde_json::Value =
+        serde_json::from_str(&failed).expect("final validation JSON");
+    assert_eq!(failed_value["failed"], true);
+}
+
+#[test]
+fn training_metrics_summary_matches_browser_policy() {
+    let summary = training_metrics_summary_json(
+        r#"{
+            "startedAt": 1000.2,
+            "nowMs": 2500.8,
+            "phases": {
+                "collect": 2500.4,
+                "searchLabels": 400.4,
+                "searchPositions": 200.2,
+                "cpuLabels": 1000.0
+            },
+            "sampleCounts": {
+                "cpu": 25,
+                "gpu": 5
+            },
+            "searchPositionCount": 3,
+            "searchLabelCount": 2,
+            "lossLogValidation": { "checked": 1, "changed": 0 }
+        }"#,
+    )
+    .expect("metrics summary");
+    let value: serde_json::Value = serde_json::from_str(&summary).expect("metrics summary JSON");
+    assert_eq!(value["totalMs"], 1501);
+    assert_eq!(value["phases"]["collect"], 2500);
+    assert_eq!(value["phases"]["searchLabels"], 400);
+    assert_eq!(value["sampleRates"]["cpu"], 25.0);
+    assert_eq!(value["sampleRates"]["gpu"], 2.0);
+    assert_eq!(value["sampleRates"]["searchPositions"], 14.99);
+    assert_eq!(value["sampleRates"]["searchLabels"], 5.0);
+    assert_eq!(value["lossLogValidation"]["checked"], 1);
 }
 
 #[test]
@@ -1033,6 +1220,34 @@ fn tactical_position_priority_matches_browser_formula() {
         tactical_position_priority_snapshot_json(&snapshot).expect("priority"),
         6
     );
+}
+
+#[test]
+fn tactical_position_selection_matches_browser_generation_policy() {
+    assert_eq!(tactical_position_attempt_count(0), 1);
+    assert_eq!(tactical_position_attempt_count(3), 4);
+    assert_eq!(tactical_position_attempt_count(4), 1);
+
+    assert!(!tactical_position_use_best_source(0));
+    assert!(tactical_position_use_best_source(1));
+
+    let keep = tactical_position_selection(3, 2);
+    assert!(!keep.use_generated);
+    assert_eq!(keep.next_priority, 3);
+    assert!(!keep.complete);
+
+    let replace = tactical_position_selection(1, 4);
+    assert!(replace.use_generated);
+    assert_eq!(replace.next_priority, 4);
+    assert!(replace.complete);
+
+    let response =
+        tactical_position_selection_json(2, 5).expect("tactical selection response JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("tactical selection response parse");
+    assert_eq!(value["useGenerated"], true);
+    assert_eq!(value["nextPriority"], 5);
+    assert_eq!(value["complete"], true);
 }
 
 #[test]
@@ -1427,6 +1642,28 @@ fn creates_training_samples_from_engine_positions_and_search_labels() {
     assert!((-1.0..=1.0).contains(&response.samples[0].label));
     assert!(response.depth >= 1);
     assert!(response.nodes > 0);
+
+    let response = search_result_label_sample_json(
+        &serde_json::json!({
+            "sample": response.samples[0],
+            "score": 10_000,
+            "firstMove": {
+                "from": { "timelineId": 0, "time": 0, "x": 4, "y": 1 },
+                "to": { "timelineId": 0, "time": 1, "x": 4, "y": 3 }
+            },
+            "labelKind": "curriculum",
+            "labelWeight": 1.25
+        })
+        .to_string(),
+    )
+    .expect("search result label sample JSON");
+    let sample: TrainingSample =
+        serde_json::from_str(&response).expect("search result label sample parse");
+    assert_eq!(sample.label, 0.5);
+    assert_eq!(sample.label_kind.as_deref(), Some("curriculum"));
+    assert_eq!(sample.label_weight, 1.25);
+    assert_eq!(sample.pseudo, Some(false));
+    assert!(sample.policy.is_some_and(|policy| policy < 257));
 }
 
 #[test]

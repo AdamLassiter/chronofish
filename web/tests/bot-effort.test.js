@@ -54,11 +54,14 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth && pending\.depthReceived < pending\.depthExpected/);
   assert.match(controller, /function completedSearchDepth/);
   assert.match(controller, /function resultEndsInRoyalCapture/);
+  assert.match(controller, /chronofish_bot_result_ends_in_royal_capture_json\(ptr, len\)/);
   assert.match(controller, /pending\.currentDepth <= pending\.minDepth/);
   assert.match(controller, /completedDepth >= pending\.minDepth/);
   assert.match(controller, /if \(bestResult && \(bestResult\.depth \?\? 0\) >= pending\.minDepth\)/);
   assert.doesNotMatch(controller, /completedDepth >= 2 && completedDepth % 2 === 0/);
   assert.match(controller, /resultEndsInRoyalCapture\(result\) \? 1 : 0/);
+  assert.doesNotMatch(controller, /result\.resultReason === "royal-capture"/);
+  assert.doesNotMatch(controller, /result\.gpuTerminal === true \|\| result\.terminal === true/);
   assert.match(controller, /pending\.incompleteDepthAttempt = true/);
   assert.match(controller, /pending\.incompleteDepthAttempt && pending\.currentDepth >= pending\.minDepth/);
   assert.match(controller, /is completing depth/);
@@ -73,16 +76,19 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(engineSearch, /pub fn bot_next_search_depth/);
   assert.match(engineSearch, /pub fn bot_worker_search_time_ms/);
   assert.match(engineSearch, /pub fn bot_completed_search_depth/);
+  assert.match(engineSearch, /pub fn bot_result_ends_in_royal_capture_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_search_depth_at_least_one/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_search_config_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_next_search_depth/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_worker_search_time_ms/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_bot_completed_search_depth/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_bot_result_ends_in_royal_capture_json/);
   assert.match(engineTypes, /chronofish_bot_search_depth_at_least_one\(depth: number\): number/);
   assert.match(engineTypes, /chronofish_bot_search_config_json\(depth: number, minDepth: number, nodes: number, timeMs: number\): number/);
   assert.match(engineTypes, /chronofish_bot_next_search_depth\(currentDepth: number, targetDepth: number\): number/);
   assert.match(engineTypes, /chronofish_bot_worker_search_time_ms\(timeMs: number\): number/);
   assert.match(engineTypes, /chronofish_bot_completed_search_depth\(resultDepth: number, requestedDepth: number, resultEndsInRoyalCapture: number\): number/);
+  assert.match(engineTypes, /chronofish_bot_result_ends_in_royal_capture_json\(ptr: number, length: number\): number/);
 });
 
 test("bot countdown switches to overtime after the nominal deadline", async () => {
@@ -136,9 +142,18 @@ test("GPU worker honors minimum depth before applying its internal deadline", as
   assert.match(engineSearch, /pub fn gpu_worker_search_config_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_worker_search_config_json/);
   assert.match(engineTypes, /chronofish_gpu_worker_search_config_json\(depth: number, minDepth: number, timeMs: number\): number/);
+  assert.match(cpuWorker, /const searchConfig = cpuWorkerSearchConfig\(engine, \{ depth, minDepth, nodes, timeMs \}\)/);
+  assert.match(cpuWorker, /engine\.chronofish_cpu_worker_search_config_json\(ptr, len\)/);
+  assert.doesNotMatch(cpuWorker, /Math\.max\(1, depth\)/);
+  assert.doesNotMatch(cpuWorker, /Math\.max\(1, Math\.min\(depth, minDepth\)\)/);
+  assert.doesNotMatch(cpuWorker, /Math\.max\(1, Math\.floor\(timeMs\)\)/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_worker_search_config_json/);
+  assert.match(engineTypes, /chronofish_cpu_worker_search_config_json\(ptr: number, length: number\): number/);
   assert.match(workerTypes, /resultReason\?: SearchResultReason/);
-  assert.match(worker, /resultReason: replayed\.result\?\.reason/);
-  assert.match(worker, /gpuTerminal: result\.gpuTerminal === true \|\| replayed\.result\?\.reason === "royal-capture"/);
+  assert.match(worker, /chronofish_gpu_validate_search_result_json\(ptr, len\)/);
+  assert.match(engineSearch, /"resultReason"/);
+  assert.match(engineSearch, /"gpuTerminal"/);
+  assert.match(engineSearch, /result\.reason\.as_str\(\) == "royal-capture"/);
   assert.match(cpuWorker, /resultReason\?: "royal-capture" \| "threefold-repetition" \| "stalemate" \| null/);
 });
 
@@ -146,16 +161,23 @@ test("bot move choice logging includes full principal variation plans", async ()
   const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
   const worker = await readFile(path.join(webRoot, "src/ai-worker.ts"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
+  const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
+  const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
   assert.match(controller, /plan: formatBotPlan\(choice\.principalVariation \?\? \[choice\.moves\], pending\.game\)/);
   assert.match(controller, /function formatBotPlan/);
   assert.match(controller, /chronofish_bot_ranked_choices_json\(ptr, len\)/);
   assert.match(engineSearch, /fn bot_normalized_principal_variation/);
   assert.match(controller, /principalVariation: normalizePrincipalVariation\(choice\.principalVariation, choice\.moves\)/);
+  assert.match(controller, /chronofish_gpu_normalize_principal_variation_json\(ptr, len\)/);
+  assert.doesNotMatch(controller, /\.map\(\(turn\) => turn\.filter\(\(move\) => move\?\.from && move\.to\)\.map\(cloneMove\)\)/);
   assert.match(await readFile(path.join(webRoot, "src/ai-worker-types.ts"), "utf8"), /principalVariation\?: Move\[\]\[\] \| undefined/);
   assert.match(worker, /principalVariation,/);
   assert.match(worker, /engine\.chronofish_gpu_selected_choice_json\(ptr, len\)/);
   assert.doesNotMatch(worker, /await engineSummarizeSearchChoices\(candidates\)/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_normalize_principal_variation_json/);
+  assert.match(engineTypes, /chronofish_gpu_normalize_principal_variation_json\(ptr: number, length: number\): number/);
+  assert.match(engineSearch, /pub fn gpu_normalize_principal_variation_json/);
   assert.match(engineSearch, /"principalVariation"/);
 });
 

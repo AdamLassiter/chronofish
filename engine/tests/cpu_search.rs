@@ -1,16 +1,25 @@
 use chronofish_engine::cpu::search::{
     bot_training_moves_key,
     breed_cpu_population,
+    cpu_apply_turn_json,
     cpu_candidate_scoring_plan,
+    cpu_candidate_scoring_should_continue,
     cpu_candidate_worker_count,
+    cpu_fitness_entry_for_candidate,
     cpu_label_worker_count,
+    cpu_match_remaining_searches,
+    cpu_match_should_continue,
     cpu_match_turn_time_ms,
     cpu_paired_match_average_score,
+    cpu_paired_match_candidate_colors,
     cpu_paired_match_deadline_ms,
+    cpu_paired_match_total_matches,
     cpu_parameters_key,
     cpu_reference_candidate_average,
+    cpu_reference_collection_should_continue,
     cpu_reference_comparison_count,
     cpu_reference_score_delta,
+    cpu_reference_score_delta_json,
     cpu_reference_should_continue,
     cpu_reference_worker_count,
     cpu_screening_game_count,
@@ -20,10 +29,12 @@ use chronofish_engine::cpu::search::{
     cpu_training_budget_ms,
     cpu_training_candidate_count,
     cpu_training_candidate_improved,
+    cpu_training_candidate_turn,
     cpu_training_elite_count,
     cpu_training_elites,
     cpu_training_finalist_candidates,
     cpu_training_finalist_target,
+    cpu_training_generation_outcome,
     cpu_training_next_stagnation,
     cpu_training_no_move_score,
     cpu_training_position_search_config,
@@ -31,6 +42,7 @@ use chronofish_engine::cpu::search::{
     cpu_training_position_worker_count,
     cpu_training_should_continue,
     cpu_training_winner_score,
+    cpu_worker_search_config_json,
     crossover_cpu_parameters,
     mode_label_target,
     move_agreement_bonus,
@@ -79,6 +91,67 @@ fn native_cpu_search_rejects_invalid_snapshot_json() {
     .expect_err("invalid snapshot should fail");
 
     assert!(error.contains("Snapshot timelines must be an array"));
+}
+
+#[test]
+fn cpu_worker_search_config_matches_browser_worker_contract() {
+    let config = cpu_worker_search_config_json(
+        r#"{
+            "depth": 4.8,
+            "minDepth": 9,
+            "nodes": 127.9,
+            "timeMs": 250.9
+        }"#,
+    )
+    .expect("CPU worker search config");
+    let value: serde_json::Value =
+        serde_json::from_str(&config).expect("CPU worker search config JSON");
+    assert_eq!(value["depth"], 4);
+    assert_eq!(value["minDepth"], 4);
+    assert_eq!(value["nodes"], 127);
+    assert_eq!(value["timeMs"], 250);
+
+    let defaults = cpu_worker_search_config_json("{}").expect("default CPU worker search config");
+    let value: serde_json::Value =
+        serde_json::from_str(&defaults).expect("default CPU worker search config JSON");
+    assert_eq!(value["depth"], 1);
+    assert!(value.get("minDepth").is_none());
+    assert_eq!(value["nodes"], 64);
+    assert_eq!(value["timeMs"], 10_000);
+
+    let bounded = cpu_worker_search_config_json(
+        r#"{
+            "depth": 0,
+            "minDepth": -5,
+            "nodes": null,
+            "timeMs": 0
+        }"#,
+    )
+    .expect("bounded CPU worker search config");
+    let value: serde_json::Value =
+        serde_json::from_str(&bounded).expect("bounded CPU worker search config JSON");
+    assert_eq!(value["depth"], 1);
+    assert_eq!(value["minDepth"], 1);
+    assert_eq!(value["nodes"], 64);
+    assert_eq!(value["timeMs"], 1);
+}
+
+#[test]
+fn cpu_apply_turn_matches_browser_worker_contract() {
+    let response = cpu_apply_turn_json(
+        r#"{
+            "game": { "turn": "white", "timelines": [] },
+            "moves": []
+        }"#,
+    )
+    .expect("CPU apply turn");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("CPU apply turn response JSON");
+    assert_eq!(value["status"]["complete"], false);
+    assert_eq!(value["status"]["terminal"], false);
+    assert_eq!(value["status"]["nextTurn"], "white");
+    assert_eq!(value["game"]["turn"], "white");
+    assert!(value["game"]["timelines"].as_array().is_some());
 }
 
 #[test]
@@ -222,6 +295,12 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 4_000.0, 3), 500);
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 1_100.0, 3), 33);
     assert_eq!(cpu_match_turn_time_ms(500, 1_000.0, 2_000.0, 0), 500);
+    assert_eq!(cpu_match_remaining_searches(12, 0), 13);
+    assert_eq!(cpu_match_remaining_searches(12, 11), 2);
+    assert_eq!(cpu_match_remaining_searches(12, 12), 1);
+    assert_eq!(cpu_match_remaining_searches(12, 20), 1);
+    assert!(cpu_match_should_continue(1_000.0, 1_001.0));
+    assert!(!cpu_match_should_continue(1_001.0, 1_001.0));
     assert_eq!(
         cpu_paired_match_deadline_ms(1_000.0, 2_000.0, 4, 0),
         1_250.0
@@ -231,8 +310,22 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
         2_000.0
     );
     assert_eq!(cpu_paired_match_deadline_ms(1_000.0, 900.0, 4, 0), 900.0);
+    assert_eq!(cpu_paired_match_total_matches(0), 0);
+    assert_eq!(cpu_paired_match_total_matches(3), 6);
+    assert_eq!(cpu_paired_match_total_matches(usize::MAX), usize::MAX);
+    assert_eq!(
+        cpu_paired_match_candidate_colors("white").expect("white color pair"),
+        vec!["white", "black"]
+    );
+    assert_eq!(
+        cpu_paired_match_candidate_colors("black").expect("black color pair"),
+        vec!["black", "white"]
+    );
+    assert!(cpu_paired_match_candidate_colors("blue").is_err());
     assert_eq!(cpu_paired_match_average_score(45.0, 3), 15.0);
     assert!(cpu_paired_match_average_score(45.0, 0).is_nan());
+    assert!(cpu_training_candidate_turn("white", "white"));
+    assert!(!cpu_training_candidate_turn("black", "white"));
 
     assert_eq!(mode_label_target(96, 3, 12), 8);
     assert_eq!(mode_label_target(96, 1, 12), 96);
@@ -293,6 +386,24 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     assert!(cpu_training_should_continue(1_000.0, 2_000.0, 3, 8));
     assert!(!cpu_training_should_continue(2_000.0, 2_000.0, 3, 8));
     assert!(!cpu_training_should_continue(1_000.0, 2_000.0, 8, 8));
+    assert!(cpu_candidate_scoring_should_continue(
+        1_000.0, 2_000.0, 3, 8
+    ));
+    assert!(!cpu_candidate_scoring_should_continue(
+        2_000.0, 2_000.0, 3, 8
+    ));
+    assert!(!cpu_candidate_scoring_should_continue(
+        1_000.0, 2_000.0, 8, 8
+    ));
+    assert!(cpu_reference_collection_should_continue(
+        1_000.0, 2_000.0, 3, 8
+    ));
+    assert!(!cpu_reference_collection_should_continue(
+        2_000.0, 2_000.0, 3, 8
+    ));
+    assert!(!cpu_reference_collection_should_continue(
+        1_000.0, 2_000.0, 8, 8
+    ));
     assert_eq!(cpu_reference_comparison_count(12, 0), 12);
     assert_eq!(cpu_reference_comparison_count(12, 5), 5);
     assert_eq!(cpu_reference_comparison_count(3, 5), 3);
@@ -363,6 +474,31 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
         ),
         vec![baseline.clone(), high.clone()]
     );
+    let outcome = cpu_training_generation_outcome(
+        &baseline,
+        &[
+            CpuScoredCandidate {
+                parameters: baseline.clone(),
+                score: 8.0,
+            },
+            CpuScoredCandidate {
+                parameters: high.clone(),
+                score: 12.0,
+            },
+        ],
+        f64::NEG_INFINITY,
+        11.0,
+    );
+    assert_eq!(outcome.baseline_score, 8.0);
+    assert_eq!(
+        outcome.winner.as_ref().map(|entry| &entry.parameters),
+        Some(&high)
+    );
+    assert!(outcome.improved);
+    let stale_baseline = cpu_training_generation_outcome(&baseline, &[], 7.0, 0.0);
+    assert_eq!(stale_baseline.baseline_score, 7.0);
+    assert!(stale_baseline.winner.is_none());
+    assert!(!stale_baseline.improved);
     let scoring_plan = cpu_candidate_scoring_plan(
         &[low.clone(), high.clone(), low.clone(), tied.clone()],
         &[
@@ -389,6 +525,13 @@ fn cpu_match_budgeting_matches_browser_training_policy() {
     );
     assert_eq!(scoring_plan.uncached_candidates, vec![low, tied]);
     assert_eq!(scoring_plan.cache_hits, 1);
+    assert_eq!(
+        cpu_fitness_entry_for_candidate(&high, 13.5),
+        CpuFitnessEntry {
+            key: cpu_parameters_key(&high),
+            score: 13.5,
+        }
+    );
 }
 
 #[test]
@@ -508,6 +651,40 @@ fn cpu_reference_score_deltas_match_browser_training_policy() {
     assert_eq!(cpu_reference_candidate_average(120, 3, 2, 0.8), 40.0);
     assert_eq!(cpu_reference_candidate_average(120, 3, 3, 0.8), 20.0);
     assert_eq!(cpu_reference_candidate_average(120, 0, 0, 0.8), 120.0);
+}
+
+#[test]
+fn cpu_reference_score_delta_json_accepts_browser_move_contract() {
+    let response = cpu_reference_score_delta_json(
+        r#"{
+            "candidateScore": 120,
+            "referenceScore": 100,
+            "candidateMoves": [
+                {
+                    "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                    "to": { "timelineId": 1, "time": 3, "x": 4, "y": 5 }
+                }
+            ],
+            "referenceMoves": [
+                {
+                    "fromTimelineId": 1,
+                    "fromTime": 2,
+                    "fromX": 3,
+                    "fromY": 4,
+                    "toTimelineId": 1,
+                    "toTime": 3,
+                    "toX": 4,
+                    "toY": 5
+                }
+            ],
+            "drawWindow": 25
+        }"#,
+    )
+    .expect("CPU reference score delta JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("CPU reference score delta response JSON");
+    assert_eq!(value["score"], 45);
+    assert_eq!(value["nearDraw"], true);
 }
 
 #[test]

@@ -27,6 +27,13 @@ interface CpuAiResult {
   cpuSearch?: string;
 }
 
+interface CpuWorkerSearchConfig {
+  depth: number;
+  minDepth?: number | null;
+  nodes: number;
+  timeMs: number;
+}
+
 let enginePromise: Promise<ChronofishEngine> | null = null;
 let parametersPromise: Promise<void> | null = null;
 
@@ -38,33 +45,12 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
     }
     const engine = await cpuEngine();
     if (type === "applyTurn") {
-      loadSnapshot(engine, game);
-      for (const move of moves ?? []) {
-        if (!engine.chronofish_apply_move(
-          move.from.timelineId,
-          move.from.time,
-          move.from.x,
-          move.from.y,
-          move.to.timelineId,
-          move.to.time,
-          move.to.x,
-          move.to.y
-        )) {
-          throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-        }
-      }
-      const complete = Boolean(engine.chronofish_submit_turn());
-      const snapshot = snapshotJson(engine);
+      const applied = cpuApplyTurn(engine, game, moves ?? []);
       self.postMessage({
         id,
         ok: true,
-        game: snapshot,
-        status: {
-          complete,
-          terminal: Boolean(snapshot.result?.terminal),
-          winner: snapshot.result?.winner ?? undefined,
-          nextTurn: snapshot.turn
-        },
+        game: applied.game,
+        status: applied.status,
         partitionIndex
       });
       return;
@@ -75,17 +61,18 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
       await loadCpuParameters(engine);
     }
     loadSnapshot(engine, game);
-    const ptr = minDepth === undefined
+    const searchConfig = cpuWorkerSearchConfig(engine, { depth, minDepth, nodes, timeMs });
+    const ptr = searchConfig.minDepth == null
       ? engine.chronofish_ai_turn_timed_json(
-        Math.max(1, depth),
-        Math.max(1, nodes),
-        Math.max(1, Math.floor(timeMs))
+        searchConfig.depth,
+        searchConfig.nodes,
+        searchConfig.timeMs
       )
       : engine.chronofish_ai_turn_timed_min_depth_json(
-        Math.max(1, depth),
-        Math.max(1, Math.min(depth, minDepth)),
-        Math.max(1, nodes),
-        Math.max(1, Math.floor(timeMs))
+        searchConfig.depth,
+        searchConfig.minDepth,
+        searchConfig.nodes,
+        searchConfig.timeMs
       );
     const result = JSON.parse(readWasmString(engine, ptr)) as CpuAiResult;
     result.principalVariation ??= result.moves.length ? [result.moves] : [];
@@ -96,8 +83,37 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
   }
 });
 
-function snapshotJson(engine: ChronofishEngine): GameSnapshot {
-  return JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json())) as GameSnapshot;
+function cpuApplyTurn(
+  engine: ChronofishEngine,
+  game: GameSnapshot,
+  moves: Move[]
+): { game: GameSnapshot; status: { complete: boolean; terminal: boolean; winner?: string; nextTurn: string } } {
+  const { ptr, len } = writeWasmString(engine, JSON.stringify({ game, moves }));
+  try {
+    const output = engine.chronofish_cpu_apply_turn_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output));
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
+}
+
+function cpuWorkerSearchConfig(
+  engine: ChronofishEngine,
+  config: { depth: number; minDepth?: number; nodes: number; timeMs: number }
+): CpuWorkerSearchConfig {
+  const { ptr, len } = writeWasmString(engine, JSON.stringify(config));
+  try {
+    const output = engine.chronofish_cpu_worker_search_config_json(ptr, len);
+    if (!output) {
+      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+    }
+    return JSON.parse(readWasmString(engine, output)) as CpuWorkerSearchConfig;
+  } finally {
+    engine.chronofish_dealloc(ptr, len);
+  }
 }
 
 async function cpuEngine(): Promise<ChronofishEngine> {

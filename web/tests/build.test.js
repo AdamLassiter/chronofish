@@ -22,9 +22,13 @@ test("CPU worker supports authoritative whole-turn application", async () => {
 
   assert.match(worker, /type\?: "search" \| "applyTurn"/);
   assert.match(worker, /if \(type === "applyTurn"\)/);
-  assert.match(worker, /engine\.chronofish_apply_move/);
-  assert.match(worker, /engine\.chronofish_submit_turn\(\)/);
-  assert.match(worker, /const snapshot = snapshotJson\(engine\)/);
+  assert.match(worker, /const applied = cpuApplyTurn\(engine, game, moves \?\? \[\]\)/);
+  assert.match(worker, /engine\.chronofish_cpu_apply_turn_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /engine\.chronofish_apply_move/);
+  assert.doesNotMatch(worker, /engine\.chronofish_submit_turn\(\)/);
+  assert.doesNotMatch(worker, /const snapshot = snapshotJson\(engine\)/);
+  assert.match(worker, /function cpuWorkerSearchConfig/);
+  assert.match(worker, /engine\.chronofish_cpu_worker_search_config_json\(ptr, len\)/);
 });
 
 test("build output declares package version on the main page", async () => {

@@ -465,7 +465,13 @@ export function createBotController({
   }
 
   function resultEndsInRoyalCapture(result: AiSearchResult): boolean {
-    return result.resultReason === "royal-capture" || result.gpuTerminal === true || result.terminal === true && result.resultReason === "royal-capture";
+    const engine = loadedEngine();
+    const { ptr, len } = writeWasmString(engine, JSON.stringify(result));
+    try {
+      return engine.chronofish_bot_result_ends_in_royal_capture_json(ptr, len) !== 0;
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
   }
 
   function botGpuMode(): "full" | "hybrid" {
@@ -752,10 +758,17 @@ export function createBotController({
   }
 
   function normalizePrincipalVariation(variation: PrincipalVariation | undefined, fallback: Move[]): PrincipalVariation {
-    const cleaned = (variation ?? [])
-      .map((turn) => turn.filter((move) => move?.from && move.to).map(cloneMove))
-      .filter((turn) => turn.length > 0);
-    return cleaned.length ? cleaned : [fallback.map(cloneMove)];
+    const engine = loadedEngine();
+    const { ptr, len } = writeWasmString(engine, JSON.stringify({ variation: variation ?? [], fallback }));
+    try {
+      const output = engine.chronofish_gpu_normalize_principal_variation_json(ptr, len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return JSON.parse(readWasmString(engine, output)) as PrincipalVariation;
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
   }
 
   function recordBotDecision(result: AiSearchResult): void {

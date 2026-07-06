@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::{cpu::EvalWeights, wasm_api::parse_game_snapshot, Game};
+use crate::{cpu::EvalWeights, wasm_api::parse_game_snapshot, Game, Position};
 
 pub const DEFAULT_CPU_SEARCH_DEPTH: i32 = 2;
 pub const DEFAULT_CPU_SEARCH_NODES: i32 = 1_024;
@@ -35,6 +35,13 @@ pub struct CpuCandidateScoringPlan {
     pub cache_hits: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CpuTrainingGenerationOutcome {
+    pub baseline_score: f64,
+    pub winner: Option<CpuScoredCandidate>,
+    pub improved: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuTrainingMove {
@@ -46,6 +53,28 @@ pub struct CpuTrainingMove {
     pub to_time: i32,
     pub to_x: i32,
     pub to_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum CpuTrainingMoveInput {
+    Flat(CpuTrainingMove),
+    Browser(CpuBrowserMove),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+pub struct CpuBrowserMove {
+    from: CpuBrowserMovePosition,
+    to: CpuBrowserMovePosition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuBrowserMovePosition {
+    timeline_id: i32,
+    time: i32,
+    x: i32,
+    y: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -68,6 +97,74 @@ pub struct CpuScreeningTrainingConfig {
 pub struct CpuTrainingPositionSearchConfig {
     pub depth: i32,
     pub nodes: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CpuWorkerSearchConfig {
+    pub depth: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_depth: Option<i32>,
+    pub nodes: i32,
+    pub time_ms: i32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuWorkerSearchConfigRequest {
+    depth: Option<f64>,
+    min_depth: Option<f64>,
+    nodes: Option<f64>,
+    time_ms: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuApplyTurnRequest {
+    game: serde_json::Value,
+    moves: Vec<CpuApplyTurnMove>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuReferenceScoreDeltaRequest {
+    candidate_score: i32,
+    reference_score: i32,
+    candidate_moves: Vec<CpuTrainingMoveInput>,
+    reference_moves: Vec<CpuTrainingMoveInput>,
+    draw_window: i32,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+struct CpuApplyTurnMove {
+    from: CpuApplyTurnPosition,
+    to: CpuApplyTurnPosition,
+}
+
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuApplyTurnPosition {
+    timeline_id: i32,
+    time: i32,
+    x: i32,
+    y: i32,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuApplyTurnResponse {
+    game: serde_json::Value,
+    status: CpuApplyTurnStatus,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuApplyTurnStatus {
+    complete: bool,
+    terminal: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    winner: Option<&'static str>,
+    next_turn: &'static str,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +218,92 @@ pub fn search(request: CpuSearchRequest) -> Result<CpuSearchResponse, String> {
         result_json,
         cpu_search: "heuristic",
     })
+}
+
+pub fn cpu_worker_search_config_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<CpuWorkerSearchConfigRequest>(request_json)
+        .map_err(|error| format!("CPU worker search config request is invalid: {error}"))?;
+    let depth = cpu_worker_positive_i32(request.depth, 1, false);
+    let min_depth = request
+        .min_depth
+        .map(|min_depth| cpu_worker_positive_i32(Some(min_depth.min(depth as f64)), 1, false));
+    let config = CpuWorkerSearchConfig {
+        depth,
+        min_depth,
+        nodes: cpu_worker_positive_i32(request.nodes, 64, false),
+        time_ms: cpu_worker_positive_i32(request.time_ms, 10_000, true),
+    };
+    serde_json::to_string(&config)
+        .map_err(|error| format!("CPU worker search config response failed to encode: {error}"))
+}
+
+pub fn cpu_apply_turn_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<CpuApplyTurnRequest>(request_json)
+        .map_err(|error| format!("CPU apply-turn request is invalid: {error}"))?;
+    let mut game = parse_game_snapshot(&request.game.to_string())?;
+    for movement in request.moves {
+        if game.apply_move(movement.from.into(), movement.to.into()) == 0 {
+            return Err(game.last_message.clone());
+        }
+    }
+    let complete = game.submit_turn() != 0;
+    let game_json = game.to_json();
+    let game_value = serde_json::from_str(&game_json)
+        .map_err(|error| format!("CPU apply-turn game response is invalid: {error}"))?;
+    let response = CpuApplyTurnResponse {
+        status: CpuApplyTurnStatus {
+            complete,
+            terminal: game.result.is_some(),
+            winner: game
+                .result
+                .and_then(|result| result.winner.map(|winner| winner.as_str())),
+            next_turn: game.turn.as_str(),
+        },
+        game: game_value,
+    };
+    serde_json::to_string(&response)
+        .map_err(|error| format!("CPU apply-turn response failed to encode: {error}"))
+}
+
+impl From<CpuApplyTurnPosition> for Position {
+    fn from(position: CpuApplyTurnPosition) -> Self {
+        Position {
+            timeline_id: position.timeline_id,
+            time: position.time,
+            x: position.x,
+            y: position.y,
+        }
+    }
+}
+
+impl From<CpuTrainingMoveInput> for CpuTrainingMove {
+    fn from(movement: CpuTrainingMoveInput) -> Self {
+        match movement {
+            CpuTrainingMoveInput::Flat(movement) => movement,
+            CpuTrainingMoveInput::Browser(movement) => CpuTrainingMove {
+                from_timeline_id: movement.from.timeline_id,
+                from_time: movement.from.time,
+                from_x: movement.from.x,
+                from_y: movement.from.y,
+                to_timeline_id: movement.to.timeline_id,
+                to_time: movement.to.time,
+                to_x: movement.to.x,
+                to_y: movement.to.y,
+            },
+        }
+    }
+}
+
+fn cpu_worker_positive_i32(value: Option<f64>, fallback: i32, floor: bool) -> i32 {
+    let number = value
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback as f64);
+    let bounded = if floor {
+        number.floor()
+    } else {
+        number.trunc()
+    };
+    (bounded as i32).max(1)
 }
 
 pub fn cpu_parameters_key(parameters: &[(String, i32)]) -> String {
@@ -236,6 +419,24 @@ pub fn cpu_training_should_continue(
     now_ms < deadline_at_ms && generations_without_candidate < max_generations_without_candidate
 }
 
+pub fn cpu_candidate_scoring_should_continue(
+    now_ms: f64,
+    deadline_at_ms: f64,
+    next_candidate: usize,
+    uncached_candidate_count: usize,
+) -> bool {
+    now_ms < deadline_at_ms && next_candidate < uncached_candidate_count
+}
+
+pub fn cpu_reference_collection_should_continue(
+    now_ms: f64,
+    deadline_at_ms: f64,
+    next_game: usize,
+    game_count: usize,
+) -> bool {
+    now_ms < deadline_at_ms && next_game < game_count
+}
+
 pub fn rank_cpu_scored_candidates(
     mut candidates: Vec<CpuScoredCandidate>,
 ) -> Vec<CpuScoredCandidate> {
@@ -278,6 +479,34 @@ pub fn cpu_training_finalist_candidates(
     unique_cpu_parameters(&candidates)
 }
 
+pub fn cpu_training_generation_outcome(
+    baseline: &CpuParameters,
+    finalists: &[CpuScoredCandidate],
+    previous_baseline_score: f64,
+    best_candidate_score: f64,
+) -> CpuTrainingGenerationOutcome {
+    let baseline_key = cpu_parameters_key(baseline);
+    let baseline_score = finalists
+        .iter()
+        .find(|entry| cpu_parameters_key(&entry.parameters) == baseline_key)
+        .map(|entry| entry.score)
+        .unwrap_or(previous_baseline_score);
+    let winner = finalists
+        .iter()
+        .find(|entry| cpu_parameters_key(&entry.parameters) != baseline_key)
+        .cloned();
+    let improved = cpu_training_candidate_improved(
+        winner.as_ref().map(|entry| entry.score).unwrap_or(f64::NAN),
+        baseline_score,
+        best_candidate_score,
+    );
+    CpuTrainingGenerationOutcome {
+        baseline_score,
+        winner,
+        improved,
+    }
+}
+
 pub fn cpu_candidate_scoring_plan(
     candidates: &[CpuParameters],
     fitness: &[CpuFitnessEntry],
@@ -306,6 +535,13 @@ pub fn cpu_candidate_scoring_plan(
         cached_scores,
         uncached_candidates,
         cache_hits,
+    }
+}
+
+pub fn cpu_fitness_entry_for_candidate(parameters: &CpuParameters, score: f64) -> CpuFitnessEntry {
+    CpuFitnessEntry {
+        key: cpu_parameters_key(parameters),
+        score,
     }
 }
 
@@ -448,6 +684,14 @@ pub fn cpu_match_turn_time_ms(
     available.clamp(1, cpu_training_time_ms.max(1))
 }
 
+pub fn cpu_match_remaining_searches(max_match_plies: usize, ply: usize) -> usize {
+    max_match_plies.saturating_sub(ply).saturating_add(1)
+}
+
+pub fn cpu_match_should_continue(now_ms: f64, deadline_at_ms: f64) -> bool {
+    now_ms < deadline_at_ms
+}
+
 pub fn cpu_paired_match_deadline_ms(
     now_ms: f64,
     deadline_at_ms: f64,
@@ -459,11 +703,32 @@ pub fn cpu_paired_match_deadline_ms(
     deadline_at_ms.min(now_ms + slice_ms)
 }
 
+pub fn cpu_paired_match_total_matches(game_count: usize) -> usize {
+    game_count.saturating_mul(2)
+}
+
+pub fn cpu_paired_match_candidate_colors(turn: &str) -> Result<Vec<&'static str>, String> {
+    let opposite = match turn {
+        "white" => "black",
+        "black" => "white",
+        _ => return Err(format!("CPU paired match turn color is invalid: {turn}")),
+    };
+    Ok(vec![turn_color_name(turn)?, opposite])
+}
+
 pub fn cpu_paired_match_average_score(score: f64, completed_matches: usize) -> f64 {
     if completed_matches == 0 {
         f64::NAN
     } else {
         score / completed_matches as f64
+    }
+}
+
+fn turn_color_name(color: &str) -> Result<&'static str, String> {
+    match color {
+        "white" => Ok("white"),
+        "black" => Ok("black"),
+        _ => Err(format!("CPU turn color is invalid: {color}")),
     }
 }
 
@@ -601,6 +866,30 @@ pub fn cpu_reference_score_delta(
     }
 }
 
+pub fn cpu_reference_score_delta_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<CpuReferenceScoreDeltaRequest>(request_json)
+        .map_err(|error| format!("CPU reference score delta request is not valid JSON: {error}"))?;
+    let candidate_moves: Vec<CpuTrainingMove> = request
+        .candidate_moves
+        .into_iter()
+        .map(CpuTrainingMove::from)
+        .collect();
+    let reference_moves: Vec<CpuTrainingMove> = request
+        .reference_moves
+        .into_iter()
+        .map(CpuTrainingMove::from)
+        .collect();
+    let delta = cpu_reference_score_delta(
+        request.candidate_score,
+        request.reference_score,
+        &candidate_moves,
+        &reference_moves,
+        request.draw_window,
+    );
+    serde_json::to_string(&delta)
+        .map_err(|error| format!("CPU reference score delta response failed to encode: {error}"))
+}
+
 pub fn cpu_reference_candidate_average(
     score: i32,
     compared: usize,
@@ -623,6 +912,10 @@ pub fn cpu_training_no_move_score(candidate_turn: bool) -> i32 {
     } else {
         CPU_TRAINING_WIN_SCORE
     }
+}
+
+pub fn cpu_training_candidate_turn(current_turn: &str, candidate_color: &str) -> bool {
+    current_turn == candidate_color
 }
 
 pub fn cpu_training_winner_score(winner: Option<&str>, candidate_color: &str) -> i32 {
