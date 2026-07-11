@@ -219,6 +219,37 @@ Open <http://localhost:5173> and use the Training control. The browser UI can:
 Browser GPU search and value-model training require WebGPU. The normal `./run`
 server does not expose writable training endpoints.
 
+### Native GPU CLI
+
+The Rust training binary can run GPU search, sample collection, and value/policy
+training without starting Chromium. The `gpu` form of `./train` enables the
+engine's `neural-wgpu` feature:
+
+```sh
+# Search the default starting position, or pass a game snapshot JSON file.
+./train gpu --gpu-search --gpu-search-depth 2 --nodes 4096
+./train gpu --gpu-search fixtures/position.json --gpu-model engine/models/gpu-v1/value-model.cfnn
+
+# Generate search labels, then train and write a replacement model.
+./train gpu --gpu-sample-search fixtures/position.json --gpu-sample-count 128 --out /tmp/chronofish-samples.json
+./train gpu --gpu-train-samples /tmp/chronofish-samples.json --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+
+# Collect labels and train in one command.
+./train gpu --gpu-train-search fixtures/position.json --gpu-sample-count 128 --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+```
+
+Tune native value and policy optimization with `--gpu-learning-rate`,
+`--gpu-epochs`, `--gpu-weight-decay`, and `--gpu-momentum`.
+
+The native WGPU adapter must be available for GPU projection and training. Use
+`./train gpu --gpu-backend-info`, `--gpu-compile-shaders`, or
+`--gpu-dispatch-smoke` to diagnose the local GPU path. Search results and
+training samples use the same engine JSON contracts as the browser bindings.
+In `--gpu-sample-mode search` (the default), CLI labels are produced by the
+native GPU search API; the explicit CPU, curriculum, tactical, distillation,
+outcome, and duel modes retain their corresponding engine-side collection
+strategies.
+
 GPU model optimization is staged by replay diversity. Replays with at most 32
 unique positions train the value and policy heads on CPU over cached hidden
 features. Larger replays use WebGPU, and hidden-layer backpropagation starts at

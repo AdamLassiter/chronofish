@@ -21,12 +21,14 @@ use chronofish_engine::gpu::search::{
     frontier_minimax_workgroups,
     frontier_neural_cache_hit_rate,
     frontier_next_active_state_limit,
+    frontier_orchestration_plan,
     frontier_per_parent_limit,
     frontier_policy_workgroups,
     frontier_selection_plan,
     frontier_selection_workgroups,
     frontier_state_bytes,
     frontier_state_stride,
+    gpu_accumulated_search_nodes,
     gpu_board_record_from_snapshot,
     gpu_candidate_batch_candidate_count,
     gpu_candidate_batch_source_count,
@@ -43,7 +45,9 @@ use chronofish_engine::gpu::search::{
     gpu_candidate_max_candidates_per_dispatch,
     gpu_candidate_max_dispatch_workgroups,
     gpu_candidate_move_from_record,
+    gpu_candidate_score_is_rejected,
     gpu_candidate_score_workgroups,
+    gpu_candidate_scores_json,
     gpu_candidate_source_batch_size,
     gpu_child_is_source_advance,
     gpu_choice_agreement_choices_json,
@@ -56,6 +60,7 @@ use chronofish_engine::gpu::search::{
     gpu_frontier_choice_diagnostics_json,
     gpu_frontier_choices_json_from_i32s,
     gpu_frontier_clamp_usize,
+    gpu_frontier_cycle_should_stop,
     gpu_frontier_floor_power_of_two,
     gpu_frontier_hash_words,
     gpu_frontier_next_power_of_two,
@@ -64,6 +69,7 @@ use chronofish_engine::gpu::search::{
     gpu_frontier_plan_json_from_i32s,
     gpu_frontier_positive_limit,
     gpu_frontier_present_time,
+    gpu_frontier_readback_summary_json,
     gpu_frontier_root_i32s_from_snapshot_json,
     gpu_frontier_timeline_active,
     gpu_frontier_workgroup_size,
@@ -79,6 +85,7 @@ use chronofish_engine::gpu::search::{
     gpu_mutation_candidate_workgroups,
     gpu_mutation_selected_candidates_json,
     gpu_mutation_status_is_terminal,
+    gpu_mutation_statuses_json,
     gpu_mutation_summary_from_i32s,
     gpu_mutation_summary_json,
     gpu_mutation_turn_code_from_records,
@@ -90,6 +97,7 @@ use chronofish_engine::gpu::search::{
     gpu_pending_present_boards_json_from_snapshot_json,
     gpu_pick_candidate_records_from_i32s,
     gpu_pick_candidate_records_json,
+    gpu_policy_choice_agreement_diagnostics_json,
     gpu_postable_search_result_json,
     gpu_ranked_candidate_indexes_from_i32s,
     gpu_ranked_candidates_json,
@@ -122,6 +130,7 @@ use chronofish_engine::gpu::search::{
     gpu_search_square_codes_to_board,
     gpu_search_validation_limit,
     gpu_snapshot_game_json,
+    gpu_snapshot_search_size_json,
     gpu_snapshot_with_child_boards_json,
     gpu_source_square_records_for_board,
     gpu_square_record_from_code,
@@ -141,6 +150,7 @@ use chronofish_engine::gpu::search::{
     gpu_validated_frontier_choice_json,
     gpu_worker_search_config_json,
     search,
+    FrontierOrchestrationPlan,
     FrontierSelectionPlan,
     FrontierTuning,
     FrontierTuningLimits,
@@ -1027,6 +1037,16 @@ fn gpu_mutation_summary_matches_web_worker_contract() {
         gpu_mutation_summary_json(r#"{"statuses":[]}"#).expect("empty JSON mutation summary"),
         "none"
     );
+    assert_eq!(
+        gpu_mutation_statuses_json(r#"{"statuses":[3,1],"candidateCount":4}"#)
+            .expect("normalized mutation statuses"),
+        "[3,1,0,0]"
+    );
+    assert_eq!(
+        gpu_mutation_statuses_json(r#"{"statuses":[3,1,2],"candidateCount":2}"#)
+            .expect("trimmed mutation statuses"),
+        "[3,1]"
+    );
 }
 
 #[test]
@@ -1220,6 +1240,36 @@ fn gpu_choice_agreement_matches_web_worker_contract() {
     .expect("choice agreement response");
     let value: serde_json::Value = serde_json::from_str(&response).expect("choice agreement JSON");
     assert_eq!(value["agreements"], serde_json::json!([0, 1, 1]));
+    let diagnostics = gpu_policy_choice_agreement_diagnostics_json(
+        r#"{
+            "selected": {
+                "move": {
+                    "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                    "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                }
+            },
+            "choices": [
+                {
+                    "move": {
+                        "from": { "timelineId": 9, "time": 9, "x": 9, "y": 9 },
+                        "to": { "timelineId": 8, "time": 8, "x": 8, "y": 8 }
+                    }
+                },
+                {
+                    "move": {
+                        "from": { "timelineId": 1, "time": 2, "x": 3, "y": 4 },
+                        "to": { "timelineId": 5, "time": 6, "x": 7, "y": 8 }
+                    }
+                }
+            ]
+        }"#,
+    )
+    .expect("policy choice agreement diagnostics");
+    let diagnostics: serde_json::Value =
+        serde_json::from_str(&diagnostics).expect("policy diagnostics JSON");
+    assert_eq!(diagnostics["topPolicyChoiceAgreement"], 0);
+    assert_eq!(diagnostics["top5PolicyChoiceAgreement"], 1);
+    assert_eq!(diagnostics["top20PolicyChoiceAgreement"], 1);
 
     let empty = gpu_choice_agreement_json(r#"{ "selected": [], "choices": [[]], "limits": [1] }"#)
         .expect("empty choice agreement response");
@@ -1983,6 +2033,16 @@ fn gpu_mutation_selected_candidates_match_web_worker_contract() {
         gpu_candidate_indexes_json(&serde_json::json!({ "candidates": selected }).to_string())
             .expect("candidate indexes");
     assert_eq!(indexes, "[3,1]");
+    let scores = gpu_candidate_scores_json(
+        &serde_json::json!({
+            "scores": [10, 20, 30, 40],
+            "candidates": selected,
+            "fallback": -7
+        })
+        .to_string(),
+    )
+    .expect("candidate scores");
+    assert_eq!(scores, "[40,20]");
 
     let empty = gpu_mutation_selected_candidates_json(r#"{"ranked":[{"index":1}],"limit":0}"#)
         .expect("empty selected mutation candidates");
@@ -1990,6 +2050,13 @@ fn gpu_mutation_selected_candidates_match_web_worker_contract() {
     let error = gpu_candidate_indexes_json(r#"{"candidates":[{"score": 1}]}"#)
         .expect_err("missing candidate index");
     assert!(error.contains("missing"));
+    let fallback = gpu_candidate_scores_json(
+        r#"{"scores":[10],"candidates":[{"index":0},{"index":2}],"fallback":-7}"#,
+    )
+    .expect("fallback candidate score");
+    assert_eq!(fallback, "[10,-7]");
+    assert!(gpu_candidate_score_is_rejected(-2_147_480_000));
+    assert!(!gpu_candidate_score_is_rejected(-2_147_479_999));
 }
 
 #[test]
@@ -2685,6 +2752,12 @@ fn gpu_candidate_inputs_from_snapshot_json_matches_web_candidate_input_contract(
     assert_eq!(json["sourceCount"], 2);
     assert_eq!(json["targetCount"], 128);
     assert_eq!(json["sourceMeta"][0]["timelineId"], -1);
+    let search_size: serde_json::Value = serde_json::from_str(
+        &gpu_snapshot_search_size_json(&snapshot).expect("snapshot search size JSON"),
+    )
+    .expect("snapshot search size parses");
+    assert_eq!(search_size["boardCount"], 2);
+    assert_eq!(search_size["timelineCount"], 2);
     let meta_json: serde_json::Value = serde_json::from_str(
         &gpu_candidate_input_meta_json_from_i32s(&words).expect("candidate input metadata JSON"),
     )
@@ -2862,6 +2935,15 @@ fn frontier_cycle_policy_matches_web_worker_orchestration() {
     assert_eq!(frontier_next_active_state_limit(128, 128, 16), 128);
     assert_eq!(frontier_next_active_state_limit(128, 32, 0), 32);
 
+    assert_eq!(
+        frontier_orchestration_plan(2, 1, 112),
+        FrontierOrchestrationPlan {
+            max_cycles: 6,
+            per_parent_limit: 14,
+            state_limits: vec![1, 14, 112, 112, 112, 112, 112],
+        }
+    );
+
     assert_eq!(frontier_cycle_state_count(512, 0), 1);
     assert_eq!(frontier_cycle_state_count(512, 32), 32);
     assert_eq!(frontier_cycle_state_count(128, 512), 128);
@@ -2886,6 +2968,25 @@ fn frontier_cycle_policy_matches_web_worker_orchestration() {
     assert!(gpu_completed_reply_should_search(false, 100.0, 101.0));
     assert!(!gpu_completed_reply_should_search(true, 100.0, 101.0));
     assert!(!gpu_completed_reply_should_search(false, 101.0, 101.0));
+    assert!(!gpu_frontier_cycle_should_stop(0, 2, 2, 101.0, 100.0));
+    assert!(!gpu_frontier_cycle_should_stop(1, 1, 2, 101.0, 100.0));
+    assert!(!gpu_frontier_cycle_should_stop(1, 2, 2, 99.0, 100.0));
+    assert!(gpu_frontier_cycle_should_stop(1, 2, 2, 100.0, 100.0));
+    let readback: serde_json::Value = serde_json::from_str(
+        &gpu_frontier_readback_summary_json(r#"{"counters":[0,7,1,123,11,5]}"#)
+            .expect("frontier readback summary"),
+    )
+    .expect("frontier readback summary parses");
+    assert_eq!(readback["nodes"], 123);
+    assert_eq!(readback["selectedCount"], 7);
+    assert_eq!(readback["candidateOverflow"], true);
+    assert_eq!(readback["tacticalCandidates"], 11);
+    assert_eq!(readback["selectedTacticalCandidates"], 5);
+    let sparse: serde_json::Value =
+        serde_json::from_str(&gpu_frontier_readback_summary_json(r#"{"counters":[9]}"#).unwrap())
+            .unwrap();
+    assert_eq!(sparse["nodes"], 0);
+    assert_eq!(sparse["candidateOverflow"], false);
 
     assert_eq!(gpu_diagnostic_rate(12.0, 100.0), 0.12);
     assert_eq!(gpu_diagnostic_rate(1.0, 3.0), 0.333);
@@ -2896,6 +2997,8 @@ fn frontier_cycle_policy_matches_web_worker_orchestration() {
     assert_eq!(gpu_reported_latency_ms(-5.0), 0.0);
     assert_eq!(gpu_nodes_per_second(1000.0, 250.0), 4000.0);
     assert_eq!(gpu_nodes_per_second(1000.0, 0.0), 1000.0);
+    assert_eq!(gpu_accumulated_search_nodes(10.0, 3.0, 0.0), 13.0);
+    assert_eq!(gpu_accumulated_search_nodes(10.0, 3.0, 7.0), 20.0);
 }
 
 #[test]

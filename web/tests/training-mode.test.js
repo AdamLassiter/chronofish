@@ -15,6 +15,14 @@ async function fileExists(filePath) {
   }
 }
 
+async function readTrainingWorkerSources() {
+  const [worker, bindings] = await Promise.all([
+    readFile(path.join(root, "src/training-worker.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-training.ts"), "utf8")
+  ]);
+  return `${worker}\n${bindings}`;
+}
+
 test("training UI uses mode multiselects instead of target selectors", async () => {
   const html = await readFile(path.join(root, "src/index.html"), "utf8");
   const dom = await readFile(path.join(root, "src/dom.ts"), "utf8");
@@ -59,7 +67,7 @@ test("training UI exposes low medium high setting presets", async () => {
 });
 
 test("training worker normalizes modes and hides distill from CPU training", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -68,7 +76,7 @@ test("training worker normalizes modes and hides distill from CPU training", asy
   assert.match(workerTypes, /type TrainingMode = "vsGpu" \| "vsCpu" \| "self" \| "distill"/);
   assert.match(worker, /const normalizedConfig = await normalizeTrainingConfig\(config\)/);
   assert.match(worker, /async function normalizeTrainingConfigWithEngine/);
-  assert.match(worker, /chronofish_normalize_training_config_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_normalize_training_config_json/);
   assert.match(worker, /\.\.\.await normalizeTrainingConfigWithEngine\(config\)/);
   assert.doesNotMatch(worker, /function legacyTrainingModes/);
   assert.doesNotMatch(worker, /function normalizeTrainingModes\(/);
@@ -76,7 +84,7 @@ test("training worker normalizes modes and hides distill from CPU training", asy
   assert.match(worker, /function trainingModeEnabled/);
   assert.match(worker, /function cpuBaselineModeEnabled/);
   assert.match(worker, /function trainingModePolicy/);
-  assert.match(worker, /chronofish_training_mode_policy_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_training_mode_policy_json/);
   assert.match(worker, /trainingModePolicyCache/);
   assert.doesNotMatch(worker, /return config\.trainingModes\.includes\(mode\)/);
   assert.doesNotMatch(worker, /config\.trainingModes\.filter\(\(mode\) => mode !== "distill"\)\.length/);
@@ -101,7 +109,7 @@ test("training worker normalizes modes and hides distill from CPU training", asy
 });
 
 test("GPU worker caps preserve medium and high preset budgets", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
   const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
@@ -116,7 +124,7 @@ test("GPU worker caps preserve medium and high preset budgets", async () => {
   assert.doesNotMatch(workerTypes, /const DEFAULT_VALIDATION_SPLIT/);
   assert.doesNotMatch(workerTypes, /const DEFAULT_PATIENCE/);
   assert.doesNotMatch(workerTypes, /const DEFAULT_WEIGHT_DECAY/);
-  assert.match(worker, /chronofish_normalize_training_config_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_normalize_training_config_json/);
   assert.doesNotMatch(worker, /function clampInteger/);
   assert.doesNotMatch(worker, /function clampNumber/);
   assert.doesNotMatch(worker, /samples: clampInteger/);
@@ -132,7 +140,7 @@ test("GPU worker caps preserve medium and high preset budgets", async () => {
   assert.doesNotMatch(worker, /samples\.filter\(\(sample\): sample is TrainingSample => Boolean\(sample\)\)/);
   assert.match(worker, /ply: rolloutPlyOffset\(ply, workerIndex\)/);
   assert.match(worker, /function rolloutPlyOffset\(ply: number, workerIndex: number\): number/);
-  assert.match(worker, /chronofish_gpu_rollout_ply_offset\(ply, workerIndex\)/);
+  assert.match(worker, /chronofish_gpu_rollout_ply_offset/);
   assert.doesNotMatch(worker, /ply \+ workerIndex \* gpuRolloutMaxPlies\(0, 0\)/);
   assert.doesNotMatch(worker, /from "\.\/training-gpu-constants\.js"/);
   assert.match(worker, /const warmupConfig = gpuWarmupSearchConfig\(config\)/);
@@ -180,7 +188,7 @@ test("GPU worker caps preserve medium and high preset budgets", async () => {
 });
 
 test("browser CPU training screens candidates before full finalist scoring", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineCpuSearch = await readFile(path.join(repoRoot, "engine/src/cpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
@@ -222,7 +230,7 @@ test("browser CPU training screens candidates before full finalist scoring", asy
 });
 
 test("browser CPU training reuses baseline and GPU reference searches", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
   const engineCpuSearch = await readFile(path.join(repoRoot, "engine/src/cpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -232,22 +240,26 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
   assert.match(worker, /const screeningReferences = await timed\(config\.metrics, "cpuScreeningReferences"/);
   assert.doesNotMatch(worker, /const finalistReferences = await precomputeCpuReferenceScores/);
   assert.match(worker, /cpuReferenceWorkerCount\(games\.length, config\.cpuWorkers, config\.cpuPairBatch\)/);
-  assert.match(worker, /chronofish_cpu_reference_worker_count\(gameCount, requestedWorkers, pairBatch\)/);
+  assert.match(worker, /chronofish_cpu_reference_worker_count/);
   assert.match(worker, /Promise\.all\(Array\.from\(\{ length: workerCount \}, \(\) => runReferenceWorker\(\)\)\)/);
   assert.match(worker, /while \(cpuReferenceCollectionShouldContinue\(deadlineAt, nextGame, games\.length\)\)/);
-  assert.match(worker, /chronofish_cpu_reference_collection_should_continue\(/);
+  assert.match(worker, /chronofish_cpu_reference_collection_should_continue/);
   assert.match(worker, /const plan = cpuCandidateScoringPlan\(stageCandidates, fitnessCache\)/);
   assert.match(worker, /const uniqueCandidates = plan\.uniqueCandidates/);
   assert.match(worker, /const workerCount = cpuCandidateWorkerCount\(uniqueCandidates\.length, stageConfig\.cpuWorkers, stageConfig\.cpuPairBatch\)/);
-  assert.match(worker, /chronofish_cpu_candidate_worker_count\(candidateCount, cpuWorkers, pairBatch\)/);
+  assert.match(worker, /chronofish_cpu_candidate_worker_count/);
   assert.match(worker, /const workerCount = cpuLabelWorkerCount\(positions\.length, config\.cpuWorkers\)/);
-  assert.match(worker, /searchResultLabelSample\(position\.sample, result\.score, result\.moves\[0\], "cpu", cpuSearchLabelWeight\(config\)\)/);
-  assert.match(worker, /chronofish_cpu_label_worker_count\(positionCount, cpuWorkers\)/);
-  assert.match(worker, /chronofish_cpu_search_label_weight\(trainingModeCount\(config\)\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\(position\.sample, response\.result, "cpu", cpuSearchLabelWeight\(config\)\)/);
+  assert.doesNotMatch(worker, /searchResultLabelSample\(position\.sample, result\.score, result\.moves\[0\]/);
+  assert.match(worker, /chronofish_search_result_turn_json/);
+  assert.doesNotMatch(worker, /response\.result\?\.moves \?\? \[\]/);
+  assert.doesNotMatch(worker, /function searchResultMoves\(/);
+  assert.match(worker, /chronofish_cpu_label_worker_count/);
+  assert.match(worker, /chronofish_cpu_search_label_weight/);
   assert.match(worker, /const comparisonCount = cpuReferenceComparisonCount\(games\.length, references\.length\)/);
-  assert.match(worker, /chronofish_cpu_reference_comparison_count\(gameCount, referenceCount\)/);
+  assert.match(worker, /chronofish_cpu_reference_comparison_count/);
   assert.match(worker, /cpuReferenceShouldContinue\(performance\.now\(\), deadlineAt, compared, config\.cpuMaxMatchPlies\)/);
-  assert.match(worker, /chronofish_cpu_reference_should_continue\(nowMs, deadlineAtMs, compared, maxMatchPlies\)/);
+  assert.match(worker, /chronofish_cpu_reference_should_continue/);
   assert.doesNotMatch(worker, /Math\.min\(uniqueCandidates\.length, Math\.max\(1, stageConfig\.cpuWorkers\), Math\.max\(1, stageConfig\.cpuPairBatch\)\)/);
   assert.doesNotMatch(worker, /Math\.min\(positions\.length, Math\.max\(1, config\.cpuWorkers \?\? 1\)\)/);
   assert.doesNotMatch(worker, /Math\.min\(games\.length, references\.length \|\| games\.length\)/);
@@ -261,13 +273,20 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
   assert.match(worker, /cacheHits/);
   assert.match(worker, /async function precomputeCpuReferenceScores/);
   assert.match(worker, /labelKind: "cpu-reference"/);
-  assert.match(worker, /reference\.baselineScore = baselineResult\.result\?\.score \?\? 0/);
-  assert.match(worker, /reference\.gpuScore = gpuResult\.result\?\.score \?\? 0/);
+  assert.match(worker, /const baselineReference = cpuReferenceScoreFromResult\(baselineResult\.result\)/);
+  assert.match(worker, /reference\.baselineScore = baselineReference\.score/);
+  assert.match(worker, /reference\.baselineMoves = baselineReference\.moves/);
+  assert.match(worker, /const gpuReference = cpuReferenceScoreFromResult\(gpuResult\.result\)/);
+  assert.match(worker, /reference\.gpuScore = gpuReference\.score/);
+  assert.match(worker, /reference\.gpuMoves = gpuReference\.moves/);
   assert.match(worker, /const reference = references\[index\] \?\? \{\}/);
-  assert.match(worker, /cpuReferenceScoreDelta\(\s*candidateScore,\s*reference\.baselineScore,/);
-  assert.match(worker, /cpuReferenceScoreDelta\(\s*candidateScore,\s*reference\.gpuScore,/);
+  assert.match(worker, /cpuReferenceScoreDeltaFromResult\(\s*candidateResult\.result,\s*reference\.baselineScore,/);
+  assert.match(worker, /cpuReferenceScoreDeltaFromResult\(\s*candidateResult\.result,\s*reference\.gpuScore,/);
   assert.match(worker, /cpuReferenceCandidateAverage\(score, compared, nearDraws, config\.cpuDrawRateLimit\)/);
   assert.doesNotMatch(worker, /const delta = candidateScore - reference\.baselineScore/);
+  assert.doesNotMatch(worker, /reference\.baselineScore = baselineResult\.result\?\.score \?\? 0/);
+  assert.doesNotMatch(worker, /reference\.gpuScore = gpuResult\.result\?\.score \?\? 0/);
+  assert.doesNotMatch(worker, /const candidateScore = candidateResult\.result\?\.score \?\? 0/);
   assert.doesNotMatch(worker, /if \(Math\.abs\(delta\) <= config\.cpuDrawWindow\)/);
   assert.doesNotMatch(worker, /nearDrawRate > config\.cpuDrawRateLimit \? average \* 0\.5 : average/);
   assert.doesNotMatch(worker, /function moveAgreementBonus/);
@@ -275,11 +294,13 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
   assert.doesNotMatch(worker, /interface CpuTrainingMove/);
   assert.doesNotMatch(worker, /function cpuTrainingMoves/);
   assert.doesNotMatch(worker, /candidateMoves: cpuTrainingMoves/);
-  assert.match(worker, /candidateMoves: candidateMoves \?\? \[\]/);
+  assert.match(worker, /candidateResult: candidateResult \?\? null/);
   assert.match(worker, /referenceMoves: referenceMoves \?\? \[\]/);
   assert.match(engineCpuSearch, /pub struct CpuReferenceScoreDelta/);
   assert.match(engineCpuSearch, /pub enum CpuTrainingMoveInput/);
   assert.match(engineCpuSearch, /pub fn cpu_reference_score_delta_json/);
+  assert.match(engineCpuSearch, /pub fn cpu_reference_score_from_result_json/);
+  assert.match(engineCpuSearch, /pub fn cpu_reference_score_delta_from_result_json/);
   assert.match(engineCpuSearch, /pub fn cpu_reference_score_delta/);
   assert.match(engineCpuSearch, /pub fn cpu_reference_candidate_average/);
   assert.match(engineCpuSearch, /pub fn cpu_fitness_entry_for_candidate/);
@@ -292,6 +313,8 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
   assert.match(engineCpuSearch, /pub fn move_agreement_bonus/);
   assert.match(engineCpuSearch, /pub fn bot_training_moves_key/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_reference_score_delta_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_reference_score_from_result_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_reference_score_delta_from_result_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_reference_candidate_average/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_reference_worker_count/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_reference_collection_should_continue/);
@@ -302,6 +325,8 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_reference_should_continue/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_fitness_entry_for_candidate_json/);
   assert.match(engineTypes, /chronofish_cpu_reference_score_delta_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_cpu_reference_score_from_result_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_cpu_reference_score_delta_from_result_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_reference_candidate_average\(score: number, compared: number, nearDraws: number, drawRateLimit: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_reference_worker_count\(gameCount: number, requestedWorkers: number, pairBatch: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_reference_collection_should_continue\(nowMs: number, deadlineAtMs: number, nextGame: number, gameCount: number\): number/);
@@ -314,17 +339,17 @@ test("browser CPU training reuses baseline and GPU reference searches", async ()
 });
 
 test("browser CPU finalists use paired matches on a common score scale", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineCpuSearch = await readFile(path.join(repoRoot, "engine/src/cpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
   assert.match(worker, /scoreCpuCandidateByPairedMatches/);
   assert.match(worker, /for \(const candidateColor of cpuPairedMatchCandidateColors\(game\.turn\)\)/);
-  assert.match(worker, /chronofish_cpu_paired_match_candidate_colors_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_cpu_paired_match_candidate_colors_json/);
   assert.doesNotMatch(worker, /for \(const candidateColor of \[game\.turn, engineOppositeColor\(game\.turn\)\]\)/);
   assert.doesNotMatch(worker, /function oppositeColor/);
-  assert.match(worker, /engine\.chronofish_opposite_color_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_opposite_color_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_opposite_color_json/);
   assert.match(engineTypes, /chronofish_opposite_color_json\(ptr: number, length: number\): number/);
   assert.match(worker, /candidateTurn \? candidateWorker : baselineWorker/);
@@ -332,10 +357,11 @@ test("browser CPU finalists use paired matches on a common score scale", async (
   assert.match(worker, /parametersJson: candidateTurn \? candidateJson : baselineJson/);
   assert.match(worker, /return cpuTrainingNoMoveScore\(candidateTurn\)/);
   assert.match(worker, /const candidateTurn = cpuTrainingCandidateTurn\(current\.turn, candidateColor\)/);
-  assert.match(worker, /chronofish_cpu_training_candidate_turn_json\(ptr, len\) !== 0/);
+  assert.match(worker, /chronofish_cpu_training_candidate_turn_json/);
   assert.match(worker, /return cpuTrainingWinnerScore\(applied\.winner, candidateColor\)/);
   assert.match(worker, /return cpuTrainingWinnerScore\(applied\.status\.winner \?\? null, candidateColor\)/);
-  assert.match(worker, /return cpuTrainingAdjudicationScore\(current\.turn, candidateColor, baselineScore\)/);
+  assert.match(worker, /return cpuTrainingAdjudicationScoreFromResult\(current\.turn, candidateColor, adjudication\.result\)/);
+  assert.doesNotMatch(worker, /const baselineScore = adjudication\.result\?\.score \?\? 0/);
   assert.doesNotMatch(worker, /return candidateTurn \? -100_000 : 100_000/);
   assert.doesNotMatch(worker, /applied\.winner === candidateColor \? 100_000 : -100_000/);
   assert.match(worker, /parametersJson: baselineJson/);
@@ -343,16 +369,16 @@ test("browser CPU finalists use paired matches on a common score scale", async (
   assert.doesNotMatch(worker, /current\.turn === candidateColor \? baselineScore : -baselineScore/);
   assert.match(worker, /chronofish_cpu_match_turn_time_ms/);
   assert.match(worker, /cpuMatchRemainingSearches\(config\.cpuMaxMatchPlies, ply\)/);
-  assert.match(worker, /chronofish_cpu_match_remaining_searches\(maxMatchPlies, ply\)/);
+  assert.match(worker, /chronofish_cpu_match_remaining_searches/);
   assert.match(worker, /if \(!cpuMatchShouldContinue\(deadlineAt\)\)/);
   assert.match(worker, /if \(!cpuMatchShouldContinue\(matchDeadlineAt\)\)/);
-  assert.match(worker, /chronofish_cpu_match_should_continue\(performance\.now\(\), deadlineAt\) !== 0/);
+  assert.match(worker, /chronofish_cpu_match_should_continue/);
   assert.match(worker, /const totalMatches = cpuPairedMatchTotalMatches\(games\.length\)/);
-  assert.match(worker, /chronofish_cpu_paired_match_total_matches\(gameCount\)/);
+  assert.match(worker, /chronofish_cpu_paired_match_total_matches/);
   assert.match(worker, /const matchDeadlineAt = cpuPairedMatchDeadlineAt\(deadlineAt, totalMatches, completed\)/);
   assert.match(worker, /chronofish_cpu_paired_match_deadline_ms/);
   assert.match(worker, /return cpuPairedMatchAverageScore\(score, completed\)/);
-  assert.match(worker, /chronofish_cpu_paired_match_average_score\(score, completedMatches\)/);
+  assert.match(worker, /chronofish_cpu_paired_match_average_score/);
   assert.doesNotMatch(worker, /function cpuMatchTurnTimeMs[\s\S]*Math\.floor\(\(deadlineAt - performance\.now\(\)\)/);
   assert.doesNotMatch(worker, /performance\.now\(\) >= matchDeadlineAt/);
   assert.doesNotMatch(worker, /config\.cpuMaxMatchPlies - ply \+ 1/);
@@ -364,6 +390,7 @@ test("browser CPU finalists use paired matches on a common score scale", async (
   assert.match(engineCpuSearch, /pub fn cpu_training_no_move_score/);
   assert.match(engineCpuSearch, /pub fn cpu_training_winner_score/);
   assert.match(engineCpuSearch, /pub fn cpu_training_adjudication_score/);
+  assert.match(engineCpuSearch, /pub fn cpu_training_adjudication_score_from_result_json/);
   assert.match(engineCpuSearch, /pub fn cpu_match_turn_time_ms/);
   assert.match(engineCpuSearch, /pub fn cpu_match_remaining_searches/);
   assert.match(engineCpuSearch, /pub fn cpu_match_should_continue/);
@@ -378,6 +405,7 @@ test("browser CPU finalists use paired matches on a common score scale", async (
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_training_no_move_score/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_training_winner_score_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_training_adjudication_score_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_training_adjudication_score_from_result_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_match_turn_time_ms/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_match_remaining_searches/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_cpu_match_should_continue/);
@@ -390,6 +418,7 @@ test("browser CPU finalists use paired matches on a common score scale", async (
   assert.match(engineTypes, /chronofish_cpu_training_no_move_score\(candidateTurn: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_winner_score_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_adjudication_score_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_cpu_training_adjudication_score_from_result_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_match_turn_time_ms\(cpuTrainingTimeMs: number, nowMs: number, deadlineAtMs: number, remainingSearches: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_match_remaining_searches\(maxMatchPlies: number, ply: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_match_should_continue\(nowMs: number, deadlineAtMs: number\): number/);
@@ -402,15 +431,15 @@ test("browser CPU finalists use paired matches on a common score scale", async (
 });
 
 test("browser CPU training performs bounded evolutionary generations", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineCpuSearch = await readFile(path.join(repoRoot, "engine/src/cpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
   assert.match(worker, /breedCpuPopulation\(baseline, \[\], candidateCount/);
-  assert.match(worker, /chronofish_breed_cpu_population_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_unique_cpu_parameters_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_cpu_parameters_key_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_breed_cpu_population_json/);
+  assert.match(worker, /chronofish_unique_cpu_parameters_json/);
+  assert.match(worker, /chronofish_cpu_parameters_key_json/);
   assert.doesNotMatch(worker, /from "\.\/training-cpu\.js"/);
   assert.equal(await fileExists(path.join(root, "src/training-cpu.ts")), false);
   assert.match(worker, /const candidateCount = cpuTrainingCandidateCount\(config\)/);
@@ -428,12 +457,12 @@ test("browser CPU training performs bounded evolutionary generations", async () 
   assert.match(worker, /bestCandidate \? \[bestCandidate\.parameters, \.\.\.elites\] : elites/);
   assert.doesNotMatch(worker, /const improved = cpuTrainingCandidateImproved\(winner\?\.score, baselineScore, bestCandidate\?\.score\)/);
   assert.match(worker, /generationsWithoutCandidate = cpuTrainingNextStagnation\(generationsWithoutCandidate, improved\)/);
-  assert.match(worker, /chronofish_cpu_training_generation_outcome_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_cpu_training_candidate_improved\(/);
-  assert.match(worker, /chronofish_cpu_training_next_stagnation\(/);
-  assert.match(worker, /chronofish_cpu_training_should_continue\(/);
+  assert.match(worker, /chronofish_cpu_training_generation_outcome_json/);
+  assert.match(worker, /chronofish_cpu_training_candidate_improved/);
+  assert.match(worker, /chronofish_cpu_training_next_stagnation/);
+  assert.match(worker, /chronofish_cpu_training_should_continue/);
   assert.match(worker, /while \(cpuCandidateScoringShouldContinue\(stageDeadlineAt, nextCandidate, uncachedCandidates\.length\)\)/);
-  assert.match(worker, /chronofish_cpu_candidate_scoring_should_continue\(/);
+  assert.match(worker, /chronofish_cpu_candidate_scoring_should_continue/);
   assert.match(worker, /chronofish_rank_cpu_scored_candidates_json/);
   assert.match(worker, /chronofish_cpu_training_elites_json/);
   assert.doesNotMatch(worker, /winner\.score > baselineScore/);
@@ -501,6 +530,7 @@ test("browser CPU training performs bounded evolutionary generations", async () 
   assert.match(engineTypes, /chronofish_cpu_parameters_key_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_budget_ms\(cpuTrainSeconds: number, cpuTrainingTimeMs: number, cpuMaxMatchPlies: number, cpuMaxMatchTimeMs: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_candidate_count\(cpuCandidates: number\): number/);
+  assert.match(engineTypes, /chronofish_search_result_turn_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_finalist_target\(populationLen: number, cpuFinalists: number, cpuPairBatch: number, screenedLen: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_elite_count\(cpuFinalists: number\): number/);
   assert.match(engineTypes, /chronofish_cpu_training_candidate_improved\(candidateScore: number, baselineScore: number, bestCandidateScore: number\): number/);
@@ -515,7 +545,7 @@ test("browser CPU training performs bounded evolutionary generations", async () 
 });
 
 test("training UI reports GPU working set size separately from replay size", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
 
   assert.match(worker, /trainingSampleCount: model\.trainingSampleCount/);
@@ -529,7 +559,7 @@ test("training UI reports GPU working set size separately from replay size", asy
 });
 
 test("training reports active-model validation baselines and checkpoint decisions", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
 
   assert.match(worker, /initialValidationLoss: model\.initialValidationLoss/);
@@ -543,14 +573,14 @@ test("training reports active-model validation baselines and checkpoint decision
 });
 
 test("training label source counts have engine-owned policy", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
   assert.match(worker, /labelSourceCountsWithEngine/);
-  assert.match(worker, /chronofish_label_source_counts_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_label_source_counts_json/);
   assert.match(worker, /normalizedConfig\.labelCounts = labelCounts/);
   assert.doesNotMatch(worker, /function labelSourceCounts\(samples/);
   assert.match(trainer, /function configuredLabelCounts\(config: TrainingConfig\)/);
@@ -563,7 +593,7 @@ test("training label source counts have engine-owned policy", async () => {
 });
 
 test("training closes replay databases and transfers candidate models to validation workers", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const storage = await readFile(path.join(root, "src/training-worker-storage.ts"), "utf8");
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
@@ -578,7 +608,7 @@ test("training closes replay databases and transfers candidate models to validat
   assert.match(worker, /function trainingIoTimeoutMs\(\): number/);
   assert.match(worker, /return workerRequestTimeout\(\{ nodes: 0, timeMs: 0 \}\)/);
   assert.match(worker, /function engineMovePlanKey/);
-  assert.match(worker, /engine\.chronofish_gpu_move_plan_key_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_gpu_move_plan_key_json/);
   assert.doesNotMatch(worker, /function movesKey/);
   assert.match(engineTraining, /pub const TRAINING_IO_TIMEOUT_MS: u64 = 15_000/);
   assert.match(engineTraining, /pub const LABEL_REQUEST_MIN_TIMEOUT_MS: u64 = 30_000/);
@@ -591,9 +621,9 @@ test("training closes replay databases and transfers candidate models to validat
   assert.match(engineTraining, /pub fn loss_log_replay_logs_json/);
   assert.match(engineTraining, /pub fn loss_log_validation_update_json/);
   assert.match(engineTraining, /pub fn training_metrics_summary_json/);
-  assert.match(worker, /chronofish_loss_log_replay_logs_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_loss_log_validation_update_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_training_metrics_summary_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_loss_log_replay_logs_json/);
+  assert.match(worker, /chronofish_loss_log_validation_update_json/);
+  assert.match(worker, /chronofish_training_metrics_summary_json/);
   const validateLossLogs = worker.slice(worker.indexOf("async function validateLossLogs"), worker.indexOf("async function fetchLossLogs"));
   assert.doesNotMatch(validateLossLogs, /validation\.(checked|changed|unchanged|skipped)\s*(\+\+|\+=)/);
   assert.doesNotMatch(validateLossLogs, /validation\.failed\s*=/);

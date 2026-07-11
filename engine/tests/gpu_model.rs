@@ -49,6 +49,7 @@ use chronofish_engine::gpu::training::{
     fill_grouped_training_batch_indices,
     fill_grouped_training_batch_indices_bytes,
     format_bytes,
+    gpu_duel_training_worker_count,
     gpu_position_generation_search_config,
     gpu_rollout_max_plies,
     gpu_rollout_ply_offset,
@@ -107,7 +108,9 @@ use chronofish_engine::gpu::training::{
     sample_seed,
     samples_from_partial_outcome,
     search_label_sample,
+    search_result_label_sample_from_result_json,
     search_result_label_sample_json,
+    search_result_turn_json,
     search_seed_json,
     select_training_working_set_for_projection,
     select_training_working_set_indices_for_projection,
@@ -610,6 +613,10 @@ fn training_worker_scheduling_helpers_match_browser_policy() {
     assert_eq!(gpu_training_worker_count(12, 8), 8);
     assert_eq!(gpu_training_worker_count(32, 99), 16);
     assert_eq!(gpu_training_worker_count(5, 0), 1);
+    assert_eq!(gpu_duel_training_worker_count(12, 8, 4), 4);
+    assert_eq!(gpu_duel_training_worker_count(32, 99, 20), 16);
+    assert_eq!(gpu_duel_training_worker_count(5, 0, 8), 1);
+    assert_eq!(gpu_duel_training_worker_count(0, 8, 4), 0);
 
     assert_eq!(training_label_worker_count(0, None, 12), 0);
     assert_eq!(training_label_worker_count(12, Some(99), 12), 8);
@@ -1664,6 +1671,60 @@ fn creates_training_samples_from_engine_positions_and_search_labels() {
     assert_eq!(sample.label_weight, 1.25);
     assert_eq!(sample.pseudo, Some(false));
     assert!(sample.policy.is_some_and(|policy| policy < 257));
+
+    let response = search_result_label_sample_from_result_json(
+        &serde_json::json!({
+            "sample": sample,
+            "result": {
+                "score": -10_000,
+                "moves": [{
+                    "from": { "timelineId": 0, "time": 0, "x": 3, "y": 6 },
+                    "to": { "timelineId": 0, "time": 1, "x": 3, "y": 4 }
+                }]
+            },
+            "labelKind": "outcome",
+            "labelWeight": 0.75
+        })
+        .to_string(),
+    )
+    .expect("search result label sample from result JSON");
+    let sample: Option<TrainingSample> =
+        serde_json::from_str(&response).expect("search result label sample from result parse");
+    let sample = sample.expect("search result should produce a sample");
+    assert_eq!(sample.label, -0.5);
+    assert_eq!(sample.label_kind.as_deref(), Some("outcome"));
+    assert_eq!(sample.label_weight, 0.75);
+
+    let response = search_result_label_sample_from_result_json(
+        &serde_json::json!({
+            "sample": sample,
+            "result": { "score": 5_000, "moves": [] },
+            "labelKind": "outcome",
+            "labelWeight": 1.0
+        })
+        .to_string(),
+    )
+    .expect("empty search result label sample from result JSON");
+    assert_eq!(response, "null");
+
+    let response = search_result_turn_json(
+        r#"{
+            "result": {
+                "score": 17,
+                "moves": [{
+                    "from": { "timelineId": 0, "time": 0, "x": 1, "y": 2 },
+                    "to": { "timelineId": 0, "time": 0, "x": 1, "y": 3 }
+                }]
+            }
+        }"#,
+    )
+    .expect("search result turn JSON");
+    let value: serde_json::Value = serde_json::from_str(&response).expect("turn response JSON");
+    assert_eq!(value["score"], 17);
+    assert_eq!(value["moves"].as_array().map(Vec::len), Some(1));
+
+    let empty = search_result_turn_json(r#"{ "result": null }"#).expect("empty turn JSON");
+    assert_eq!(empty, r#"{"moves":[],"score":null}"#);
 }
 
 #[test]

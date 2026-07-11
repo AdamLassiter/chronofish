@@ -1,4 +1,4 @@
-import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import * as engineGpuModel from "./engine-gpu-model-binding.js";
 import type { ChronofishEngine } from "./types.js";
 
 export interface CompactValueModel {
@@ -80,16 +80,11 @@ export function compactModelIsFinite(model: CompactValueModel): boolean {
 }
 
 export function compactModelBytesAreFiniteWithEngine(engine: ChronofishEngine, bytes: ArrayBuffer | Uint8Array): boolean {
-  const input = writeWasmBytes(engine, bytesForWasm(bytes));
-  try {
-    return Boolean(engine.chronofish_compact_value_model_is_finite_bytes(input.ptr, input.len));
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return engineGpuModel.compactModelBytesAreFinite(engine, bytes);
 }
 
 export function encodeCompactModelWithEngine(engine: ChronofishEngine, model: EncodableCompactModel): EncodedCompactModel | null {
-  const json = JSON.stringify({
+  const payload = {
     projectionSize: model.projectionSize,
     projectionSeed: model.projectionSeed,
     hiddenLayers: Array.from(model.hiddenLayers),
@@ -101,49 +96,26 @@ export function encodeCompactModelWithEngine(engine: ChronofishEngine, model: En
     scale: model.scale,
     bias: model.bias,
     outputActivation: model.outputActivation
-  });
-  const input = writeWasmString(engine, json);
-  try {
-    const output = engine.chronofish_compact_value_model_bytes_json(input.ptr, input.len);
-    return output ? readWasmBytes(engine, output) as EncodedCompactModel : null;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  };
+  return engineGpuModel.encodeCompactModel(engine, payload) as EncodedCompactModel | null;
 }
 
 export function decodeCompactModelWithEngine(engine: ChronofishEngine, buffer: ArrayBuffer | Uint8Array): CompactValueModel | null {
-  const input = writeWasmBytes(engine, bytesForWasm(buffer));
-  try {
-    const output = engine.chronofish_compact_value_model_json(input.ptr, input.len);
-    if (!output) {
-      return null;
-    }
-    return compactModelFromJson(JSON.parse(readWasmString(engine, output)) as CompactValueModelJson);
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  const value = engineGpuModel.decodeCompactModel<CompactValueModelJson>(engine, buffer);
+  return value ? compactModelFromJson(value) : null;
 }
 
 export function decodeCompactFrontierModelLayoutWithEngine(engine: ChronofishEngine, buffer: ArrayBuffer | Uint8Array): CompactFrontierModelLayout | null {
-  const input = writeWasmBytes(engine, bytesForWasm(buffer));
-  try {
-    const output = engine.chronofish_compact_value_model_frontier_layout_json(input.ptr, input.len);
-    if (!output) {
-      return null;
-    }
-    const value = JSON.parse(readWasmString(engine, output)) as CompactFrontierModelLayoutJson;
-    if (!value.architectureMatches || !value.model) {
-      return null;
-    }
-    return {
-      model: compactModelFromJson(value.model),
-      outputLayerSize: value.outputLayerSize ?? 0,
-      hiddenLayerWeights: (value.hiddenLayerWeights ?? []).map((weights) => new Float32Array(weights)),
-      policyWeights: value.policyWeights ? new Float32Array(value.policyWeights) : null
-    };
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const value = engineGpuModel.decodeCompactFrontierModelLayout<CompactFrontierModelLayoutJson>(engine, buffer);
+  if (!value?.architectureMatches || !value.model) {
+    return null;
   }
+  return {
+    model: compactModelFromJson(value.model),
+    outputLayerSize: value.outputLayerSize ?? 0,
+    hiddenLayerWeights: (value.hiddenLayerWeights ?? []).map((weights) => new Float32Array(weights)),
+    policyWeights: value.policyWeights ? new Float32Array(value.policyWeights) : null
+  };
 }
 
 function finiteArray(values: ArrayLike<number>): boolean {
@@ -156,7 +128,7 @@ function finiteArray(values: ArrayLike<number>): boolean {
 }
 
 export function encodeCompactModel(model: EncodableCompactModel, engine?: ChronofishEngine): EncodedCompactModel {
-  if (engine && typeof engine.chronofish_compact_value_model_bytes_json === "function") {
+  if (engine && engineGpuModel.supportsCompactModelEncoding(engine)) {
     const encoded = encodeCompactModelWithEngine(engine, model);
     if (encoded) {
       return encoded;
@@ -364,11 +336,4 @@ function compactModelFromJson(value: CompactValueModelJson): CompactValueModel {
     bias: value.bias,
     outputActivation: value.outputActivation
   };
-}
-
-function bytesForWasm(buffer: ArrayBuffer | Uint8Array): Uint8Array {
-  if (buffer instanceof Uint8Array) {
-    return buffer;
-  }
-  return new Uint8Array(buffer);
 }

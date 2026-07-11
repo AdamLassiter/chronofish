@@ -1,6 +1,6 @@
 import { decodeCompactFrontierModelLayoutWithEngine } from "./training-gpu.js";
 import type { CompactValueModel } from "./training-gpu.js";
-import { readWasmBytes, readWasmString, writeWasmBytes } from "./engine-io.js";
+import { engineFrontierNumber, engineGpuSearchBytesRequired, engineGpuSearchOutputBytes } from "./engine-gpu-search.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import type { ChronofishEngine } from "./types.js";
 import { FRONTIER_NEURAL_SHADER, FRONTIER_POLICY_SHADER } from "./training-shaders.js";
@@ -469,16 +469,11 @@ function quantizePolicyWeights(weights: Float32Array, engine: ChronofishEngine):
   scale: number;
   maxAbsError: number;
 } {
-  const input = writeWasmBytes(engine, new Uint8Array(weights.buffer, weights.byteOffset, weights.byteLength));
-  try {
-    const output = engine.chronofish_quantized_policy_upload_bytes(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readQuantizedPolicyUpload(readWasmBytes(engine, output), weights.length);
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return readQuantizedPolicyUpload(engineGpuSearchBytesRequired(
+    engine,
+    "chronofish_quantized_policy_upload_bytes",
+    new Uint8Array(weights.buffer, weights.byteOffset, weights.byteLength)
+  ), weights.length);
 }
 
 function readQuantizedPolicyUpload(bytes: Uint8Array, weightCount: number): {
@@ -561,20 +556,15 @@ async function initializedWeightBuffer(device: GPUDevice, values: Float32Array, 
 }
 
 function float32ToFloat16Array(values: Float32Array, engine: ChronofishEngine): Uint16Array {
-  const input = writeWasmBytes(engine, new Uint8Array(values.buffer, values.byteOffset, values.byteLength));
-  try {
-    const output = engine.chronofish_f32_to_f16_upload_bytes(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength !== values.length * Uint16Array.BYTES_PER_ELEMENT) {
-      throw new Error("f16 upload response length does not match the request.");
-    }
-    return new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Uint16Array.BYTES_PER_ELEMENT).slice();
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const bytes = engineGpuSearchBytesRequired(
+    engine,
+    "chronofish_f32_to_f16_upload_bytes",
+    new Uint8Array(values.buffer, values.byteOffset, values.byteLength)
+  );
+  if (bytes.byteLength !== values.length * Uint16Array.BYTES_PER_ELEMENT) {
+    throw new Error("f16 upload response length does not match the request.");
   }
+  return new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Uint16Array.BYTES_PER_ELEMENT).slice();
 }
 
 const frontierForwardF16 = `enable f16;
@@ -615,7 +605,7 @@ function frontierNeuralParams(
   targetDepth: number
 ): GPUBuffer {
   if (engine && typeof engine.chronofish_frontier_neural_params_bytes === "function") {
-    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_params_bytes(
+    return uniformBytes(device, engineGpuSearchOutputBytes(engine, "chronofish_frontier_neural_params_bytes",
       stateCount,
       stateStride,
       boardOffset,
@@ -624,7 +614,7 @@ function frontierNeuralParams(
       projectionSize,
       projectionSeed,
       targetDepth
-    )), engine);
+    ), engine);
   }
   return uniformBytes(device, u32Bytes([
     stateCount,
@@ -648,13 +638,13 @@ function frontierNeuralApplyParams(
   stateOffset: number
 ): GPUBuffer {
   if (engine && typeof engine.chronofish_frontier_neural_apply_params_bytes === "function") {
-    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_apply_params_bytes(
+    return uniformBytes(device, engineGpuSearchOutputBytes(engine, "chronofish_frontier_neural_apply_params_bytes",
       stateCount,
       rootColor,
       scale,
       bias,
       stateOffset
-    )), engine);
+    ), engine);
   }
   const data = new ArrayBuffer(32);
   const view = new DataView(data);
@@ -668,22 +658,22 @@ function frontierNeuralApplyParams(
 
 function frontierNeuralLayerParams(device: GPUDevice, engine: ChronofishEngine | undefined, sampleCount: number, inputSize: number, outputSize: number): GPUBuffer {
   if (engine && typeof engine.chronofish_frontier_neural_layer_params_bytes === "function") {
-    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_neural_layer_params_bytes(sampleCount, inputSize, outputSize)), engine);
+    return uniformBytes(device, engineGpuSearchOutputBytes(engine, "chronofish_frontier_neural_layer_params_bytes", sampleCount, inputSize, outputSize), engine);
   }
   return uniformBytes(device, u32Bytes([sampleCount, inputSize, outputSize, 0]));
 }
 
 function frontierNeuralEffectiveBatchSize(engine: ChronofishEngine, stateCount: number, requestedBatchSize: number): number {
-  return engine.chronofish_frontier_neural_effective_batch_size(stateCount, requestedBatchSize);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_effective_batch_size", stateCount, requestedBatchSize);
 }
 
 function frontierNeuralBatchCount(engine: ChronofishEngine, stateCount: number, stateOffset: number, effectiveBatchSize: number): number {
-  return engine.chronofish_frontier_neural_batch_count(stateCount, stateOffset, effectiveBatchSize);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_batch_count", stateCount, stateOffset, effectiveBatchSize);
 }
 
 function frontierNeuralCacheHitRate(hits: number, misses: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_neural_cache_hit_rate(hits, misses);
+    return engineFrontierNumber(engine, "chronofish_frontier_neural_cache_hit_rate", hits, misses);
   }
   const lookups = hits + misses;
   if (!Number.isFinite(hits) || !Number.isFinite(misses) || lookups <= 0) {
@@ -693,31 +683,31 @@ function frontierNeuralCacheHitRate(hits: number, misses: number, engine?: Chron
 }
 
 function frontierNeuralSelectBoardWorkgroups(engine: ChronofishEngine, batchCount: number): number {
-  return engine.chronofish_frontier_neural_select_board_workgroups(batchCount);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_select_board_workgroups", batchCount);
 }
 
 function frontierNeuralProjectWorkgroupsX(engine: ChronofishEngine, batchCount: number): number {
-  return engine.chronofish_frontier_neural_project_workgroups_x(batchCount);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_project_workgroups_x", batchCount);
 }
 
 function frontierNeuralProjectWorkgroupsY(engine: ChronofishEngine, projectionSize: number): number {
-  return engine.chronofish_frontier_neural_project_workgroups_y(projectionSize);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_project_workgroups_y", projectionSize);
 }
 
 function frontierNeuralLayerWorkgroupsX(engine: ChronofishEngine, batchCount: number): number {
-  return engine.chronofish_frontier_neural_layer_workgroups_x(batchCount);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_layer_workgroups_x", batchCount);
 }
 
 function frontierNeuralLayerWorkgroupsY(engine: ChronofishEngine, outputSize: number): number {
-  return engine.chronofish_frontier_neural_layer_workgroups_y(outputSize);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_layer_workgroups_y", outputSize);
 }
 
 function frontierNeuralOutputWorkgroups(engine: ChronofishEngine, batchCount: number): number {
-  return engine.chronofish_frontier_neural_output_workgroups(batchCount);
+  return engineFrontierNumber(engine, "chronofish_frontier_neural_output_workgroups", batchCount);
 }
 
 function frontierPolicyWorkgroups(engine: ChronofishEngine, candidateCount: number): number {
-  return engine.chronofish_frontier_policy_workgroups(candidateCount);
+  return engineFrontierNumber(engine, "chronofish_frontier_policy_workgroups", candidateCount);
 }
 
 function policyParams(
@@ -729,7 +719,7 @@ function policyParams(
   scale: number
 ): GPUBuffer {
   if (engine && typeof engine.chronofish_frontier_policy_params_bytes === "function") {
-    return uniformBytes(device, readWasmBytes(engine, engine.chronofish_frontier_policy_params_bytes(candidateCount, candidateStride, inputSize, scale)), engine);
+    return uniformBytes(device, engineGpuSearchOutputBytes(engine, "chronofish_frontier_policy_params_bytes", candidateCount, candidateStride, inputSize, scale), engine);
   }
   const data = new ArrayBuffer(16);
   const view = new DataView(data);
@@ -750,7 +740,7 @@ function destroyWorkspace(workspace: NeuralWorkspace): void {
 
 function align4(value: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_align4(value);
+    return engineFrontierNumber(engine, "chronofish_align4", value);
   }
   return Math.ceil(value / 4) * 4;
 }

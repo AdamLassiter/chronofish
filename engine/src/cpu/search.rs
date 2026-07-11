@@ -122,7 +122,7 @@ struct CpuWorkerSearchConfigRequest {
 #[serde(rename_all = "camelCase")]
 struct CpuApplyTurnRequest {
     game: serde_json::Value,
-    moves: Vec<CpuApplyTurnMove>,
+    moves: Option<Vec<CpuApplyTurnMove>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -133,6 +133,49 @@ struct CpuReferenceScoreDeltaRequest {
     candidate_moves: Vec<CpuTrainingMoveInput>,
     reference_moves: Vec<CpuTrainingMoveInput>,
     draw_window: i32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuReferenceScoreFromResultRequest {
+    result: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuReferenceScoreFromResultResponse {
+    score: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    moves: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuReferenceScoreDeltaFromResultRequest {
+    candidate_result: Option<CpuReferenceSearchResultInput>,
+    reference_score: i32,
+    reference_moves: Option<Vec<CpuTrainingMoveInput>>,
+    draw_window: i32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuReferenceSearchResultInput {
+    score: Option<i32>,
+    moves: Option<Vec<CpuTrainingMoveInput>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CpuTrainingAdjudicationScoreFromResultRequest {
+    current_turn: String,
+    candidate_color: String,
+    result: Option<CpuTrainingAdjudicationResultInput>,
+}
+
+#[derive(serde::Deserialize)]
+struct CpuTrainingAdjudicationResultInput {
+    score: Option<i32>,
 }
 
 #[derive(Clone, Copy, serde::Deserialize)]
@@ -237,11 +280,37 @@ pub fn cpu_worker_search_config_json(request_json: &str) -> Result<String, Strin
         .map_err(|error| format!("CPU worker search config response failed to encode: {error}"))
 }
 
+pub fn cpu_worker_search_result_json(request_json: &str) -> Result<String, String> {
+    let mut result = serde_json::from_str::<serde_json::Value>(request_json)
+        .map_err(|error| format!("CPU worker search result request is invalid: {error}"))?;
+    let result = result
+        .as_object_mut()
+        .ok_or_else(|| "CPU worker search result must be a JSON object.".to_string())?;
+    if !matches!(
+        result.get("principalVariation"),
+        Some(serde_json::Value::Array(_))
+    ) {
+        let principal_variation = match result.get("moves") {
+            Some(serde_json::Value::Array(moves)) if !moves.is_empty() => {
+                serde_json::Value::Array(vec![serde_json::Value::Array(moves.clone())])
+            }
+            _ => serde_json::Value::Array(Vec::new()),
+        };
+        result.insert("principalVariation".to_string(), principal_variation);
+    }
+    result.insert(
+        "cpuSearch".to_string(),
+        serde_json::Value::String("heuristic".to_string()),
+    );
+    serde_json::to_string(result)
+        .map_err(|error| format!("CPU worker search result response failed to encode: {error}"))
+}
+
 pub fn cpu_apply_turn_json(request_json: &str) -> Result<String, String> {
     let request = serde_json::from_str::<CpuApplyTurnRequest>(request_json)
         .map_err(|error| format!("CPU apply-turn request is invalid: {error}"))?;
     let mut game = parse_game_snapshot(&request.game.to_string())?;
-    for movement in request.moves {
+    for movement in request.moves.unwrap_or_default() {
         if game.apply_move(movement.from.into(), movement.to.into()) == 0 {
             return Err(game.last_message.clone());
         }
@@ -890,6 +959,60 @@ pub fn cpu_reference_score_delta_json(request_json: &str) -> Result<String, Stri
         .map_err(|error| format!("CPU reference score delta response failed to encode: {error}"))
 }
 
+pub fn cpu_reference_score_from_result_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<CpuReferenceScoreFromResultRequest>(request_json)
+        .map_err(|error| format!("CPU reference score request is not valid JSON: {error}"))?;
+    let score = request
+        .result
+        .as_ref()
+        .and_then(|result| result.get("score"))
+        .and_then(serde_json::Value::as_i64)
+        .and_then(|score| i32::try_from(score).ok())
+        .unwrap_or(0);
+    let moves = request
+        .result
+        .as_ref()
+        .and_then(|result| result.get("moves"))
+        .and_then(|moves| matches!(moves, serde_json::Value::Array(_)).then(|| moves.clone()));
+    serde_json::to_string(&CpuReferenceScoreFromResultResponse { score, moves })
+        .map_err(|error| format!("CPU reference score response failed to encode: {error}"))
+}
+
+pub fn cpu_reference_score_delta_from_result_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<CpuReferenceScoreDeltaFromResultRequest>(request_json)
+        .map_err(|error| {
+            format!("CPU reference score delta-from-result request is not valid JSON: {error}")
+        })?;
+    let candidate_score = request
+        .candidate_result
+        .as_ref()
+        .and_then(|result| result.score)
+        .unwrap_or(0);
+    let candidate_moves = request
+        .candidate_result
+        .and_then(|result| result.moves)
+        .unwrap_or_default()
+        .into_iter()
+        .map(CpuTrainingMove::from)
+        .collect::<Vec<_>>();
+    let reference_moves = request
+        .reference_moves
+        .unwrap_or_default()
+        .into_iter()
+        .map(CpuTrainingMove::from)
+        .collect::<Vec<_>>();
+    let delta = cpu_reference_score_delta(
+        candidate_score,
+        request.reference_score,
+        &candidate_moves,
+        &reference_moves,
+        request.draw_window,
+    );
+    serde_json::to_string(&delta).map_err(|error| {
+        format!("CPU reference score delta-from-result response failed to encode: {error}")
+    })
+}
+
 pub fn cpu_reference_candidate_average(
     score: i32,
     compared: usize,
@@ -936,6 +1059,24 @@ pub fn cpu_training_adjudication_score(
     } else {
         -baseline_score
     }
+}
+
+pub fn cpu_training_adjudication_score_from_result_json(request_json: &str) -> Result<i32, String> {
+    let request = serde_json::from_str::<CpuTrainingAdjudicationScoreFromResultRequest>(
+        request_json,
+    )
+    .map_err(|error| {
+        format!("CPU training adjudication score-from-result request is not valid JSON: {error}")
+    })?;
+    let baseline_score = request
+        .result
+        .and_then(|result| result.score)
+        .unwrap_or_default();
+    Ok(cpu_training_adjudication_score(
+        &request.current_turn,
+        &request.candidate_color,
+        baseline_score,
+    ))
 }
 
 pub fn bot_training_moves_key(moves: &[CpuTrainingMove]) -> String {

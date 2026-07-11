@@ -1,14 +1,12 @@
 import { train, predictValues } from "./training-gpu.js";
-import { readWasmString, writeWasmString } from "./engine-io.js";
-import { instantiateChronofishWasm } from "./wasm-loader.js";
+import { GpuTrainingBinding } from "./engine-gpu-training.js";
 import { fetchActiveModel, fetchCpuParameters, loadReplayBuffer, saveReplayBuffer } from "./training-worker-storage.js";
 import type { ChronofishEngine, Color, GameSnapshot, Move } from "./types.js";
 import type { CompactValueModel, EncodedCompactModel, TrainingConfig as GpuTrainingConfig, TrainingMetrics, TrainingSample } from "./training-gpu.js";
-import type { AiWorkerResponse, AppliedWorkerTurn, CpuParameters, CpuReferenceScore, CpuTrainingResult, EncodedPosition, LabelJob, LabelWorkerSample, LossLog, LossLogValidation, LossLogValidationExample, MetricsSummary, NormalizedTrainingConfig, ProgressCallback, TrainingLabelKind, TrainingMode, TrainingRunMetrics, TrainingSubject, TrainingWorkerRequest, TrainingWorkerResponse, WorkerRequestPayload, WorkerScope } from "./training-worker-types.js";
+import type { AiSearchResult, AiWorkerResponse, AppliedWorkerTurn, CpuParameters, CpuReferenceScore, CpuTrainingResult, EncodedPosition, LabelJob, LabelWorkerSample, LossLog, LossLogValidation, LossLogValidationExample, MetricsSummary, NormalizedTrainingConfig, ProgressCallback, TrainingLabelKind, TrainingMode, TrainingRunMetrics, TrainingSubject, TrainingWorkerRequest, TrainingWorkerResponse, WorkerRequestPayload, WorkerScope } from "./training-worker-types.js";
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
-let enginePromise: Promise<ChronofishEngine> | null = null;
-let trainingEngine: ChronofishEngine | null = null;
+const trainingBinding = new GpuTrainingBinding();
 const pipelineCache = new Map<string, GPUComputePipeline>();
 const trainingModePolicyCache = new Map<string, TrainingModePolicy>();
 let trainingLabelPolicyCache: TrainingLabelPolicy | null = null;
@@ -120,17 +118,7 @@ type EngineNormalizedTrainingConfig = Omit<NormalizedTrainingConfig, "runSeed" |
 async function normalizeTrainingConfigWithEngine(
   config: Partial<NormalizedTrainingConfig>
 ): Promise<EngineNormalizedTrainingConfig> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(config));
-  try {
-    const output = engine.chronofish_normalize_training_config_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as EngineNormalizedTrainingConfig;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.normalizeConfig<EngineNormalizedTrainingConfig>(config);
 }
 
 function createTrainingMetrics(): TrainingRunMetrics {
@@ -157,8 +145,7 @@ function metricsSummary(metrics: TrainingRunMetrics | null | undefined): Metrics
   if (!metrics) {
     return null;
   }
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.metricsSummary<MetricsSummary>({
     startedAt: metrics.startedAt,
     nowMs: performance.now(),
     phases: metrics.phases,
@@ -166,30 +153,11 @@ function metricsSummary(metrics: TrainingRunMetrics | null | undefined): Metrics
     searchPositionCount: metrics.searchPositionCount ?? null,
     searchLabelCount: metrics.searchLabelCount ?? null,
     lossLogValidation: metrics.lossLogValidation ?? null
-  }));
-  try {
-    const output = engine.chronofish_training_metrics_summary_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as MetricsSummary;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 async function dedupeTrainingSamplesWithEngine(samples: TrainingSample[]): Promise<TrainingSample[]> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(samplesForEngine(samples)));
-  try {
-    const output = engine.chronofish_dedupe_training_samples_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.dedupeSamples(samples);
 }
 
 async function appendReplaySamplesWithEngine(
@@ -197,20 +165,11 @@ async function appendReplaySamplesWithEngine(
   samples: TrainingSample[],
   maxBuffer: number
 ): Promise<TrainingSample[]> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    buffer: samplesForEngine(buffer),
-    samples: samplesForEngine(samples)
-  }));
-  try {
-    const output = engine.chronofish_append_replay_samples_json(ptr, len, maxBuffer);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.appendReplaySamples(buffer, samples, maxBuffer);
+}
+
+async function labelSourceCountsWithEngine(samples: TrainingSample[]): Promise<Record<string, number>> {
+  return trainingBinding.labelSourceCounts(samples);
 }
 
 function samplesForEngine(samples: TrainingSample[]): TrainingSample[] {
@@ -220,34 +179,8 @@ function samplesForEngine(samples: TrainingSample[]): TrainingSample[] {
   }));
 }
 
-async function labelSourceCountsWithEngine(samples: TrainingSample[]): Promise<Record<string, number>> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(samplesForEngine(samples)));
-  try {
-    const output = engine.chronofish_label_source_counts_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as Record<string, number>;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
 async function engineInstance(): Promise<ChronofishEngine> {
-  enginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
-    .then((instance) => {
-      trainingEngine = instance.exports as unknown as ChronofishEngine;
-      return trainingEngine;
-    });
-  return enginePromise;
-}
-
-function loadedEngine(): ChronofishEngine {
-  if (!trainingEngine) {
-    throw new Error("Training engine is not initialized.");
-  }
-  return trainingEngine;
+  return trainingBinding.engine();
 }
 
 async function collectTrainingSamples(
@@ -497,7 +430,7 @@ async function collectCpuTrainingGames(
             timeMs: config.cpuTrainingTimeMs,
             parametersJson
           }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
-          const moves = response.result?.moves ?? [];
+          const moves = searchResultTurn(response.result).moves;
           if (!moves.length) {
             break;
           }
@@ -546,52 +479,56 @@ interface CpuScreeningTrainingConfig {
 }
 
 function cpuTrainingPositionSearchConfig(config: NormalizedTrainingConfig): CpuTrainingPositionSearchConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_cpu_training_position_search_config_json(
+  return trainingBinding.resultValue<CpuTrainingPositionSearchConfig>(
+    "chronofish_cpu_training_position_search_config_json",
     config.cpuDepth,
     config.cpuNodes
   );
-  return JSON.parse(readWasmString(engine, output)) as CpuTrainingPositionSearchConfig;
 }
 
 function cpuScreeningTrainingConfigWithEngine(config: NormalizedTrainingConfig): CpuScreeningTrainingConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_cpu_screening_training_config_json(
+  return trainingBinding.resultValue<CpuScreeningTrainingConfig>(
+    "chronofish_cpu_screening_training_config_json",
     config.cpuDepth,
     config.depth,
     config.cpuNodes,
     config.nodes,
     config.cpuTrainingTimeMs
   );
-  return JSON.parse(readWasmString(engine, output)) as CpuScreeningTrainingConfig;
 }
 
 function cpuTrainingPositionWorkerCount(target: number, cpuWorkers: number): number {
-  return loadedEngine().chronofish_cpu_training_position_worker_count(target, cpuWorkers);
+  return trainingBinding.numericValue("chronofish_cpu_training_position_worker_count", target, cpuWorkers);
 }
 
 function cpuReferenceWorkerCount(gameCount: number, requestedWorkers: number, pairBatch: number): number {
-  return loadedEngine().chronofish_cpu_reference_worker_count(gameCount, requestedWorkers, pairBatch);
+  return trainingBinding.numericValue("chronofish_cpu_reference_worker_count", gameCount, requestedWorkers, pairBatch);
 }
 
 function cpuCandidateWorkerCount(candidateCount: number, cpuWorkers: number, pairBatch: number): number {
-  return loadedEngine().chronofish_cpu_candidate_worker_count(candidateCount, cpuWorkers, pairBatch);
+  return trainingBinding.numericValue("chronofish_cpu_candidate_worker_count", candidateCount, cpuWorkers, pairBatch);
 }
 
 function cpuLabelWorkerCount(positionCount: number, cpuWorkers: number): number {
-  return loadedEngine().chronofish_cpu_label_worker_count(positionCount, cpuWorkers);
+  return trainingBinding.numericValue("chronofish_cpu_label_worker_count", positionCount, cpuWorkers);
 }
 
 function cpuSearchLabelWeight(config: NormalizedTrainingConfig): number {
-  return loadedEngine().chronofish_cpu_search_label_weight(trainingModeCount(config));
+  return trainingBinding.numericValue("chronofish_cpu_search_label_weight", trainingModeCount(config));
 }
 
 function cpuReferenceComparisonCount(gameCount: number, referenceCount: number): number {
-  return loadedEngine().chronofish_cpu_reference_comparison_count(gameCount, referenceCount);
+  return trainingBinding.numericValue("chronofish_cpu_reference_comparison_count", gameCount, referenceCount);
 }
 
 function cpuReferenceShouldContinue(nowMs: number, deadlineAtMs: number, compared: number, maxMatchPlies: number): boolean {
-  return loadedEngine().chronofish_cpu_reference_should_continue(nowMs, deadlineAtMs, compared, maxMatchPlies) !== 0;
+  return trainingBinding.numericValue(
+    "chronofish_cpu_reference_should_continue",
+    nowMs,
+    deadlineAtMs,
+    compared,
+    maxMatchPlies
+  ) !== 0;
 }
 
 async function precomputeCpuReferenceScores(
@@ -631,9 +568,10 @@ async function precomputeCpuReferenceScores(
             timeMs: config.cpuTrainingTimeMs,
             parametersJson: baselineJson
           }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
-          reference.baselineScore = baselineResult.result?.score ?? 0;
-          if (baselineResult.result?.moves) {
-            reference.baselineMoves = baselineResult.result.moves;
+          const baselineReference = cpuReferenceScoreFromResult(baselineResult.result);
+          reference.baselineScore = baselineReference.score;
+          if (baselineReference.moves) {
+            reference.baselineMoves = baselineReference.moves;
           }
         }
         if (trainingModeEnabled(config, "vsGpu")) {
@@ -645,9 +583,10 @@ async function precomputeCpuReferenceScores(
             timeMs: workerSearchTimeMs(config),
             gpuMode: "full"
           }, workerRequestTimeout(config));
-          reference.gpuScore = gpuResult.result?.score ?? 0;
-          if (gpuResult.result?.moves) {
-            reference.gpuMoves = gpuResult.result.moves;
+          const gpuReference = cpuReferenceScoreFromResult(gpuResult.result);
+          reference.gpuScore = gpuReference.score;
+          if (gpuReference.moves) {
+            reference.gpuMoves = gpuReference.moves;
           }
         }
         references[index] = reference;
@@ -690,13 +629,11 @@ async function scoreCpuCandidate(
       timeMs: config.cpuTrainingTimeMs,
       parametersJson: candidateJson
     }, workerRequestTimeout({ nodes: config.cpuNodes, timeMs: config.cpuTrainingTimeMs }));
-    const candidateScore = candidateResult.result?.score ?? 0;
     const reference = references[index] ?? {};
     if (cpuBaselineModeEnabled(config) && reference.baselineScore !== undefined) {
-      const delta = cpuReferenceScoreDelta(
-        candidateScore,
+      const delta = cpuReferenceScoreDeltaFromResult(
+        candidateResult.result,
         reference.baselineScore,
-        candidateResult.result?.moves,
         reference.baselineMoves,
         config.cpuDrawWindow
       );
@@ -706,10 +643,9 @@ async function scoreCpuCandidate(
       }
     }
     if (trainingModeEnabled(config, "vsGpu") && reference.gpuScore !== undefined) {
-      score += cpuReferenceScoreDelta(
-        candidateScore,
+      score += cpuReferenceScoreDeltaFromResult(
+        candidateResult.result,
         reference.gpuScore,
-        candidateResult.result?.moves,
         reference.gpuMoves,
         config.cpuDrawWindow
       ).score;
@@ -788,7 +724,7 @@ async function playCpuTrainingMatch(
       nodes: config.cpuNodes,
       timeMs: turnTimeMs
     }));
-    const moves = response.result?.moves ?? [];
+    const moves = searchResultTurn(response.result).moves;
     if (!moves.length) {
       return cpuTrainingNoMoveScore(candidateTurn);
     }
@@ -820,12 +756,12 @@ async function playCpuTrainingMatch(
     nodes: config.cpuNodes,
     timeMs: adjudicationTimeMs
   }));
-  const baselineScore = adjudication.result?.score ?? 0;
-  return cpuTrainingAdjudicationScore(current.turn, candidateColor, baselineScore);
+  return cpuTrainingAdjudicationScoreFromResult(current.turn, candidateColor, adjudication.result);
 }
 
 function cpuMatchTurnTimeMs(config: NormalizedTrainingConfig, deadlineAt: number, remainingSearches: number): number {
-  return loadedEngine().chronofish_cpu_match_turn_time_ms(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_match_turn_time_ms",
     config.cpuTrainingTimeMs,
     performance.now(),
     deadlineAt,
@@ -834,15 +770,16 @@ function cpuMatchTurnTimeMs(config: NormalizedTrainingConfig, deadlineAt: number
 }
 
 function cpuMatchRemainingSearches(maxMatchPlies: number, ply: number): number {
-  return loadedEngine().chronofish_cpu_match_remaining_searches(maxMatchPlies, ply);
+  return trainingBinding.numericValue("chronofish_cpu_match_remaining_searches", maxMatchPlies, ply);
 }
 
 function cpuMatchShouldContinue(deadlineAt: number): boolean {
-  return loadedEngine().chronofish_cpu_match_should_continue(performance.now(), deadlineAt) !== 0;
+  return trainingBinding.numericValue("chronofish_cpu_match_should_continue", performance.now(), deadlineAt) !== 0;
 }
 
 function cpuPairedMatchDeadlineAt(deadlineAt: number, totalMatches: number, completedMatches: number): number {
-  return loadedEngine().chronofish_cpu_paired_match_deadline_ms(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_paired_match_deadline_ms",
     performance.now(),
     deadlineAt,
     totalMatches,
@@ -851,26 +788,21 @@ function cpuPairedMatchDeadlineAt(deadlineAt: number, totalMatches: number, comp
 }
 
 function cpuPairedMatchTotalMatches(gameCount: number): number {
-  return loadedEngine().chronofish_cpu_paired_match_total_matches(gameCount);
+  return trainingBinding.numericValue("chronofish_cpu_paired_match_total_matches", gameCount);
 }
 
 function cpuPairedMatchCandidateColors(turn: Color): Color[] {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify(turn));
-  try {
-    return JSON.parse(readWasmString(engine, engine.chronofish_cpu_paired_match_candidate_colors_json(ptr, len))) as Color[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<Color[]>("chronofish_cpu_paired_match_candidate_colors_json", turn);
 }
 
 function cpuPairedMatchAverageScore(score: number, completedMatches: number): number | null {
-  const average = loadedEngine().chronofish_cpu_paired_match_average_score(score, completedMatches);
+  const average = trainingBinding.numericValue("chronofish_cpu_paired_match_average_score", score, completedMatches);
   return Number.isFinite(average) ? average : null;
 }
 
 function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
-  return loadedEngine().chronofish_cpu_training_position_target(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_training_position_target",
     config.samples,
     trainingModeCount(config),
     config.cpuOpponentVariants,
@@ -886,15 +818,20 @@ function cpuTrainingPositionTarget(config: NormalizedTrainingConfig): number {
 }
 
 function cpuTrainingCandidateCount(config: NormalizedTrainingConfig): number {
-  return loadedEngine().chronofish_cpu_training_candidate_count(config.cpuCandidates);
+  return trainingBinding.numericValue("chronofish_cpu_training_candidate_count", config.cpuCandidates);
 }
 
 function cpuScreeningGameCount(sampleGameCount: number, cpuScreeningOpponentVariants: number): number {
-  return loadedEngine().chronofish_cpu_screening_game_count(sampleGameCount, cpuScreeningOpponentVariants);
+  return trainingBinding.numericValue(
+    "chronofish_cpu_screening_game_count",
+    sampleGameCount,
+    cpuScreeningOpponentVariants
+  );
 }
 
 function cpuTrainingFinalistTarget(config: NormalizedTrainingConfig, populationLength: number, screenedLength: number): number {
-  return loadedEngine().chronofish_cpu_training_finalist_target(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_training_finalist_target",
     populationLength,
     config.cpuFinalists,
     config.cpuPairBatch,
@@ -903,11 +840,12 @@ function cpuTrainingFinalistTarget(config: NormalizedTrainingConfig, populationL
 }
 
 function cpuTrainingEliteCount(config: NormalizedTrainingConfig): number {
-  return loadedEngine().chronofish_cpu_training_elite_count(config.cpuFinalists);
+  return trainingBinding.numericValue("chronofish_cpu_training_elite_count", config.cpuFinalists);
 }
 
 function cpuTrainingCandidateImproved(candidateScore: number | null | undefined, baselineScore: number, bestCandidateScore: number | null | undefined): boolean {
-  return loadedEngine().chronofish_cpu_training_candidate_improved(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_training_candidate_improved",
     candidateScore ?? Number.NaN,
     baselineScore,
     bestCandidateScore ?? Number.NEGATIVE_INFINITY
@@ -915,11 +853,16 @@ function cpuTrainingCandidateImproved(candidateScore: number | null | undefined,
 }
 
 function cpuTrainingNextStagnation(generationsWithoutCandidate: number, improved: boolean): number {
-  return loadedEngine().chronofish_cpu_training_next_stagnation(generationsWithoutCandidate, improved ? 1 : 0);
+  return trainingBinding.numericValue(
+    "chronofish_cpu_training_next_stagnation",
+    generationsWithoutCandidate,
+    improved ? 1 : 0
+  );
 }
 
 function cpuTrainingShouldContinue(deadlineAt: number, generationsWithoutCandidate: number, config: NormalizedTrainingConfig): boolean {
-  return loadedEngine().chronofish_cpu_training_should_continue(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_training_should_continue",
     performance.now(),
     deadlineAt,
     generationsWithoutCandidate,
@@ -928,7 +871,8 @@ function cpuTrainingShouldContinue(deadlineAt: number, generationsWithoutCandida
 }
 
 function cpuCandidateScoringShouldContinue(deadlineAt: number, nextCandidate: number, uncachedCandidateCount: number): boolean {
-  return loadedEngine().chronofish_cpu_candidate_scoring_should_continue(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_candidate_scoring_should_continue",
     performance.now(),
     deadlineAt,
     nextCandidate,
@@ -937,7 +881,8 @@ function cpuCandidateScoringShouldContinue(deadlineAt: number, nextCandidate: nu
 }
 
 function cpuReferenceCollectionShouldContinue(deadlineAt: number, nextGame: number, gameCount: number): boolean {
-  return loadedEngine().chronofish_cpu_reference_collection_should_continue(
+  return trainingBinding.numericValue(
+    "chronofish_cpu_reference_collection_should_continue",
     performance.now(),
     deadlineAt,
     nextGame,
@@ -946,7 +891,8 @@ function cpuReferenceCollectionShouldContinue(deadlineAt: number, nextGame: numb
 }
 
 function cpuTrainingDeadlineAt(config: NormalizedTrainingConfig): number {
-  const budgetMs = loadedEngine().chronofish_cpu_training_budget_ms(
+  const budgetMs = trainingBinding.numericValue(
+    "chronofish_cpu_training_budget_ms",
     config.cpuTrainSeconds,
     config.cpuTrainingTimeMs,
     config.cpuMaxMatchPlies,
@@ -955,82 +901,86 @@ function cpuTrainingDeadlineAt(config: NormalizedTrainingConfig): number {
   return performance.now() + budgetMs;
 }
 
+interface EngineCpuReferenceScore {
+  score: number;
+  moves?: Move[];
+}
+
+function cpuReferenceScoreFromResult(result: AiSearchResult | null | undefined): EngineCpuReferenceScore {
+  return trainingBinding.jsonValue<EngineCpuReferenceScore>(
+    "chronofish_cpu_reference_score_from_result_json",
+    { result: result ?? null }
+  );
+}
+
 interface CpuReferenceScoreDelta {
   score: number;
   nearDraw: boolean;
 }
 
-function cpuReferenceScoreDelta(
-  candidateScore: number,
+function cpuReferenceScoreDeltaFromResult(
+  candidateResult: AiSearchResult | null | undefined,
   referenceScore: number,
-  candidateMoves: Move[] | undefined,
   referenceMoves: Move[] | undefined,
   drawWindow: number
 ): CpuReferenceScoreDelta {
-  const engine = loadedEngine();
-  const request = {
-    candidateScore,
-    referenceScore,
-    candidateMoves: candidateMoves ?? [],
-    referenceMoves: referenceMoves ?? [],
-    drawWindow
-  };
-  const input = JSON.stringify(request);
-  const [ptr, len] = writeWasmString(engine, input);
-  try {
-    const output = engine.chronofish_cpu_reference_score_delta_json(ptr, len);
-    return JSON.parse(readWasmString(engine, output)) as CpuReferenceScoreDelta;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuReferenceScoreDelta>(
+    "chronofish_cpu_reference_score_delta_from_result_json",
+    {
+      candidateResult: candidateResult ?? null,
+      referenceScore,
+      referenceMoves: referenceMoves ?? [],
+      drawWindow
+    }
+  );
 }
 
 function cpuReferenceCandidateAverage(score: number, compared: number, nearDraws: number, drawRateLimit: number): number {
-  return loadedEngine().chronofish_cpu_reference_candidate_average(score, compared, nearDraws, drawRateLimit);
+  return trainingBinding.numericValue(
+    "chronofish_cpu_reference_candidate_average",
+    score,
+    compared,
+    nearDraws,
+    drawRateLimit
+  );
 }
 
 function cpuTrainingNoMoveScore(candidateTurn: boolean): number {
-  return loadedEngine().chronofish_cpu_training_no_move_score(candidateTurn ? 1 : 0);
+  return trainingBinding.numericValue("chronofish_cpu_training_no_move_score", candidateTurn ? 1 : 0);
 }
 
 function cpuTrainingCandidateTurn(currentTurn: Color, candidateColor: Color): boolean {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.jsonBooleanValue("chronofish_cpu_training_candidate_turn_json", {
     currentTurn,
     candidateColor
-  }));
-  try {
-    return engine.chronofish_cpu_training_candidate_turn_json(ptr, len) !== 0;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 function cpuTrainingWinnerScore(winner: Color | null, candidateColor: Color): number {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.jsonNumericValue("chronofish_cpu_training_winner_score_json", {
     winner,
     candidateColor
-  }));
-  try {
-    return engine.chronofish_cpu_training_winner_score_json(ptr, len);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 function cpuTrainingAdjudicationScore(currentTurn: Color, candidateColor: Color, baselineScore: number): number {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.jsonNumericValue("chronofish_cpu_training_adjudication_score_json", {
     currentTurn,
     candidateColor,
     baselineScore
-  }));
-  try {
-    return engine.chronofish_cpu_training_adjudication_score_json(ptr, len);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
+}
+
+function cpuTrainingAdjudicationScoreFromResult(
+  currentTurn: Color,
+  candidateColor: Color,
+  result: AiSearchResult | null | undefined
+): number {
+  return trainingBinding.jsonNumericValue("chronofish_cpu_training_adjudication_score_from_result_json", {
+    currentTurn,
+    candidateColor,
+    result: result ?? null
+  });
 }
 
 async function collectSearchSamples(game: GameSnapshot, config: NormalizedTrainingConfig, progress: ProgressCallback): Promise<TrainingSample[]> {
@@ -1084,11 +1034,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("search", index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ 0x51a7_0001))
       }, workerRequestTimeout(config));
-      const result = response.result;
-      if (!result?.moves?.length) {
-        return null;
-      }
-      return searchResultLabelSample(position.sample, result.score, result.moves[0], "search", 1.0);
+      return searchResultLabelSampleFromResult(position.sample, response.result, "search", 1.0);
     } catch {
       return null;
     }
@@ -1136,11 +1082,7 @@ async function collectCpuSearchSamples(game: GameSnapshot, config: NormalizedTra
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("cpu", index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ 0xc911_0001))
       }, workerRequestTimeout({ nodes: config.cpuNodes }));
-      const result = response.result;
-      if (!result?.moves?.length) {
-        return null;
-      }
-      return searchResultLabelSample(position.sample, result.score, result.moves[0], "cpu", cpuSearchLabelWeight(config));
+      return searchResultLabelSampleFromResult(position.sample, response.result, "cpu", cpuSearchLabelWeight(config));
     } catch {
       return null;
     }
@@ -1219,14 +1161,9 @@ async function collectGpuSearchLabels(
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed(String(labelKind), index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ seedSalt))
       }, workerRequestTimeout(config));
-      const result = response.result;
-      if (!result?.moves?.length) {
-        return null;
-      }
-      return searchResultLabelSample(
+      return searchResultLabelSampleFromResult(
         position.sample,
-        result.score,
-        result.moves[0],
+        response.result,
         labelKind,
         baseLabelWeight * labelWeightMultiplier(position)
       );
@@ -1241,7 +1178,7 @@ async function collectCpuGpuDuelSamples(game: GameSnapshot, config: NormalizedTr
   if (target <= 0) {
     return [];
   }
-  const workerCount = gpuTrainingWorkerCount(target, Math.min(config.searchWorkers, config.selfPlayWorkers));
+  const workerCount = gpuDuelTrainingWorkerCount(target, config.searchWorkers, config.selfPlayWorkers);
   const targets = splitWork(target, workerCount);
   let collected = 0;
   progress({ sampleCount: target, labelWorkers: workerCount, labelKind: "duel" });
@@ -1286,12 +1223,16 @@ async function collectCpuGpuDuelRollout(
         randomSeed: sampleSeed("duel", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0xd0e1_0001))
       }, workerRequestTimeout({ nodes: useCpu ? config.cpuNodes : config.nodes }));
       const result = response.result;
-      const moves = result?.moves ?? [];
+      const moves = searchResultTurn(result).moves;
       if (!moves.length) {
         break;
       }
+      const sample = searchResultLabelSampleFromResult(encoded, result, "duel", labelPolicy.duelLabelWeight);
+      if (!sample) {
+        break;
+      }
       samples.push({
-        ...searchResultLabelSample(encoded, result?.score, moves[0], "duel", labelPolicy.duelLabelWeight),
+        ...sample,
         outcomeTurn: beforeTurn,
         ply: rolloutPlyOffset(ply, workerIndex)
       });
@@ -1400,12 +1341,16 @@ async function collectOutcomeRollout(
         randomSeed: sampleSeed("outcome", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0x0c70_0001))
       }, workerRequestTimeout(config));
       const result = response.result;
-      const moves = result?.moves ?? [];
+      const moves = searchResultTurn(result).moves;
       if (!moves.length) {
         break;
       }
+      const sample = searchResultLabelSampleFromResult(encoded, result, "outcome", labelPolicy.outcomeLabelWeight);
+      if (!sample) {
+        break;
+      }
       samples.push({
-        ...searchResultLabelSample(encoded, result?.score, moves[0], "outcome", labelPolicy.outcomeLabelWeight),
+        ...sample,
         outcomeTurn: beforeTurn,
         ply: rolloutPlyOffset(ply, workerIndex)
       });
@@ -1439,41 +1384,23 @@ async function collectOutcomeRollout(
 }
 
 function splitWork(total: number, workers: number): number[] {
-  const engine = loadedEngine();
-  const output = engine.chronofish_training_split_work_json(total, workers);
-  return JSON.parse(readWasmString(engine, output)) as number[];
+  return trainingBinding.splitWork(total, workers);
 }
 
 function takeTrainingSampleBatches(batches: TrainingSample[][], target: number): TrainingSample[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(batches));
-  try {
-    const output = engine.chronofish_take_training_sample_batches_json(ptr, len, target);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.takeSampleBatches<TrainingSample[]>(batches, target);
 }
 
 function compactTrainingSamples(samples: Array<TrainingSample | null>): TrainingSample[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_compact_training_samples_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.compactSamples<TrainingSample[]>(samples);
 }
 
 function gpuTrainingWorkerCount(total: number, requestedWorkers: number): number {
-  return loadedEngine().chronofish_gpu_training_worker_count(total, requestedWorkers);
+  return trainingBinding.gpuTrainingWorkerCount(total, requestedWorkers);
+}
+
+function gpuDuelTrainingWorkerCount(total: number, searchWorkers: number, selfPlayWorkers: number): number {
+  return trainingBinding.gpuDuelTrainingWorkerCount(total, searchWorkers, selfPlayWorkers);
 }
 
 async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: NormalizedTrainingConfig, workerIndex: number): Promise<GameSnapshot> {
@@ -1494,7 +1421,7 @@ async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: No
         temperature: warmupConfig.explorationTemperature,
         randomSeed: sampleSeed("warmup", ply, config.runSeed ^ workerIndex ^ 0x0aa5_0001)
       }, workerRequestTimeout({ ...config, nodes: 1024 }));
-      const moves = response.result?.moves ?? [];
+      const moves = searchResultTurn(response.result).moves;
       if (!moves.length) {
         break;
       }
@@ -1527,63 +1454,55 @@ interface TrainingSearchConfig {
 }
 
 function gpuWarmupPlies(workerIndex: number): number {
-  return loadedEngine().chronofish_gpu_warmup_plies(workerIndex);
+  return trainingBinding.gpuWarmupPlies(workerIndex);
 }
 
 function gpuRolloutMaxPlies(target: number, workerIndex: number): number {
-  return loadedEngine().chronofish_gpu_rollout_max_plies(target, workerIndex);
+  return trainingBinding.gpuRolloutMaxPlies(target, workerIndex);
 }
 
 function rolloutPlyOffset(ply: number, workerIndex: number): number {
-  return loadedEngine().chronofish_gpu_rollout_ply_offset(ply, workerIndex);
+  return trainingBinding.rolloutPlyOffset(ply, workerIndex);
 }
 
 function gpuWarmupSearchConfig(config: NormalizedTrainingConfig): TrainingWorkerSearchConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_gpu_warmup_search_config_json(
+  return trainingBinding.gpuWarmupSearchConfig<TrainingWorkerSearchConfig>(
     config.depth,
     config.nodes,
     workerSearchTimeMs(config),
     config.explorationTemperature
   );
-  return JSON.parse(readWasmString(engine, output)) as TrainingWorkerSearchConfig;
 }
 
 function gpuPositionGenerationSearchConfig(config: NormalizedTrainingConfig): TrainingWorkerSearchConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_gpu_position_generation_search_config_json(
+  return trainingBinding.gpuPositionGenerationSearchConfig<TrainingWorkerSearchConfig>(
     config.depth,
     config.nodes,
     config.explorationTemperature
   );
-  return JSON.parse(readWasmString(engine, output)) as TrainingWorkerSearchConfig;
 }
 
 function curriculumSearchConfig(config: NormalizedTrainingConfig, index: number): NormalizedTrainingConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_curriculum_search_config_json(
-    config.depth,
-    config.nodes,
-    config.explorationTemperature,
-    index
-  );
   return {
     ...config,
-    ...(JSON.parse(readWasmString(engine, output)) as TrainingSearchConfig)
+    ...trainingBinding.curriculumSearchConfig<TrainingSearchConfig>(
+      config.depth,
+      config.nodes,
+      config.explorationTemperature,
+      index
+    )
   };
 }
 
 function tacticalSearchConfig(config: NormalizedTrainingConfig, attempt: number): NormalizedTrainingConfig {
-  const engine = loadedEngine();
-  const output = engine.chronofish_tactical_search_config_json(
-    config.depth,
-    config.nodes,
-    config.explorationTemperature,
-    attempt
-  );
   return {
     ...config,
-    ...(JSON.parse(readWasmString(engine, output)) as TrainingSearchConfig)
+    ...trainingBinding.tacticalSearchConfig<TrainingSearchConfig>(
+      config.depth,
+      config.nodes,
+      config.explorationTemperature,
+      attempt
+    )
   };
 }
 
@@ -1694,7 +1613,7 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
         temperature: searchConfig.explorationTemperature,
         randomSeed: sampleSeed("position", rolloutPlyOffset(ply, index), config.runSeed ^ workerIndex ^ 0x9051_0001)
       }, workerRequestTimeout(searchConfig));
-      const moves = response.result?.moves ?? [];
+      const moves = searchResultTurn(response.result).moves;
       if (!moves.length) {
         break;
       }
@@ -1756,62 +1675,38 @@ async function generateTacticalPositionGame(
 }
 
 function curriculumGame(game: GameSnapshot, index: number): GameSnapshot {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify(game));
-  try {
-    const output = engine.chronofish_curriculum_game_snapshot_json(ptr, len, index);
-    return JSON.parse(readWasmString(engine, output)) as GameSnapshot;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<GameSnapshot>("chronofish_curriculum_game_snapshot_json", game, index);
 }
 
 function tacticalPositionPriority(game: GameSnapshot): number {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify(game));
-  try {
-    return engine.chronofish_tactical_position_priority_snapshot_json(ptr, len);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonNumericValue("chronofish_tactical_position_priority_snapshot_json", game);
 }
 
 function tacticalPositionAttemptCount(index: number): number {
-  return loadedEngine().chronofish_tactical_position_attempt_count(index);
+  return trainingBinding.numericValue("chronofish_tactical_position_attempt_count", index);
 }
 
 function tacticalPositionUseBestSource(bestPriority: number): boolean {
-  return loadedEngine().chronofish_tactical_position_use_best_source(bestPriority) !== 0;
+  return trainingBinding.numericValue("chronofish_tactical_position_use_best_source", bestPriority) !== 0;
 }
 
 function tacticalPositionSelection(
   bestPriority: number,
   generatedPriority: number
 ): { useGenerated: boolean; nextPriority: number; complete: boolean } {
-  const engine = loadedEngine();
-  const output = engine.chronofish_tactical_position_selection_json(bestPriority, generatedPriority);
-  if (!output) {
-    throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-  }
-  return JSON.parse(readWasmString(engine, output));
+  return trainingBinding.resultValue("chronofish_tactical_position_selection_json", bestPriority, generatedPriority);
 }
 
 async function applyWorkerTurn(game: GameSnapshot, moves: Move[], _mover: Color): Promise<AppliedWorkerTurn | null> {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ game, moves }));
   try {
-    const output = engine.chronofish_cpu_apply_turn_json(ptr, len);
-    if (!output) {
-      return null;
-    }
-    const applied = JSON.parse(readWasmString(engine, output)) as AppliedWorkerTurn;
+    const applied = trainingBinding.jsonValue<AppliedWorkerTurn>("chronofish_cpu_apply_turn_json", { game, moves });
     return {
       game: applied.game,
       status: applied.status,
       winner: applied.status.winner ?? null
     };
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
+  } catch {
+    return null;
   }
 }
 
@@ -1848,91 +1743,54 @@ async function relabelOutcomeSamplesWithEngine(
   samples: LabelWorkerSample[],
   request: OutcomeRelabelRequest
 ): Promise<TrainingSample[]> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.asyncJsonValue<TrainingSample[]>("chronofish_relabel_outcome_samples_json", {
     ...request,
     samples: samplesForEngine(samples)
-  }));
-  try {
-    const output = engine.chronofish_relabel_outcome_samples_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 async function distillSamplesWithEngine(
   samples: TrainingSample[],
   labels: number[]
 ): Promise<TrainingSample[]> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ samples, labels }));
-  try {
-    const output = engine.chronofish_distill_training_samples_with_labels_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.asyncJsonValue<TrainingSample[]>(
+    "chronofish_distill_training_samples_with_labels_json",
+    { samples, labels }
+  );
 }
 
-function searchResultLabelSample(
+function searchResultLabelSampleFromResult(
   sample: TrainingSample,
-  score: number | null | undefined,
-  firstMove: Move | null | undefined,
+  result: AiSearchResult | null | undefined,
   labelKind: TrainingLabelKind,
   labelWeight: number
-): TrainingSample {
-  const engine = loadedEngine();
-  const [ptr, len] = writeWasmString(engine, JSON.stringify({
+): TrainingSample | null {
+  return trainingBinding.jsonValue<TrainingSample | null>("chronofish_search_result_label_sample_from_result_json", {
     sample,
-    score: score ?? null,
-    firstMove: firstMove ?? null,
+    result: result ?? null,
     labelKind,
     labelWeight
-  }));
-  try {
-    const output = engine.chronofish_search_result_label_sample_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TrainingSample;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
+}
+
+interface EngineSearchResultTurn {
+  moves: Move[];
+  score: number | null;
+}
+
+function searchResultTurn(result: AiSearchResult | null | undefined): EngineSearchResultTurn {
+  return trainingBinding.jsonValue<EngineSearchResultTurn>(
+    "chronofish_search_result_turn_json",
+    { result: result ?? null }
+  );
 }
 
 function cpuParametersKey(parameters: CpuParameters): string {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(parameters));
-  try {
-    const output = engine.chronofish_cpu_parameters_key_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonTextValue("chronofish_cpu_parameters_key_json", parameters);
 }
 
 function uniqueCpuParameters(values: CpuParameters[]): CpuParameters[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(values));
-  try {
-    const output = engine.chronofish_unique_cpu_parameters_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuParameters[]>("chronofish_unique_cpu_parameters_json", values);
 }
 
 function breedCpuPopulation(
@@ -1943,38 +1801,21 @@ function breedCpuPopulation(
   generation: number,
   stagnation: number
 ): CpuParameters[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.jsonValue<CpuParameters[]>("chronofish_breed_cpu_population_json", {
     baseline,
     elites,
     target,
     seed,
     generation,
     stagnation
-  }));
-  try {
-    const output = engine.chronofish_breed_cpu_population_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 function rankCpuScoredCandidates(scored: Array<{ parameters: CpuParameters; score: number }>): Array<{ parameters: CpuParameters; score: number }> {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(scored));
-  try {
-    const output = engine.chronofish_rank_cpu_scored_candidates_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as Array<{ parameters: CpuParameters; score: number }>;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<Array<{ parameters: CpuParameters; score: number }>>(
+    "chronofish_rank_cpu_scored_candidates_json",
+    scored
+  );
 }
 
 function cpuTrainingElites(
@@ -1982,17 +1823,11 @@ function cpuTrainingElites(
   baseline: CpuParameters,
   config: NormalizedTrainingConfig
 ): CpuParameters[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ baseline, candidates }));
-  try {
-    const output = engine.chronofish_cpu_training_elites_json(ptr, len, config.cpuFinalists);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuParameters[]>(
+    "chronofish_cpu_training_elites_json",
+    { baseline, candidates },
+    config.cpuFinalists
+  );
 }
 
 function cpuTrainingFinalistCandidates(
@@ -2000,17 +1835,11 @@ function cpuTrainingFinalistCandidates(
   screened: Array<{ parameters: CpuParameters; score: number }>,
   target: number
 ): CpuParameters[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ baseline, screened }));
-  try {
-    const output = engine.chronofish_cpu_training_finalist_candidates_json(ptr, len, target);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuParameters[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuParameters[]>(
+    "chronofish_cpu_training_finalist_candidates_json",
+    { baseline, screened },
+    target
+  );
 }
 
 interface CpuTrainingGenerationOutcome {
@@ -2025,22 +1854,12 @@ function cpuTrainingGenerationOutcome(
   previousBaselineScore: number,
   bestCandidateScore: number | null | undefined
 ): CpuTrainingGenerationOutcome {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+  return trainingBinding.jsonValue<CpuTrainingGenerationOutcome>("chronofish_cpu_training_generation_outcome_json", {
     baseline,
     finalists,
     previousBaselineScore,
     bestCandidateScore: bestCandidateScore ?? Number.NEGATIVE_INFINITY
-  }));
-  try {
-    const output = engine.chronofish_cpu_training_generation_outcome_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuTrainingGenerationOutcome;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
 }
 
 interface CpuCandidateScoringPlan {
@@ -2059,36 +1878,23 @@ function cpuCandidateScoringPlan(
   candidates: CpuParameters[],
   fitnessCache: Map<string, number>
 ): CpuCandidateScoringPlan {
-  const engine = loadedEngine();
   const fitness = Array.from(fitnessCache, ([key, score]) => ({ key, score }));
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ candidates, fitness }));
-  try {
-    const output = engine.chronofish_cpu_candidate_scoring_plan_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuCandidateScoringPlan;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuCandidateScoringPlan>(
+    "chronofish_cpu_candidate_scoring_plan_json",
+    { candidates, fitness }
+  );
 }
 
 function cpuFitnessEntryForCandidate(parameters: CpuParameters, score: number): CpuFitnessEntry {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ parameters, score }));
-  try {
-    const output = engine.chronofish_cpu_fitness_entry_for_candidate_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as CpuFitnessEntry;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.jsonValue<CpuFitnessEntry>(
+    "chronofish_cpu_fitness_entry_for_candidate_json",
+    { parameters, score }
+  );
 }
 
 function modeLabelTarget(config: NormalizedTrainingConfig, divisor: number): number {
-  return loadedEngine().chronofish_mode_label_target(
+  return trainingBinding.numericValue(
+    "chronofish_mode_label_target",
     config.samples,
     trainingModeCount(config),
     divisor
@@ -2123,37 +1929,17 @@ function trainingModePolicy(config: NormalizedTrainingConfig, mode?: TrainingMod
   if (cached) {
     return cached;
   }
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
+  const policy = trainingBinding.jsonValue<TrainingModePolicy>("chronofish_training_mode_policy_json", {
     trainingSubject: config.trainingSubject,
     trainingModes: config.trainingModes,
     mode: mode ?? null
-  }));
-  try {
-    const output = engine.chronofish_training_mode_policy_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const policy = JSON.parse(readWasmString(engine, output)) as TrainingModePolicy;
-    trainingModePolicyCache.set(key, policy);
-    return policy;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  });
+  trainingModePolicyCache.set(key, policy);
+  return policy;
 }
 
 function engineOppositeColor(color: Color): Color {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, color);
-  try {
-    const output = engine.chronofish_opposite_color_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as Color;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.textResultValue<Color>("chronofish_opposite_color_json", color);
 }
 
 async function encodePosition(worker: Worker, game: GameSnapshot): Promise<TrainingSample> {
@@ -2298,9 +2084,7 @@ function trainingLabelPolicy(): TrainingLabelPolicy {
   if (trainingLabelPolicyCache) {
     return trainingLabelPolicyCache;
   }
-  const engine = loadedEngine();
-  const output = engine.chronofish_training_label_policy_json();
-  trainingLabelPolicyCache = JSON.parse(readWasmString(engine, output)) as TrainingLabelPolicy;
+  trainingLabelPolicyCache = trainingBinding.trainingLabelPolicy<TrainingLabelPolicy>();
   return trainingLabelPolicyCache;
 }
 
@@ -2315,31 +2099,11 @@ function randomRunSeed(): number {
 }
 
 function workerRequestTimeout(payload: { nodes?: unknown; timeMs?: unknown }): number {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(payload ?? {}));
-  try {
-    const value = engine.chronofish_training_worker_request_timeout_ms_json(ptr, len);
-    if (!value) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return value;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.workerRequestTimeout(payload ?? {});
 }
 
 function workerSearchTimeMs(payload: { nodes?: unknown; timeMs?: unknown }): number {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(payload ?? {}));
-  try {
-    const value = engine.chronofish_training_worker_search_time_ms_json(ptr, len);
-    if (!value) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return value;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.workerSearchTime(payload ?? {});
 }
 
 function trainingIoTimeoutMs(): number {
@@ -2363,35 +2127,19 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 }
 
 function samplePlies(index: number, encodeOnly: boolean): number {
-  return loadedEngine().chronofish_training_sample_plies(index, encodeOnly ? 1 : 0);
+  return trainingBinding.samplePlies(index, encodeOnly);
 }
 
 function sampleSeed(prefix: string, index: number, salt: number): number {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, prefix);
-  try {
-    return engine.chronofish_training_sample_seed(ptr, len, index, salt) >>> 0;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.sampleSeed(prefix, index, salt);
 }
 
 function searchSeed(value: unknown, salt: number): number {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(value ?? null));
-  try {
-    return engine.chronofish_training_search_seed_json(ptr, len, salt) >>> 0;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.searchSeed(value ?? null, salt);
 }
 
 function trainingLabelWorkerCount(jobCount: number, requestedWorkers?: number): number {
-  return loadedEngine().chronofish_training_label_worker_count(
-    jobCount,
-    requestedWorkers ?? -1,
-    navigator.hardwareConcurrency ?? 4
-  );
+  return trainingBinding.labelWorkerCount(jobCount, requestedWorkers ?? -1, navigator.hardwareConcurrency ?? 4);
 }
 
 async function validateLossLogs(
@@ -2447,7 +2195,8 @@ async function validateLossLogs(
             temperature: 0,
             randomSeed: sampleSeed("loss-log", validation.checked, config.runSeed ^ 0x1055_1000)
           }, workerRequestTimeout(config));
-          const currentMoves = response.result?.moves ?? [];
+          const current = searchResultTurn(response.result);
+          const currentMoves = current.moves;
           const currentKey = engineMovePlanKey(currentMoves);
           if (!currentKey) {
             validation = lossLogValidationUpdate(validation, "skip");
@@ -2462,7 +2211,7 @@ async function validateLossLogs(
               previous: previousKey,
               current: currentKey,
               previousScore: decision.selectedScore ?? null,
-              currentScore: response.result?.score ?? null
+              currentScore: current.score
             });
             break;
           }
@@ -2506,31 +2255,11 @@ function lossLogValidationUpdate(
   event: "skip" | "unchanged" | "changed" | "finalize",
   example?: LossLogValidationExample
 ): LossLogValidation {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ validation, event, example }));
-  try {
-    const output = engine.chronofish_loss_log_validation_update_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as LossLogValidation;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.lossLogValidationUpdate<LossLogValidation>(validation, event, example);
 }
 
 function lossLogReplayLogs(logs: LossLog[], limit: number): LossLog[] {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ logs, limit }));
-  try {
-    const output = engine.chronofish_loss_log_replay_logs_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as LossLog[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.lossLogReplayLogs<LossLog[]>(logs, limit);
 }
 
 function errorMessage(error: unknown): string {
@@ -2538,15 +2267,5 @@ function errorMessage(error: unknown): string {
 }
 
 function engineMovePlanKey(moves: Move[] | undefined): string {
-  const engine = loadedEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(moves ?? []));
-  try {
-    const output = engine.chronofish_gpu_move_plan_key_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
+  return trainingBinding.movePlanKey(moves);
 }

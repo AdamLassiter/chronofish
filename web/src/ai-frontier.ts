@@ -12,8 +12,7 @@ import {
   GPU_FRONTIER_SUMMARY_STRIDE
 } from "./ai-layout.js";
 import { GPU_FRONTIER_EXPAND_SHADER, GPU_FRONTIER_SELECT_SHADER, GPU_FRONTIER_STATE_SHADER } from "./ai-shaders.js";
-import { readWasmString } from "./engine-io.js";
-import { instantiateChronofishWasm } from "./wasm-loader.js";
+import { engineDeriveFrontierTuning, engineFrontierNumber, engineFrontierSelectionPlan } from "./engine-gpu-search.js";
 import type { ChronofishEngine } from "./types.js";
 
 interface GpuBufferUsageConstants {
@@ -46,7 +45,6 @@ const gpuMapMode: GpuMapModeConstants = (globalThis as unknown as { GPUMapMode?:
 const I32_BYTES = Int32Array.BYTES_PER_ELEMENT;
 const GPU_SHADER_STAGE_COMPUTE = 4;
 const tuningCache = new Map<string, Promise<FrontierTuning>>();
-let tuningEnginePromise: Promise<ChronofishEngine> | null = null;
 
 export interface FrontierTuning {
   maxBoards: number;
@@ -416,15 +414,15 @@ export async function deriveFrontierTuning(
   boardCount: number,
   additionalBoardCapacity = 0
 ): Promise<FrontierTuning> {
-  const engine = await frontierTuningEngine();
-  return JSON.parse(readWasmString(engine, engine.chronofish_derive_frontier_tuning_json(
+  return engineDeriveFrontierTuning<FrontierTuning>([
     device.limits?.maxStorageBufferBindingSize ?? 0,
     device.limits?.maxBufferSize ?? 0,
-    device.limits?.maxComputeInvocationsPerWorkgroup ?? 0,
+    device.limits?.maxComputeInvocationsPerWorkgroup ?? 0
+  ],
     requestedNodes,
     boardCount,
     additionalBoardCapacity
-  ))) as FrontierTuning;
+  );
 }
 
 export async function autotuneFrontier(
@@ -448,70 +446,70 @@ export async function autotuneFrontier(
 
 export function frontierStateStride(maxBoards: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_state_stride(maxBoards);
+    return engineFrontierNumber(engine, "chronofish_frontier_state_stride", maxBoards);
   }
   return GPU_FRONTIER_BOARD_OFFSET + maxBoards * GPU_FRONTIER_BOARD_STRIDE;
 }
 
 export function frontierStateBytes(maxBoards: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_state_bytes(maxBoards);
+    return engineFrontierNumber(engine, "chronofish_frontier_state_bytes", maxBoards);
   }
   return frontierStateStride(maxBoards) * I32_BYTES;
 }
 
 export function frontierExpandWorkgroups(count: number, candidateWorkgroupSize: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_expand_workgroups(count, candidateWorkgroupSize);
+    return engineFrontierNumber(engine, "chronofish_frontier_expand_workgroups", count, candidateWorkgroupSize);
   }
   return Math.ceil(count / Math.max(1, candidateWorkgroupSize));
 }
 
 export function frontierSelectionWorkgroups(capacity: number, candidateWorkgroupSize: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_selection_workgroups(capacity, candidateWorkgroupSize);
+    return engineFrontierNumber(engine, "chronofish_frontier_selection_workgroups", capacity, candidateWorkgroupSize);
   }
   return Math.ceil(capacity / Math.max(1, candidateWorkgroupSize));
 }
 
 export function frontierMaterializeWorkgroups(frontierWidth: number, mutationTileSize: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_materialize_workgroups(frontierWidth, mutationTileSize);
+    return engineFrontierNumber(engine, "chronofish_frontier_materialize_workgroups", frontierWidth, mutationTileSize);
   }
   return Math.ceil(frontierWidth / Math.max(1, mutationTileSize));
 }
 
 export function frontierMinimaxWorkgroups(frontierWidth: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_minimax_workgroups(frontierWidth);
+    return engineFrontierNumber(engine, "chronofish_frontier_minimax_workgroups", frontierWidth);
   }
   return Math.ceil(frontierWidth / 64);
 }
 
 export function frontierCycleStateCount(frontierWidth: number, requestedStateCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_cycle_state_count(frontierWidth, requestedStateCount);
+    return engineFrontierNumber(engine, "chronofish_frontier_cycle_state_count", frontierWidth, requestedStateCount);
   }
   return Math.max(1, Math.min(frontierWidth, requestedStateCount));
 }
 
 export function frontierExpansionSourceScanLimit(candidateWorkgroupSize: number, dispatchCandidateLimit: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_expansion_source_scan_limit(candidateWorkgroupSize, dispatchCandidateLimit);
+    return engineFrontierNumber(engine, "chronofish_frontier_expansion_source_scan_limit", candidateWorkgroupSize, dispatchCandidateLimit);
   }
   return Math.max(candidateWorkgroupSize, dispatchCandidateLimit, 1);
 }
 
 export function frontierExpansionSourceScanCount(sourceScanLimit: number, sourceScans: number, sourceScanBase: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_expansion_source_scan_count(sourceScanLimit, sourceScans, sourceScanBase);
+    return engineFrontierNumber(engine, "chronofish_frontier_expansion_source_scan_count", sourceScanLimit, sourceScans, sourceScanBase);
   }
   return Math.min(sourceScanLimit, sourceScans - sourceScanBase);
 }
 
 export function frontierMinimaxBoundedDepth(targetDepth: number, ancestryStride: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_frontier_minimax_bounded_depth(targetDepth, ancestryStride);
+    return engineFrontierNumber(engine, "chronofish_frontier_minimax_bounded_depth", targetDepth, ancestryStride);
   }
   return Math.min(targetDepth, ancestryStride);
 }
@@ -528,15 +526,8 @@ export function adapterTuningCacheKey(adapter: GPUAdapter, modelVersion: string,
   ].join(":");
 }
 
-async function frontierTuningEngine(): Promise<ChronofishEngine> {
-  tuningEnginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
-    .then((instance) => instance.exports as unknown as ChronofishEngine);
-  return tuningEnginePromise;
-}
-
 async function frontierSelectionPlan(tuning: FrontierTuning, maxSelectionScan: number | undefined): Promise<FrontierSelectionPlan> {
-  const engine = await frontierTuningEngine();
-  return JSON.parse(readWasmString(engine, engine.chronofish_frontier_selection_plan_json(
+  return engineFrontierSelectionPlan<FrontierSelectionPlan>([
     tuning.maxBoards,
     tuning.frontierWidth,
     tuning.candidateCapacity,
@@ -545,12 +536,12 @@ async function frontierSelectionPlan(tuning: FrontierTuning, maxSelectionScan: n
     tuning.mutationTileSize,
     tuning.dispatchCandidateLimit,
     maxSelectionScan ?? 0
-  ))) as FrontierSelectionPlan;
+  ]);
 }
 
 export function align4(value: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_align4(value);
+    return engineFrontierNumber(engine, "chronofish_align4", value);
   }
   return Math.ceil(value / 4) * 4;
 }

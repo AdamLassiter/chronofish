@@ -1,4 +1,4 @@
-import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import * as engineGpuTrainingPolicy from "./engine-gpu-training-policy.js";
 import type { ChronofishEngine } from "./types.js";
 import type { TrainingSample } from "./training-gpu-types.js";
 
@@ -16,16 +16,7 @@ export function splitValidationSamples(samples: TrainingSample[], validationSpli
 }
 
 function splitValidationSamplesWithEngine(samples: TrainingSample[], validationSplit: number, engine: ChronofishEngine): ValidationSplit {
-  const input = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_split_validation_samples_json(input.ptr, input.len, validationSplit);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as ValidationSplit;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return engineGpuTrainingPolicy.jsonValue(engine, "chronofish_split_validation_samples_json", samples, validationSplit);
 }
 
 function splitValidationSamplesFallback(samples: TrainingSample[], validationSplit = 0): ValidationSplit {
@@ -118,12 +109,7 @@ function validationSamplePriority(sample: TrainingSample, index: number, seed: n
 
 export function trainingLabelPriority(labelKind: string | undefined, pseudo: boolean | undefined, engine?: ChronofishEngine): number {
   if (engine) {
-    const input = writeWasmString(engine, labelKind ?? "");
-    try {
-      return engine.chronofish_training_label_priority(input.ptr, input.len, pseudo ? 1 : 0);
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return engineGpuTrainingPolicy.textNumeric(engine, "chronofish_training_label_priority", labelKind ?? "", pseudo ? 1 : 0);
   }
   if (labelKind === "outcome" || labelKind === "duel") {
     return 4;
@@ -148,12 +134,7 @@ export function stableSampleHash(sample: TrainingSample, index: number, engine?:
 }
 
 function stableSampleHashWithEngine(sample: TrainingSample, index: number, engine: ChronofishEngine): number {
-  const input = writeWasmString(engine, JSON.stringify(sample));
-  try {
-    return engine.chronofish_stable_sample_hash_json(input.ptr, input.len, index) >>> 0;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return engineGpuTrainingPolicy.jsonNumeric(engine, "chronofish_stable_sample_hash_json", sample, index) >>> 0;
 }
 
 function stableSampleHashFallback(sample: TrainingSample): number {
@@ -193,16 +174,13 @@ export function shuffledIndices(indices: number[], epoch: number, seed: number, 
 }
 
 function shuffledIndicesWithEngine(indices: number[], epoch: number, seed: number, engine: ChronofishEngine): number[] {
-  const input = writeWasmBytes(engine, u32ArrayBytes(indices));
-  try {
-    const output = engine.chronofish_shuffled_training_indices_bytes(input.ptr, input.len, epoch, seed);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return u32ArrayFromBytes(readWasmBytes(engine, output));
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return u32ArrayFromBytes(engineGpuTrainingPolicy.bytesRequired(
+    engine,
+    "chronofish_shuffled_training_indices_bytes",
+    u32ArrayBytes(indices),
+    epoch,
+    seed
+  ));
 }
 
 function shuffledIndicesFallback(indices: number[], epoch: number, seed: number): number[] {
@@ -247,16 +225,7 @@ export function groupTrainingIndicesByPosition(samples: TrainingSample[], indice
 }
 
 function groupTrainingIndicesByPositionWithEngine(samples: TrainingSample[], indices: number[], engine: ChronofishEngine): number[][] {
-  const input = writeWasmString(engine, JSON.stringify({ samples, indices }));
-  try {
-    const output = engine.chronofish_group_training_indices_by_position_json(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as number[][];
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return engineGpuTrainingPolicy.jsonValue(engine, "chronofish_group_training_indices_by_position_json", { samples, indices });
 }
 
 function groupTrainingIndicesByPositionFallback(samples: TrainingSample[], indices: number[]): number[][] {
@@ -281,20 +250,15 @@ export function uniqueTrainingPositionCount(samples: TrainingSample[], indices: 
 }
 
 function uniqueTrainingPositionCountWithEngine(samples: TrainingSample[], indices: number[], engine: ChronofishEngine): number {
-  const input = writeWasmString(engine, JSON.stringify({ samples, indices }));
-  try {
-    const output = engine.chronofish_unique_training_position_count_json(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const count = Number(readWasmString(engine, output));
-    if (!Number.isInteger(count) || count < 0) {
-      throw new Error("Unique training position count response is invalid.");
-    }
-    return count;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const count = Number(engineGpuTrainingPolicy.jsonValue<string>(
+    engine,
+    "chronofish_unique_training_position_count_json",
+    { samples, indices }
+  ));
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error("Unique training position count response is invalid.");
   }
+  return count;
 }
 
 function uniqueTrainingPositionCountFallback(samples: TrainingSample[], indices: number[]): number {
@@ -324,16 +288,11 @@ function fillGroupedTrainingBatchIndicesWithEngine(
   engine: ChronofishEngine
 ): number {
   const request = groupedBatchRequestBytes(batch.length, trainGroups, epoch, seed, labelWeights);
-  const input = writeWasmBytes(engine, request);
-  try {
-    const output = engine.chronofish_fill_grouped_training_batch_indices_bytes(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readGroupedBatchResponse(readWasmBytes(engine, output), batch);
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return readGroupedBatchResponse(engineGpuTrainingPolicy.bytesRequired(
+    engine,
+    "chronofish_fill_grouped_training_batch_indices_bytes",
+    request
+  ), batch);
 }
 
 function groupedBatchRequestBytes(
@@ -436,20 +395,11 @@ export function featureLength(samples: TrainingSample[], engine?: ChronofishEngi
 }
 
 function featureLengthWithEngine(samples: TrainingSample[], engine: ChronofishEngine): number {
-  const input = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_feature_length_json(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const length = Number(readWasmString(engine, output));
-    if (!Number.isInteger(length) || length <= 0) {
-      throw new Error("Training feature length response is invalid.");
-    }
-    return length;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const length = Number(engineGpuTrainingPolicy.jsonValue<string>(engine, "chronofish_feature_length_json", samples));
+  if (!Number.isInteger(length) || length <= 0) {
+    throw new Error("Training feature length response is invalid.");
   }
+  return length;
 }
 
 function featureLengthFallback(samples: TrainingSample[]): number {

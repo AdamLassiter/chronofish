@@ -2,7 +2,7 @@ import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SH
 import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES, OPTIMIZER_MOMENTUM, POLICY_BUCKETS, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
 import { align4, createComputePipelineChecked, denseKernelEntryPoint as fallbackDenseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
-import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import * as engineGpuTrainingPolicy from "./engine-gpu-training-policy.js";
 import { featureLength, fillGroupedTrainingBatchIndices, groupTrainingIndicesByPosition, moveOrCollapseValidationGroup, movePositionGroupToValidation, shuffledIndices, splitValidationSamples, trainingLabelPriority, uniqueTrainingPositionCount, xorshift32 } from "./training-gpu-samples.js";
 import type { CompactValueModel, EncodableCompactModel, EncodedCompactModel } from "./training-gpu-model.js";
 import type { ChronofishEngine } from "./types.js";
@@ -97,7 +97,7 @@ interface CompactTrainingLayout {
 
 export function outputLayerSize(layers: number[] = HIDDEN_LAYERS, engine?: ChronofishEngine): number {
   if (engine && isDefaultHiddenLayers(layers)) {
-    return engine.chronofish_default_output_layer_size();
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_default_output_layer_size");
   }
   const size = layers[layers.length - 1];
   if (size === undefined) {
@@ -108,7 +108,7 @@ export function outputLayerSize(layers: number[] = HIDDEN_LAYERS, engine?: Chron
 
 export function previousLayerSize(layers: number[], layerIndex: number, inputSize: number, engine?: ChronofishEngine): number {
   if (engine && isDefaultHiddenLayers(layers)) {
-    return engine.chronofish_default_previous_layer_size(layerIndex, inputSize);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_default_previous_layer_size", layerIndex, inputSize);
   }
   return layerIndex === 0 ? inputSize : layers[layerIndex - 1]!;
 }
@@ -129,19 +129,14 @@ function policyLogitsArray(model: CompactValueModel | null): Float32Array | null
 export function policyWeightsArray(model: CompactValueModel | null, inputSize: number, engine?: ChronofishEngine): Float32Array | null {
   if (model && engine) {
     const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
-    const input = writeWasmBytes(engine, modelBytes);
-    try {
-      const output = engine.chronofish_compact_value_model_policy_weights_bytes(
-        input.ptr,
-        input.len,
-        inputSize
-      );
-      if (output) {
-        const bytes = readWasmBytes(engine, output);
-        return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
-      }
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
+    const bytes = engineGpuTrainingPolicy.bytesResult(
+      engine,
+      "chronofish_compact_value_model_policy_weights_bytes",
+      modelBytes,
+      inputSize
+    );
+    if (bytes) {
+      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
     }
   }
   const expected = POLICY_BUCKETS * (inputSize + 1);
@@ -400,34 +395,26 @@ function trainingWorkingSetMaxProjectedBytes(device: GPUDevice): number {
 }
 
 function selectTrainingWorkingSetWithEngine(samples: TrainingSample[], maxProjectedBytes: number, engine: ChronofishEngine): TrainingSample[] {
-  const input = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_select_training_working_set_indexes_bytes(
-      input.ptr,
-      input.len,
-      maxProjectedBytes
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error("Training working set index response is not i32-aligned.");
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const selected: TrainingSample[] = [];
-    for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
-      const index = view.getInt32(offset, true);
-      const sample = samples[index];
-      if (!sample) {
-        throw new Error(`Training working set index ${index} is out of range.`);
-      }
-      selected.push(sample);
-    }
-    return selected;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const bytes = engineGpuTrainingPolicy.jsonBytes(
+    engine,
+    "chronofish_select_training_working_set_indexes_bytes",
+    samples,
+    maxProjectedBytes
+  );
+  if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Training working set index response is not i32-aligned.");
   }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const selected: TrainingSample[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
+    const index = view.getInt32(offset, true);
+    const sample = samples[index];
+    if (!sample) {
+      throw new Error(`Training working set index ${index} is out of range.`);
+    }
+    selected.push(sample);
+  }
+  return selected;
 }
 
 function selectTrainingWorkingSetFallback(samples: TrainingSample[], maxProjectedBytes: number): TrainingSample[] {
@@ -1072,12 +1059,7 @@ export async function trainPolicy(
 
 export function hasPolicyTrainingTarget(sample: TrainingSample, engine?: ChronofishEngine): boolean {
   if (engine) {
-    const input = writeWasmString(engine, JSON.stringify(sample));
-    try {
-      return Boolean(engine.chronofish_has_policy_training_target_json(input.ptr, input.len));
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return engineGpuTrainingPolicy.jsonBoolean(engine, "chronofish_has_policy_training_target_json", sample);
   }
   return sample.labelKind !== "distilled"
     && Number.isInteger(sample.policy)
@@ -1097,29 +1079,21 @@ export function policyTrainingIndices(samples: TrainingSample[], requirePositive
 }
 
 function policyTrainingIndicesWithEngine(samples: TrainingSample[], requirePositiveWeight: boolean, engine: ChronofishEngine): number[] {
-  const input = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_policy_training_indices_bytes(
-      input.ptr,
-      input.len,
-      requirePositiveWeight ? 1 : 0
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error("Policy training index response is not i32-aligned.");
-    }
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const indices: number[] = [];
-    for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
-      indices.push(view.getInt32(offset, true));
-    }
-    return indices;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
+  const bytes = engineGpuTrainingPolicy.jsonBytes(
+    engine,
+    "chronofish_policy_training_indices_bytes",
+    samples,
+    requirePositiveWeight ? 1 : 0
+  );
+  if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
+    throw new Error("Policy training index response is not i32-aligned.");
   }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const indices: number[] = [];
+  for (let offset = 0; offset < bytes.byteLength; offset += Int32Array.BYTES_PER_ELEMENT) {
+    indices.push(view.getInt32(offset, true));
+  }
+  return indices;
 }
 
 export function splitPolicyTrainingIndices(
@@ -1142,24 +1116,16 @@ function splitPolicyTrainingIndicesWithEngine(
   validationSplit: number,
   engine: ChronofishEngine
 ): ValidationSplit {
-  const input = writeWasmString(engine, JSON.stringify({
+  return engineGpuTrainingPolicy.jsonValue<ValidationSplit>(
+    engine,
+    "chronofish_split_policy_training_indices_json",
+    {
     samples,
     policyIndices,
     split
-  }));
-  try {
-    const output = engine.chronofish_split_policy_training_indices_json(
-      input.ptr,
-      input.len,
-      validationSplit
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as ValidationSplit;
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+    },
+    validationSplit
+  );
 }
 
 function splitPolicyTrainingIndicesFallback(
@@ -1182,7 +1148,7 @@ function splitPolicyTrainingIndicesFallback(
 
 export function policyTrainingSteps(valueEpochs: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_policy_training_steps(valueEpochs);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_policy_training_steps", valueEpochs);
   }
   return Math.max(16, Math.min(256, Math.ceil(valueEpochs / 64)));
 }
@@ -1190,7 +1156,7 @@ export function policyTrainingSteps(valueEpochs: number, engine?: ChronofishEngi
 export function policyTrainingTarget(policy: number | undefined, engine?: ChronofishEngine): number {
   const value = policy ?? 0;
   if (engine) {
-    return engine.chronofish_policy_training_target(value);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_policy_training_target", value);
   }
   return Math.min(POLICY_BUCKETS - 1, value);
 }
@@ -1198,63 +1164,68 @@ export function policyTrainingTarget(policy: number | undefined, engine?: Chrono
 export function trainingLabelWeight(labelWeight: number | undefined, engine?: ChronofishEngine): number {
   const value = labelWeight ?? 1;
   if (engine) {
-    return engine.chronofish_training_label_weight(value);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_training_label_weight", value);
   }
   return Math.max(0, value);
 }
 
 export function trainingWeightedAverage(total: number, totalWeight: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_training_weighted_average(total, totalWeight);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_training_weighted_average", total, totalWeight);
   }
   return totalWeight > 0 ? total / totalWeight : 0;
 }
 
 export function trainingBatchNormalization(batchWeight: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_training_batch_normalization(batchWeight);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_training_batch_normalization", batchWeight);
   }
   return 1 / Math.max(batchWeight, 1e-6);
 }
 
 export function valueTrainingBatchSize(configBatchSize: number, trainingCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_value_training_batch_size(configBatchSize, trainingCount);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_value_training_batch_size", configBatchSize, trainingCount);
   }
   return Math.min(configBatchSize, Math.max(1, trainingCount));
 }
 
 export function policyTrainingBatchSize(configBatchSize: number, trainingCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_policy_training_batch_size(configBatchSize, trainingCount);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_policy_training_batch_size", configBatchSize, trainingCount);
   }
   return Math.min(configBatchSize, trainingCount);
 }
 
 export function valueHeadValidationInterval(epochs: number, validationInterval?: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_value_head_validation_interval(epochs, validationInterval ?? -1);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_value_head_validation_interval", epochs, validationInterval ?? -1);
   }
   return Math.max(1, Math.min(epochs, validationInterval ?? 256));
 }
 
 export function valueGpuBatchesPerSubmit(epochs: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_value_gpu_batches_per_submit(epochs);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_value_gpu_batches_per_submit", epochs);
   }
   return Math.min(64, Math.max(1, epochs));
 }
 
 export function valueGpuValidationInterval(batchesPerSubmit: number, validationInterval?: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_value_gpu_validation_interval(batchesPerSubmit, validationInterval ?? -1);
+    return engineGpuTrainingPolicy.numeric(
+      engine,
+      "chronofish_value_gpu_validation_interval",
+      batchesPerSubmit,
+      validationInterval ?? -1
+    );
   }
   return Math.max(batchesPerSubmit, validationInterval ?? 256);
 }
 
 export function policyTrainingStepsPerSubmit(steps: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_policy_training_steps_per_submit(steps);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_policy_training_steps_per_submit", steps);
   }
   return Math.min(64, steps);
 }
@@ -1438,7 +1409,9 @@ export function policyParamsData(
   engine?: ChronofishEngine
 ): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_policy_params_bytes(
+    return engineGpuTrainingPolicy.byteBuffer(
+      engine,
+      "chronofish_policy_params_bytes",
       batchCount,
       inputSize,
       totalWeight,
@@ -1446,7 +1419,6 @@ export function policyParamsData(
       config.weightDecay,
       OPTIMIZER_MOMENTUM
     );
-    return readWasmBytes(engine, output).buffer;
   }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
@@ -1462,8 +1434,16 @@ export function policyParamsData(
 
 export function layerParamsData(sampleCount: number, inputSize: number, outputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_layer_params_bytes(sampleCount, inputSize, outputSize, learningRate, weightDecay, momentum);
-    return readWasmBytes(engine, output).buffer;
+    return engineGpuTrainingPolicy.byteBuffer(
+      engine,
+      "chronofish_layer_params_bytes",
+      sampleCount,
+      inputSize,
+      outputSize,
+      learningRate,
+      weightDecay,
+      momentum
+    );
   }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
@@ -1482,8 +1462,15 @@ export function layerParamsBuffer(device: GPUDevice, sampleCount: number, inputS
 
 export function outputParamsData(sampleCount: number, inputSize: number, learningRate: number, weightDecay = 0, momentum = 0, engine?: ChronofishEngine): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_output_params_bytes(sampleCount, inputSize, learningRate, weightDecay, momentum);
-    return readWasmBytes(engine, output).buffer;
+    return engineGpuTrainingPolicy.byteBuffer(
+      engine,
+      "chronofish_output_params_bytes",
+      sampleCount,
+      inputSize,
+      learningRate,
+      weightDecay,
+      momentum
+    );
   }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
@@ -1505,8 +1492,7 @@ export function outputDeltaParamsBuffer(device: GPUDevice, sampleCount: number, 
 
 export function outputDeltaParamsData(sampleCount: number, totalWeight: number, engine?: ChronofishEngine): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_output_delta_params_bytes(sampleCount, totalWeight);
-    return readWasmBytes(engine, output).buffer;
+    return engineGpuTrainingPolicy.byteBuffer(engine, "chronofish_output_delta_params_bytes", sampleCount, totalWeight);
   }
   const params = new ArrayBuffer(16);
   const view = new DataView(params);
@@ -1521,8 +1507,13 @@ export function hiddenDeltaParamsBuffer(device: GPUDevice, sampleCount: number, 
 
 export function hiddenDeltaParamsData(sampleCount: number, currentSize: number, nextSize: number, engine?: ChronofishEngine): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_hidden_delta_params_bytes(sampleCount, currentSize, nextSize);
-    return readWasmBytes(engine, output).buffer;
+    return engineGpuTrainingPolicy.byteBuffer(
+      engine,
+      "chronofish_hidden_delta_params_bytes",
+      sampleCount,
+      currentSize,
+      nextSize
+    );
   }
   const params = new ArrayBuffer(16);
   const view = new DataView(params);
@@ -1617,7 +1608,7 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
 export function projectionTemporaryBudget(device: GPUDevice, engine?: ChronofishEngine): number {
   const maxBufferSize = device.limits?.maxBufferSize ?? 256 * 1024 * 1024;
   if (engine) {
-    return engine.chronofish_projection_temporary_budget(maxBufferSize);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_projection_temporary_budget", maxBufferSize);
   }
   return Math.min(
     PROJECTION_TEMPORARY_BUDGET,
@@ -1627,28 +1618,28 @@ export function projectionTemporaryBudget(device: GPUDevice, engine?: Chronofish
 
 export function cpuPredictionMaxBatch(engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_cpu_prediction_max_batch();
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_cpu_prediction_max_batch");
   }
   return CPU_PREDICTION_MAX_BATCH;
 }
 
 export function cpuHeadTrainingMaxPositions(engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_cpu_head_training_max_positions();
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_cpu_head_training_max_positions");
   }
   return CPU_HEAD_TRAINING_MAX_POSITIONS;
 }
 
 export function minHiddenTrainingPositions(engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_min_hidden_training_positions();
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_min_hidden_training_positions");
   }
   return MIN_HIDDEN_TRAINING_POSITIONS;
 }
 
 export function projectionBatchChunkSize(engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_projection_chunk_size();
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_projection_chunk_size");
   }
   return PROJECTION_CHUNK_SIZE;
 }
@@ -1662,16 +1653,12 @@ export function packSparseProjectionFeatures(samples: TrainingSample[], inputSiz
 }
 
 function packSparseProjectionFeaturesWithEngine(samples: TrainingSample[], inputSize: number, engine: ChronofishEngine): SparseProjectionFeatures {
-  const input = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_sparse_projection_features_bytes(input.ptr, input.len, inputSize);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readSparseProjectionFeatures(readWasmBytes(engine, output));
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
+  return readSparseProjectionFeatures(engineGpuTrainingPolicy.jsonBytes(
+    engine,
+    "chronofish_sparse_projection_features_bytes",
+    samples,
+    inputSize
+  ));
 }
 
 function readSparseProjectionFeatures(bytes: Uint8Array): SparseProjectionFeatures {
@@ -1746,8 +1733,15 @@ function packSparseProjectionFeaturesFallback(samples: TrainingSample[], inputSi
 
 export function projectionParamsData(sampleCount: number, inputSize: number, projectionSize: number, seed: number, outputOffset = 0, engine?: ChronofishEngine): ArrayBuffer {
   if (engine) {
-    const output = engine.chronofish_projection_params_bytes(sampleCount, inputSize, projectionSize, seed >>> 0, outputOffset);
-    return readWasmBytes(engine, output).buffer;
+    return engineGpuTrainingPolicy.byteBuffer(
+      engine,
+      "chronofish_projection_params_bytes",
+      sampleCount,
+      inputSize,
+      projectionSize,
+      seed >>> 0,
+      outputOffset
+    );
   }
   const params = new ArrayBuffer(32);
   const view = new DataView(params);
@@ -1932,37 +1926,28 @@ function forwardHiddenFeaturesOnProjectedGpu(
 
 export function lossReductionWorkgroupCount(sampleCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_loss_reduction_workgroup_count(sampleCount);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_loss_reduction_workgroup_count", sampleCount);
   }
   return Math.max(1, Math.ceil(sampleCount / 64));
 }
 
 export function trainingWorkgroups16(itemCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_training_workgroups_16(itemCount);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_training_workgroups_16", itemCount);
   }
   return Math.ceil(itemCount / 16);
 }
 
 export function trainingWorkgroups64(itemCount: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_training_workgroups_64(itemCount);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_training_workgroups_64", itemCount);
   }
   return Math.ceil(itemCount / 64);
 }
 
 export function denseKernelEntryPoint(entryPoint: string, sampleCount: number, engine?: ChronofishEngine): string {
   if (engine) {
-    const input = writeWasmString(engine, entryPoint);
-    try {
-      const output = engine.chronofish_dense_kernel_entry_point_bytes(input.ptr, input.len, sampleCount);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return readWasmString(engine, output);
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return engineGpuTrainingPolicy.textValue(engine, "chronofish_dense_kernel_entry_point_bytes", entryPoint, sampleCount);
   }
   return fallbackDenseKernelEntryPoint(entryPoint, sampleCount);
 }
@@ -1978,16 +1963,8 @@ function lossParamsBuffer(device: GPUDevice, sampleCount: number): GPUBuffer {
 export function splitHiddenWeights(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number[], engine?: ChronofishEngine): Float32Array[] {
   if (engine) {
     const request = hiddenWeightSplitRequestBytes(hiddenWeights, inputSize, hiddenLayers);
-    const input = writeWasmBytes(engine, request);
-    try {
-      const output = engine.chronofish_split_hidden_weights_bytes(input.ptr, input.len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return readSplitHiddenWeights(readWasmBytes(engine, output));
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    const output = engineGpuTrainingPolicy.bytesRequired(engine, "chronofish_split_hidden_weights_bytes", request);
+    return readSplitHiddenWeights(output);
   }
   const layers: Float32Array[] = [];
   let cursor = 0;
@@ -2058,16 +2035,8 @@ function readSplitHiddenWeights(bytes: Uint8Array): Float32Array[] {
 export function concatFloat32(arrays: Float32Array[], engine?: ChronofishEngine): Float32Array {
   if (engine) {
     const request = concatFloat32RequestBytes(arrays);
-    const input = writeWasmBytes(engine, request);
-    try {
-      const output = engine.chronofish_concat_f32_bytes(input.ptr, input.len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return float32ArrayFromBytes(readWasmBytes(engine, output));
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    const output = engineGpuTrainingPolicy.bytesRequired(engine, "chronofish_concat_f32_bytes", request);
+    return float32ArrayFromBytes(output);
   }
   const length = arrays.reduce((sum, array) => sum + array.length, 0);
   const result = new Float32Array(length);
@@ -2107,12 +2076,11 @@ function float32ArrayFromBytes(bytes: Uint8Array): Float32Array {
 export function countNonZero(values: ArrayLike<number>, engine?: ChronofishEngine): number {
   if (engine) {
     const array = values instanceof Float32Array ? values : Float32Array.from(Array.from(values));
-    const input = writeWasmBytes(engine, new Uint8Array(array.buffer, array.byteOffset, array.byteLength));
-    try {
-      return engine.chronofish_count_non_zero_f32_bytes(input.ptr, input.len);
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return engineGpuTrainingPolicy.bytesNumeric(
+      engine,
+      "chronofish_count_non_zero_f32_bytes",
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength)
+    );
   }
   let count = 0;
   for (let index = 0; index < values.length; index += 1) {
@@ -2148,20 +2116,13 @@ export async function predictValues(samples: TrainingSample[], model: CompactVal
 
 function compactTrainingLayoutWithEngine(engine: ChronofishEngine, activeModel: CompactValueModel | null, averageLabel: number): CompactTrainingLayout {
   const modelBytes = activeModel?.bytes ?? (activeModel ? encodeCompactModel(activeModel, engine) : new Uint8Array());
-  const modelInput = writeWasmBytes(engine, modelBytes);
-  try {
-    const output = engine.chronofish_compact_value_model_training_layout_bytes(
-      modelInput.ptr,
-      modelInput.len,
-      averageLabel
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readCompactTrainingLayout(readWasmBytes(engine, output));
-  } finally {
-    engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
-  }
+  const output = engineGpuTrainingPolicy.bytesRequired(
+    engine,
+    "chronofish_compact_value_model_training_layout_bytes",
+    modelBytes,
+    averageLabel
+  );
+  return readCompactTrainingLayout(output);
 }
 
 function compactTrainingLayoutFallback(activeModel: CompactValueModel | null, averageLabel: number): CompactTrainingLayout {
@@ -2224,23 +2185,12 @@ function readCompactTrainingLayout(bytes: Uint8Array): CompactTrainingLayout {
 
 function predictValuesWithEngine(engine: ChronofishEngine, samples: TrainingSample[], model: CompactValueModel): number[] {
   const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
-  const modelInput = writeWasmBytes(engine, modelBytes);
-  const sampleInput = writeWasmString(engine, JSON.stringify(samples));
-  try {
-    const output = engine.chronofish_compact_value_model_predict_values_json(
-      modelInput.ptr,
-      modelInput.len,
-      sampleInput.ptr,
-      sampleInput.len
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as number[];
-  } finally {
-    engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
-    engine.chronofish_dealloc(sampleInput.ptr, sampleInput.len);
-  }
+  return engineGpuTrainingPolicy.bytesJsonValue(
+    engine,
+    "chronofish_compact_value_model_predict_values_json",
+    modelBytes,
+    samples
+  );
 }
 
 function hiddenFeaturesOnCpu(
@@ -2282,24 +2232,12 @@ function hiddenFeaturesForSamples(samples: TrainingSample[], hiddenWeights: Floa
       bias: 0,
       outputActivation: "tanh"
     }, engine);
-    const modelInput = writeWasmBytes(engine, model);
-    const sampleInput = writeWasmString(engine, JSON.stringify(samples));
-    try {
-      const output = engine.chronofish_compact_value_model_hidden_features_json(
-        modelInput.ptr,
-        modelInput.len,
-        sampleInput.ptr,
-        sampleInput.len
-      );
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return (JSON.parse(readWasmString(engine, output)) as number[][])
-        .map((features) => Float32Array.from(features));
-    } finally {
-      engine.chronofish_dealloc(modelInput.ptr, modelInput.len);
-      engine.chronofish_dealloc(sampleInput.ptr, sampleInput.len);
-    }
+    return engineGpuTrainingPolicy.bytesJsonValue<number[][]>(
+      engine,
+      "chronofish_compact_value_model_hidden_features_json",
+      model,
+      samples
+    ).map((features) => Float32Array.from(features));
   }
   return samples.map((sample) =>
     hiddenFeaturesOnCpu(sample, PROJECTION_SIZE, PROJECTION_SEED, HIDDEN_LAYERS, hiddenWeights)
@@ -2425,17 +2363,8 @@ function trainAuxiliaryValueHeadsOnCpu(
 
 export function auxiliaryValueTargetsForSamples(samples: TrainingSample[], engine?: ChronofishEngine): Float32Array {
   if (engine) {
-    const input = writeWasmString(engine, JSON.stringify(samples));
-    try {
-      const output = engine.chronofish_auxiliary_value_targets_bytes(input.ptr, input.len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      const bytes = readWasmBytes(engine, output);
-      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    const bytes = engineGpuTrainingPolicy.jsonBytes(engine, "chronofish_auxiliary_value_targets_bytes", samples);
+    return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
   }
   const targets = new Float32Array(samples.length * AUXILIARY_VALUE_HEADS.length);
   for (let index = 0; index < samples.length; index += 1) {
@@ -2717,35 +2646,35 @@ function applyPolicyHeadGradientOnCpu(
 
 export function optimizerVelocity(previous: number, gradient: number, momentum = OPTIMIZER_MOMENTUM, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_optimizer_velocity(previous, gradient, momentum);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_optimizer_velocity", previous, gradient, momentum);
   }
   return momentum * previous + (1 - momentum) * gradient;
 }
 
 export function boundedValue(value: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_bounded_value(value);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_bounded_value", value);
   }
   return Math.max(-1, Math.min(1, Number.isFinite(value) ? value : 0));
 }
 
 export function normalizedSearchScore(score: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_normalized_search_score(score);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_normalized_search_score", score);
   }
   return boundedValue(score / VALUE_SCORE_SCALE);
 }
 
 export function denormalizedSearchScore(value: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_denormalized_search_score(value);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_denormalized_search_score", value);
   }
   return Math.round(boundedValue(value) * VALUE_SCORE_SCALE);
 }
 
 export function inverseTanh(value: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_inverse_tanh(value);
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_inverse_tanh", value);
   }
   const bounded = Math.max(-0.999999, Math.min(0.999999, value));
   return 0.5 * Math.log((1 + bounded) / (1 - bounded));
@@ -2847,12 +2776,11 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
 export function modelArchitectureMatches(model: CompactValueModel | null | undefined, engine?: ChronofishEngine): model is CompactValueModel {
   if (model && engine) {
     const modelBytes = model.bytes ?? encodeCompactModel(model, engine);
-    const input = writeWasmBytes(engine, modelBytes);
-    try {
-      return Boolean(engine.chronofish_compact_value_model_architecture_matches_bytes(input.ptr, input.len));
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return Boolean(engineGpuTrainingPolicy.bytesNumeric(
+      engine,
+      "chronofish_compact_value_model_architecture_matches_bytes",
+      modelBytes
+    ));
   }
   return Boolean(model
     && model.projectionSize === PROJECTION_SIZE
@@ -2865,7 +2793,7 @@ export function modelArchitectureMatches(model: CompactValueModel | null | undef
 
 export function projectionHash(rawIndex: number, projectionIndex: number, seed: number, engine?: ChronofishEngine): number {
   if (engine) {
-    return engine.chronofish_projection_hash(rawIndex, projectionIndex, seed) >>> 0;
+    return engineGpuTrainingPolicy.numeric(engine, "chronofish_projection_hash", rawIndex, projectionIndex, seed) >>> 0;
   }
   let hash = (seed ^ rawIndex) >>> 0;
   hash = Math.imul(hash, 16777619) >>> 0;
@@ -2878,25 +2806,10 @@ export function projectionHash(rawIndex: number, projectionIndex: number, seed: 
 export function initialHiddenWeights(inputSize: number, hiddenLayers: number[], engine?: ChronofishEngine): Float32Array {
   if (engine) {
     if (inputSize === PROJECTION_SIZE && isDefaultHiddenLayers(hiddenLayers)) {
-      const output = engine.chronofish_default_initial_hidden_weights_bytes();
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      const bytes = readWasmBytes(engine, output);
-      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
+      return new Float32Array(engineGpuTrainingPolicy.byteBuffer(engine, "chronofish_default_initial_hidden_weights_bytes"));
     }
     const request = initialHiddenWeightsRequestBytes(inputSize, hiddenLayers);
-    const input = writeWasmBytes(engine, request);
-    try {
-      const output = engine.chronofish_initial_hidden_weights_bytes(input.ptr, input.len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      const bytes = readWasmBytes(engine, output);
-      return new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Float32Array.BYTES_PER_ELEMENT).slice();
-    } finally {
-      engine.chronofish_dealloc(input.ptr, input.len);
-    }
+    return new Float32Array(engineGpuTrainingPolicy.bytesBuffer(engine, "chronofish_initial_hidden_weights_bytes", request));
   }
   const weights: number[] = [];
   let previous = inputSize;

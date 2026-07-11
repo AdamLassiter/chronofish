@@ -1,53 +1,21 @@
-import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET, GPU_FRONTIER_HEADER_BOARD_COUNT, GPU_FRONTIER_HEADER_HASH_HIGH, GPU_FRONTIER_HEADER_HASH_LOW } from "./ai-layout.js";
+import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET } from "./ai-layout.js";
 import { colorCode } from "./ai-snapshot.js";
 import { GPU_TURN_STATUS_SHADER, GPU_MOVEGEN_SHADER, GPU_REPLY_SHADER, GPU_MUTATE_SHADER } from "./ai-shaders.js";
 import { autotuneFrontier, frontierStateBytes, frontierStateStride, FrontierGpuPipeline } from "./ai-frontier.js";
 import type { EncodedFrontierRoot, FrontierBufferSet, FrontierTuning } from "./ai-frontier.js";
 import { FrontierNeuralEvaluator } from "./ai-frontier-neural.js";
-import { instantiateChronofishWasm } from "./wasm-loader.js";
-import { readWasmBytes, readWasmString, writeWasmBytes, writeWasmString } from "./engine-io.js";
+import * as engineGpuSearch from "./engine-gpu-search.js";
 import { GPUBufferUsage, GPUMapMode } from "./ai-worker-types.js";
 import { align4, clearComputePipelineCache, createComputePipelineChecked, requestHighLimitDevice, storageBuffer } from "./ai-gpu-device.js";
-import type { ChronofishEngine, Color, GameSnapshot, Move, Position } from "./types.js";
+import type { Color, GameSnapshot, Move } from "./types.js";
 import type { GpuCandidateInputs, GpuSnapshot } from "./ai-snapshot.js";
-import type { GpuMode, GpuSearchOptions, LegalTargetSelection, MutatedCandidate, RankedCandidate, ReplySearchResult, ScoredCandidates, SearchChoice, SearchResult, TurnStatus, WorkerRequest } from "./ai-worker-types.js";
+import type { GpuMode, GpuSearchOptions, MutatedCandidate, RankedCandidate, ReplySearchResult, ScoredCandidates, SearchChoice, SearchResult, TurnStatus, WorkerRequest } from "./ai-worker-types.js";
 
 let cachedGpuAdapter: GPUAdapter | null = null;
 let cachedGpuDevice: GPUDevice | null = null;
 let frontierRuntime: { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } | null = null;
-let validationEnginePromise: Promise<ChronofishEngine> | null = null;
 let activeSearchGeneration = 0;
 let frontierModelOverride: ArrayBuffer | null = null;
-const GPU_CANDIDATE_INPUT_HEADER_I32S = 7;
-
-interface PendingBoardRef {
-  timelineId: number;
-  time: number;
-}
-
-interface GpuWorkerSearchConfig {
-  requestedDepth: number;
-  minimumDepth: number;
-  searchTimeMs: number;
-  deadlineDelayMs: number | null;
-}
-
-interface GpuTurnCompletionStep {
-  action: "terminal" | "complete" | "maxMoves" | "loop" | "search";
-  stateKey?: string | null;
-  maxMoves: number;
-}
-
-interface GpuFullSearchPrecondition {
-  supported: boolean;
-  error?: string | null;
-}
-
-interface ValidatedFrontierChoiceResponse {
-  accepted: boolean;
-  key?: string | null;
-  choice?: SearchResult | null;
-}
 
 async function tryGpuSearch({
   depth,
@@ -63,7 +31,7 @@ async function tryGpuSearch({
   if (!navigator.gpu) {
     return null;
   }
-  const requestedDepth = await engineSearchDepthAtLeastOne(depth);
+  const requestedDepth = await engineGpuSearch.engineSearchDepthAtLeastOne(depth);
   const snapshot = snapshotOverride;
   if (!snapshot) {
     return null;
@@ -73,9 +41,9 @@ async function tryGpuSearch({
   if (!device) {
     return null;
   }
-  const searchNodes = await engineGpuSearchNodes(nodes);
+  const searchNodes = await engineGpuSearch.engineGpuSearchNodes(nodes);
   const turnStatus = await turnStatusOnGpu(device, snapshot);
-  const pendingBoards = await enginePendingPresentBoards(snapshot, snapshot.turn);
+  const pendingBoards = await engineGpuSearch.enginePendingPresentBoards(snapshot, snapshot.turn);
   if (gpuMode === "full") {
     try {
       return await tryGpuResidentFrontierSearch(device, snapshot, {
@@ -91,19 +59,19 @@ async function tryGpuSearch({
     }
   }
   const candidates = sourceGame
-    ? await engineGpuCandidateInputs(sourceGame)
-    : await engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
+    ? await engineGpuSearch.engineGpuCandidateInputs(sourceGame)
+    : await engineGpuSearch.engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
   if (candidates.sourceCount === 0 || candidates.targetCount === 0) {
     return null;
   }
   const scored = await scoreCandidatesOnGpu(device, candidates, snapshot.turn);
-  let ranked = await engineRankedCandidates(scored, {
+  let ranked = await engineGpuSearch.engineRankedCandidates(scored, {
     pendingBoards,
     requirePending: true,
-    limit: await engineGpuSearchRankingLimit(nodes)
+    limit: await engineGpuSearch.engineGpuSearchRankingLimit(nodes)
   });
   if (ranked.length === 0) {
-    throw new Error(`GPU scoring produced no pending legal candidates (${await engineGpuScoringSummary(scored, pendingBoards)})`);
+    throw new Error(`GPU scoring produced no pending legal candidates (${await engineGpuSearch.engineGpuScoringSummary(scored, pendingBoards)})`);
   }
 
   if (requestedDepth > 1) {
@@ -120,7 +88,7 @@ async function tryGpuSearch({
     const mutated = await mutateRankedCandidatesOnGpu(device, candidates, scored.records, ranked);
     const supported = await supportedMutatedCandidates(mutated, { requireChildBoards: false });
     if (supported.length === 0) {
-      throw new Error(`GPU mutation rejected ranked candidates (${await engineGpuMutationSummary(mutated)})`);
+      throw new Error(`GPU mutation rejected ranked candidates (${await engineGpuSearch.engineGpuMutationSummary(mutated)})`);
     }
     const selected = await selectSearchCandidate(
       supported,
@@ -128,7 +96,7 @@ async function tryGpuSearch({
       randomSeed
     );
     if (!selected) {
-      throw new Error(`GPU mutation produced no selectable candidate (${await engineGpuMutationSummary(mutated)})`);
+      throw new Error(`GPU mutation produced no selectable candidate (${await engineGpuSearch.engineGpuMutationSummary(mutated)})`);
     }
     if (selected) {
       const result: SearchResult = {
@@ -160,29 +128,33 @@ async function tryGpuResidentFrontierSearch(
     temperature: number;
     randomSeed: number;
     disableNeural: boolean;
-    sourceGame?: GameSnapshot;
+    sourceGame?: GameSnapshot | undefined;
   }
 ): Promise<SearchResult> {
-  const boardCount = snapshot.timelines.reduce((sum, timeline) => sum + timeline.boards.length, 0);
+  const searchSize = await engineGpuSearch.engineGpuSnapshotSearchSize(snapshot);
   const adapter = cachedGpuAdapter;
   if (!adapter) {
     throw new Error("GPU frontier search has no adapter for tuning.");
   }
-  const maxCycles = await engineFrontierMaxCycles(requestedDepth, snapshot.timelines.length);
-  const tuning = await autotuneFrontier(
-    adapter,
-    device,
+  const orchestration = await engineFrontierOrchestrationPlan(
+    requestedDepth,
+    searchSize.timelineCount,
     nodes,
-    boardCount,
-    "gpu-v1-cfnn-v3-policy-head",
-    maxCycles * 2
+    searchSize.boardCount,
+    adapter,
+    device
   );
+  const { maxCycles, tuning, perParentLimit, stateLimits } = orchestration;
   const runtime = await frontierRuntimeFor(device, tuning);
+  const frontierEngine = runtime.pipeline.engine;
+  if (!frontierEngine) {
+    throw new Error("GPU frontier search has no WASM engine binding.");
+  }
   runtime.neural.beginSearch();
   const buffers = runtime.pipeline.pool.createSearchBuffers();
   const root = sourceGame
-    ? await engineFrontierRoot(sourceGame, tuning.maxBoards)
-    : await engineFrontierRootFromSnapshot(snapshot, tuning.maxBoards);
+    ? await engineGpuSearch.engineFrontierRoot(sourceGame, tuning.maxBoards)
+    : await engineGpuSearch.engineFrontierRootFromSnapshot(snapshot, tuning.maxBoards);
   const startedAt = performance.now();
   const initialize = device.createCommandEncoder();
   initialize.clearBuffer(buffers.states);
@@ -192,13 +164,11 @@ async function tryGpuResidentFrontierSearch(
   runtime.pipeline.uploadRoot(buffers, root);
 
   const rootColor = colorCode(snapshot.turn);
-  const perParentLimit = await engineFrontierPerParentLimit(tuning.frontierWidth);
   let modelUsed = false;
   let cyclesCompleted = 0;
-  let activeStateLimit = 1;
   try {
     for (let cycle = 0; cycle < maxCycles; cycle += 1) {
-      if (cycle > 0 && cyclesCompleted >= requestedDepth && Date.now() >= gpuDeadlineAt) {
+      if (engineGpuSearch.engineGpuFrontierCycleShouldStop(frontierEngine, cycle, cyclesCompleted, requestedDepth)) {
         break;
       }
       const encoder = device.createCommandEncoder();
@@ -210,7 +180,7 @@ async function tryGpuResidentFrontierSearch(
           rootColor,
           targetDepth: requestedDepth,
           cycleIndex: cycle,
-          stateCount: activeStateLimit,
+          stateCount: stateLimits[cycle] ?? 1,
           perParentLimit
         },
         async (policyEncoder, policyBuffers, candidateCapacity) => {
@@ -220,7 +190,7 @@ async function tryGpuResidentFrontierSearch(
             policyBuffers.candidates,
             candidateCapacity,
             GPU_CANDIDATE_STRIDE,
-            activeStateLimit,
+            stateLimits[cycle] ?? 1,
             frontierStateStride(tuning.maxBoards, runtime.pipeline.engine),
             GPU_FRONTIER_BOARD_OFFSET,
             tuning.maxBoards,
@@ -229,13 +199,13 @@ async function tryGpuResidentFrontierSearch(
           ) || modelUsed;
         }
       );
-      activeStateLimit = await engineFrontierNextActiveStateLimit(tuning.frontierWidth, activeStateLimit, perParentLimit);
+      const nextStateLimit = stateLimits[cycle + 1] ?? 1;
       if (!disableNeural) {
         modelUsed = await runtime.neural.encode(
           encoder,
           buffers.nextStates,
           buffers.summaries,
-          activeStateLimit,
+          nextStateLimit,
           frontierStateStride(tuning.maxBoards, runtime.pipeline.engine),
           GPU_FRONTIER_BOARD_OFFSET,
           tuning.maxBoards,
@@ -276,8 +246,8 @@ async function tryGpuResidentFrontierSearch(
     const neuralCache = runtime.neural.cacheStats();
     const networkRoles = runtime.neural.networkRoles();
     const quantization = await runtime.neural.quantizationStats();
-    const policyChoiceAgreement = await engineChoiceAgreement(selected, selected.choices, [1, 5, 20]);
-    const choiceDiagnostics = await engineFrontierChoiceDiagnostics(selected, selected.choices);
+    const policyChoiceAgreement = await engineGpuSearch.enginePolicyChoiceAgreementDiagnostics(selected, selected.choices);
+    const choiceDiagnostics = await engineGpuSearch.engineFrontierChoiceDiagnostics(selected, selected.choices);
     return {
       ...selected,
       status: "ok",
@@ -299,9 +269,9 @@ async function tryGpuResidentFrontierSearch(
         candidateOverflow: readback.candidateOverflow ? 1 : 0,
         tacticalCandidates: readback.tacticalCandidates,
         selectedTacticalCandidates: readback.selectedTacticalCandidates,
-        candidateSelectionRate: gpuDiagnosticRate(readback.selectedCount, readback.nodes, runtime.pipeline.engine),
-        tacticalSelectionRate: gpuDiagnosticRate(readback.selectedTacticalCandidates, readback.tacticalCandidates, runtime.pipeline.engine),
-        effectiveBranchingFactor: gpuEffectiveBranchingFactor(readback.selectedCount, cyclesCompleted, runtime.pipeline.engine),
+        candidateSelectionRate: engineGpuSearch.gpuDiagnosticRate(readback.selectedCount, readback.nodes, frontierEngine),
+        tacticalSelectionRate: engineGpuSearch.gpuDiagnosticRate(readback.selectedTacticalCandidates, readback.tacticalCandidates, frontierEngine),
+        effectiveBranchingFactor: engineGpuSearch.gpuEffectiveBranchingFactor(readback.selectedCount, cyclesCompleted, frontierEngine),
         searchController: "puct-frontier-graph",
         progressiveWideningLimit: perParentLimit,
         graphDeduplication: 1,
@@ -317,14 +287,14 @@ async function tryGpuResidentFrontierSearch(
         bigNet: networkRoles.bigNet,
         legalChoiceCount: choiceDiagnostics.legalChoiceCount,
         legalTacticalChoiceCount: choiceDiagnostics.legalTacticalChoiceCount,
-        topPolicyChoiceAgreement: policyChoiceAgreement[0] ?? 0,
-        top5PolicyChoiceAgreement: policyChoiceAgreement[1] ?? 0,
-        top20PolicyChoiceAgreement: policyChoiceAgreement[2] ?? 0,
+        topPolicyChoiceAgreement: policyChoiceAgreement.topPolicyChoiceAgreement,
+        top5PolicyChoiceAgreement: policyChoiceAgreement.top5PolicyChoiceAgreement,
+        top20PolicyChoiceAgreement: policyChoiceAgreement.top20PolicyChoiceAgreement,
         selectedMovePrunedRisk: choiceDiagnostics.selectedMovePrunedRisk,
         selectedMoveTactical: choiceDiagnostics.selectedMoveTactical,
         model: modelUsed ? "neural" : "heuristic",
-        latencyMs: gpuReportedLatencyMs(latencyMs, runtime.pipeline.engine),
-        nodesPerSecond: gpuNodesPerSecond(readback.nodes, latencyMs, runtime.pipeline.engine),
+        latencyMs: engineGpuSearch.gpuReportedLatencyMs(latencyMs, frontierEngine),
+        nodesPerSecond: engineGpuSearch.gpuNodesPerSecond(readback.nodes, latencyMs, frontierEngine),
         candidateWorkgroupSize: tuning.candidateWorkgroupSize,
         mutationTileSize: tuning.mutationTileSize,
         neuralBatchSize: tuning.neuralBatchSize
@@ -347,7 +317,7 @@ async function frontierRuntimeFor(device: GPUDevice, tuning: FrontierTuning): Pr
   }
   frontierRuntime?.pipeline.destroy();
   frontierRuntime?.neural.destroy();
-  const engine = await validationEngine();
+  const engine = await engineGpuSearch.validationEngine();
   frontierRuntime = {
     device,
     pipeline: new FrontierGpuPipeline(device, tuning, undefined, engine),
@@ -385,12 +355,7 @@ async function readFrontierOnce(
   tuning: FrontierTuning
 ): Promise<{
   states: Int32Array;
-  nodes: number;
-  selectedCount: number;
-  candidateOverflow: boolean;
-  tacticalCandidates: number;
-  selectedTacticalCandidates: number;
-}> {
+} & engineGpuSearch.GpuFrontierReadbackSummary> {
   const stateByteLength = frontierStateBytes(tuning.maxBoards, frontierRuntime?.pipeline.engine) * tuning.frontierWidth;
   const counterByteLength = 24;
   const staging = device.createBuffer({
@@ -410,19 +375,45 @@ async function readFrontierOnce(
     staging.destroy();
     const states = new Int32Array(statesCopy);
     const counters = new Uint32Array(countersCopy);
-    return {
-      states,
-      nodes: counters[3] ?? 0,
-      selectedCount: counters[1] ?? 0,
-      candidateOverflow: (counters[2] ?? 0) !== 0,
-      tacticalCandidates: counters[4] ?? 0,
-      selectedTacticalCandidates: counters[5] ?? 0
-    };
+    return { states, ...await engineGpuSearch.engineGpuFrontierReadbackSummary(counters) };
   } catch (error) {
     staging.destroy();
     clearCachedGpuState();
     throw error;
   }
+}
+
+interface FrontierOrchestrationPlan {
+  maxCycles: number;
+  perParentLimit: number;
+  stateLimits: number[];
+}
+
+async function engineFrontierOrchestrationPlan(
+  requestedDepth: number,
+  timelineCount: number,
+  nodes: number,
+  boardCount: number,
+  adapter: GPUAdapter,
+  device: GPUDevice
+): Promise<FrontierOrchestrationPlan & { tuning: FrontierTuning }> {
+  const provisionalCycles = await engineGpuSearch.engineFrontierMaxCycles(requestedDepth, timelineCount);
+  const tuning = await autotuneFrontier(
+    adapter,
+    device,
+    nodes,
+    boardCount,
+    "gpu-v1-cfnn-v3-policy-head",
+    provisionalCycles * 2
+  );
+  return {
+    ...await engineGpuSearch.engineFrontierOrchestrationPlanForWidth(
+      requestedDepth,
+      timelineCount,
+      tuning.frontierWidth
+    ),
+    tuning
+  };
 }
 
 async function validatedFrontierChoices(
@@ -435,12 +426,11 @@ async function validatedFrontierChoices(
 ): Promise<SearchResult[]> {
   const choices: SearchResult[] = [];
   const seenKeys: string[] = [];
-  const engine = await validationEngine();
-  const candidates = engineFrontierChoicesFromWords(engine, states, tuning, requestedDepth, gpuSearch);
+  const engine = await engineGpuSearch.validationEngine();
+  const candidates = engineGpuSearch.engineFrontierChoicesFromWords(engine, states, tuning, requestedDepth, gpuSearch);
   for (const candidate of candidates) {
-    const plan = candidate.moves ?? [];
-    const moves = await validateFirstFrontierTurn(snapshot, plan, sourceGame);
-    const accepted = await engineValidatedFrontierChoice(candidate, moves, seenKeys, choices.length, 12, gpuSearch);
+    const moves = await engineGpuSearch.validateFirstFrontierTurn(snapshot, candidate.moves, sourceGame);
+    const accepted = await engineGpuSearch.engineValidatedFrontierChoice(candidate, moves, seenKeys, choices.length, 12, gpuSearch);
     if (!accepted.accepted || !accepted.choice) {
       continue;
     }
@@ -453,823 +443,6 @@ async function validatedFrontierChoices(
     }
   }
   return choices;
-}
-
-async function engineValidatedFrontierChoice(
-  candidate: SearchResult,
-  moves: Move[],
-  seenKeys: string[],
-  choiceCount: number,
-  choiceLimit: number,
-  gpuSearch: string
-): Promise<ValidatedFrontierChoiceResponse> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    candidate,
-    moves,
-    seenKeys,
-    choiceCount,
-    choiceLimit,
-    gpuSearch
-  }));
-  try {
-    const output = engine.chronofish_gpu_validated_frontier_choice_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as ValidatedFrontierChoiceResponse;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-function engineFrontierChoicesFromWords(
-  engine: ChronofishEngine,
-  words: Int32Array,
-  tuning: FrontierTuning,
-  requestedDepth: number,
-  gpuSearch: string
-): SearchResult[] {
-  const input = writeWasmBytes(engine, new Uint8Array(words.buffer, words.byteOffset, words.byteLength));
-  const label = writeWasmString(engine, gpuSearch);
-  try {
-    const output = engine.chronofish_gpu_frontier_choices_json_bytes(
-      input.ptr,
-      input.len,
-      tuning.maxBoards,
-      tuning.frontierWidth,
-      requestedDepth,
-      label.ptr,
-      label.len,
-      12
-    );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as SearchResult[];
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-    engine.chronofish_dealloc(label.ptr, label.len);
-  }
-}
-
-async function validateFirstFrontierTurn(snapshot: GpuSnapshot, plan: Move[], sourceGame?: GameSnapshot): Promise<Move[]> {
-  const engine = await validationEngine();
-  const game = await validationGameSnapshot(snapshot, sourceGame);
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ game, moves: plan }));
-  try {
-    const output = engine.chronofish_gpu_validate_first_frontier_turn_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as Move[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function validateSearchResultBeforePost(snapshot: GpuSnapshot, result: SearchResult, sourceGame?: GameSnapshot): Promise<SearchResult | null> {
-  const engine = await validationEngine();
-  const game = await validationGameSnapshot(snapshot, sourceGame);
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ game, result }));
-  try {
-    const output = engine.chronofish_gpu_validate_search_result_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as SearchResult | null;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function validationGameSnapshot(snapshot: GpuSnapshot, sourceGame?: GameSnapshot): Promise<GameSnapshot> {
-  return sourceGame ?? await engineGpuSnapshotGame(snapshot);
-}
-
-async function validationEngine(): Promise<ChronofishEngine> {
-  validationEnginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
-    .then((instance) => instance.exports as unknown as ChronofishEngine);
-  return validationEnginePromise;
-}
-
-function loadValidationSnapshot(engine: ChronofishEngine, game: GameSnapshot): void {
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(game));
-  try {
-    if (!engine.chronofish_load_snapshot_json(ptr, len)) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuSnapshot(game: GameSnapshot): Promise<GpuSnapshot> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  return JSON.parse(readWasmString(engine, engine.chronofish_gpu_snapshot_json())) as GpuSnapshot;
-}
-
-async function engineGpuSnapshotGame(snapshot: GpuSnapshot): Promise<GameSnapshot> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(snapshot));
-  try {
-    const output = engine.chronofish_gpu_snapshot_game_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as GameSnapshot;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineSnapshotWithGpuChildBoards(
-  snapshot: GpuSnapshot,
-  childBoardRecords: Int32Array,
-  mutationStatus: number,
-  { move = null, advanceTurn = true }: { move?: Move | null; advanceTurn?: boolean } = {}
-): Promise<GpuSnapshot> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    snapshot,
-    childBoardRecords: Array.from(childBoardRecords),
-    mutationStatus,
-    move,
-    advanceTurn
-  }));
-  try {
-    const output = engine.chronofish_gpu_snapshot_child_boards_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as GpuSnapshot;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineFrontierMaxCycles(requestedDepth: number, timelineCount: number): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_frontier_max_cycles(requestedDepth, timelineCount);
-}
-
-async function engineFrontierPerParentLimit(frontierWidth: number): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_frontier_per_parent_limit(frontierWidth);
-}
-
-async function engineFrontierNextActiveStateLimit(frontierWidth: number, activeStateLimit: number, perParentLimit: number): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_frontier_next_active_state_limit(frontierWidth, activeStateLimit, perParentLimit);
-}
-
-async function engineSearchDepthAtLeastOne(depth: unknown): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_bot_search_depth_at_least_one(typeof depth === "number" ? depth : Number.NaN);
-}
-
-async function engineGpuWorkerSearchConfig(depth: unknown, minDepth: unknown, timeMs: unknown): Promise<GpuWorkerSearchConfig> {
-  const engine = await validationEngine();
-  const output = engine.chronofish_gpu_worker_search_config_json(
-    typeof depth === "number" ? depth : Number.NaN,
-    typeof minDepth === "number" ? minDepth : Number.NaN,
-    typeof timeMs === "number" ? timeMs : Number.NaN
-  );
-  if (!output) {
-    throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-  }
-  return JSON.parse(readWasmString(engine, output)) as GpuWorkerSearchConfig;
-}
-
-async function engineGpuSearchRankingLimit(nodes: unknown): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_search_ranking_limit(typeof nodes === "number" ? nodes : Number.NaN);
-}
-
-async function engineGpuSearchReplyLimit(nodes: unknown): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_search_reply_limit(typeof nodes === "number" ? nodes : Number.NaN);
-}
-
-function engineGpuReplyPressureReplyLimit(engine: ChronofishEngine): number {
-  return engine.chronofish_gpu_reply_pressure_reply_limit();
-}
-
-async function engineGpuSearchValidationLimit(nodes: unknown): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_search_validation_limit(typeof nodes === "number" ? nodes : Number.NaN);
-}
-
-async function engineGpuFullSearchReportedDepth(requestedDepth: number): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_full_search_reported_depth(requestedDepth);
-}
-
-async function engineGpuCompletedReplyShouldSearch(snapshot: GpuSnapshot): Promise<boolean> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_completed_reply_should_search(snapshot.royalCaptureBy ? 1 : 0, Date.now(), gpuDeadlineAt) !== 0;
-}
-
-function gpuDiagnosticRate(numerator: number, denominator: number, engine: ChronofishEngine): number {
-  return engine.chronofish_gpu_diagnostic_rate(numerator, denominator);
-}
-
-function gpuEffectiveBranchingFactor(selectedCount: number, cyclesCompleted: number, engine: ChronofishEngine): number {
-  return engine.chronofish_gpu_effective_branching_factor(selectedCount, cyclesCompleted);
-}
-
-function gpuReportedLatencyMs(latencyMs: number, engine: ChronofishEngine): number {
-  return engine.chronofish_gpu_reported_latency_ms(latencyMs);
-}
-
-function gpuNodesPerSecond(nodes: number, latencyMs: number, engine: ChronofishEngine): number {
-  return engine.chronofish_gpu_nodes_per_second(nodes, latencyMs);
-}
-
-async function engineGpuSearchNodes(nodes: unknown): Promise<number> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_search_nodes(typeof nodes === "number" ? nodes : Number.NaN);
-}
-
-function engineGpuMutationCandidateLimit(engine: ChronofishEngine, candidateCount: number): number {
-  return engine.chronofish_gpu_mutation_candidate_limit(candidateCount);
-}
-
-function engineGpuMutationCandidateWorkgroups(engine: ChronofishEngine, candidateLimit: number): number {
-  return engine.chronofish_gpu_mutation_candidate_workgroups(candidateLimit);
-}
-
-function engineGpuCandidateMaxCandidatesPerBatch(engine: ChronofishEngine, maxBindingSize: number): number {
-  return engine.chronofish_gpu_candidate_max_candidates_per_batch(maxBindingSize);
-}
-
-function engineGpuCandidateSourceBatchSize(engine: ChronofishEngine, maxCandidatesPerBatch: number, targetCount: number): number {
-  return engine.chronofish_gpu_candidate_source_batch_size(maxCandidatesPerBatch, targetCount);
-}
-
-function engineGpuCandidateBatchSourceCount(engine: ChronofishEngine, sourceCount: number, sourceStart: number, sourceBatchSize: number): number {
-  return engine.chronofish_gpu_candidate_batch_source_count(sourceCount, sourceStart, sourceBatchSize);
-}
-
-function engineGpuCandidateBatchCandidateCount(engine: ChronofishEngine, sourceCount: number, targetCount: number): number {
-  return engine.chronofish_gpu_candidate_batch_candidate_count(sourceCount, targetCount);
-}
-
-function engineGpuCandidateScoreWorkgroups(engine: ChronofishEngine, batchCandidateCount: number): number {
-  return engine.chronofish_gpu_candidate_score_workgroups(batchCandidateCount);
-}
-
-function engineGpuReplyScoreWorkgroupsX(engine: ChronofishEngine, rootCount: number): number {
-  return engine.chronofish_gpu_reply_score_workgroups_x(rootCount);
-}
-
-function engineGpuReplyScoreWorkgroupsY(engine: ChronofishEngine, replyCount: number): number {
-  return engine.chronofish_gpu_reply_score_workgroups_y(replyCount);
-}
-
-async function engineGpuCandidateInputs(game: GameSnapshot): Promise<GpuCandidateInputs> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  const bytes = readWasmBytes(engine, engine.chronofish_gpu_candidate_inputs_bytes());
-  if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-    throw new Error("Engine GPU candidate input byte length is not i32-aligned.");
-  }
-  return candidateInputsFromWords(new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT), engine);
-}
-
-async function engineGpuCandidateInputsFromSnapshot(snapshot: GpuSnapshot, color: Color): Promise<GpuCandidateInputs> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ ...snapshot, turn: color }));
-  try {
-    const output = engine.chronofish_gpu_candidate_inputs_snapshot_bytes(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error("Engine GPU candidate input snapshot byte length is not i32-aligned.");
-    }
-    return candidateInputsFromWords(new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT), engine);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-function candidateInputsFromWords(words: Int32Array, engine: ChronofishEngine): GpuCandidateInputs {
-  if (words.length < GPU_CANDIDATE_INPUT_HEADER_I32S) {
-    throw new Error("Engine GPU candidate inputs are truncated.");
-  }
-  const sourceCount = words[0] ?? 0;
-  const targetCount = words[1] ?? 0;
-  const boardCount = words[2] ?? 0;
-  const sourceLength = words[3] ?? -1;
-  const targetLength = words[4] ?? -1;
-  const boardLength = words[5] ?? -1;
-  const mutationBoardLength = words[6] ?? -1;
-  const totalLength = GPU_CANDIDATE_INPUT_HEADER_I32S + sourceLength + targetLength + boardLength + mutationBoardLength;
-  if (
-    sourceCount < 0 || targetCount < 0 || boardCount < 0
-    || sourceLength < 0 || targetLength < 0 || boardLength < 0 || mutationBoardLength < 0
-    || totalLength !== words.length
-  ) {
-    throw new Error("Engine GPU candidate input header is invalid.");
-  }
-  let offset = GPU_CANDIDATE_INPUT_HEADER_I32S;
-  const sources = words.slice(offset, offset + sourceLength);
-  offset += sourceLength;
-  const targets = words.slice(offset, offset + targetLength);
-  offset += targetLength;
-  const boards = words.slice(offset, offset + boardLength);
-  offset += boardLength;
-  const mutationBoards = words.slice(offset, offset + mutationBoardLength);
-  const meta = candidateInputMetaFromEngine(words, engine);
-  return {
-    sourceMeta: meta.sourceMeta,
-    targetMeta: meta.targetMeta,
-    sourceCount,
-    targetCount,
-    boardCount,
-    sources,
-    targets,
-    boards,
-    mutationBoards
-  };
-}
-
-function candidateInputMetaFromEngine(words: Int32Array, engine: ChronofishEngine): { sourceMeta: Position[]; targetMeta: Position[] } {
-  const input = writeWasmBytes(engine, new Uint8Array(words.buffer, words.byteOffset, words.byteLength));
-  try {
-    const output = engine.chronofish_gpu_candidate_input_meta_json_bytes(input.ptr, input.len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as { sourceMeta: Position[]; targetMeta: Position[] };
-  } finally {
-    engine.chronofish_dealloc(input.ptr, input.len);
-  }
-}
-
-async function engineFrontierRoot(game: GameSnapshot, maxBoards: number): Promise<EncodedFrontierRoot> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  const ptr = engine.chronofish_frontier_root_bytes(maxBoards);
-  return readEngineFrontierRoot(engine, ptr);
-}
-
-async function engineFrontierRootFromSnapshot(snapshot: GpuSnapshot, maxBoards: number): Promise<EncodedFrontierRoot> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(snapshot));
-  try {
-    return readEngineFrontierRoot(engine, engine.chronofish_frontier_root_snapshot_bytes(ptr, len, maxBoards));
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function enginePendingPresentBoards(snapshot: GpuSnapshot, color: Color): Promise<PendingBoardRef[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ ...snapshot, turn: color }));
-  try {
-    const output = engine.chronofish_gpu_pending_present_boards_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as PendingBoardRef[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineTurnStatusRecords(snapshot: GpuSnapshot): Promise<Int32Array> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(snapshot));
-  try {
-    const output = engine.chronofish_gpu_turn_status_records_snapshot_bytes(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error("Engine turn-status record byte length is not i32-aligned.");
-    }
-    return new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT).slice();
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineTurnStatusFromWords(words: Int32Array): Promise<TurnStatus> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    records: Array.from(words)
-  }));
-  try {
-    const output = engine.chronofish_gpu_turn_status_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as TurnStatus;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineRankedCandidates(
-  scored: ScoredCandidates,
-  { pendingBoards = [], requirePending = false, limit }: {
-    pendingBoards?: PendingBoardRef[];
-    requirePending?: boolean;
-    limit: number;
-  }
-): Promise<RankedCandidate[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    scores: Array.from(scored.scores),
-    records: Array.from(scored.records),
-    pendingBoards,
-    requirePending,
-    limit
-  }));
-  try {
-    const output = engine.chronofish_gpu_ranked_candidates_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const ranked = JSON.parse(readWasmString(engine, output)) as RankedCandidate[];
-    return Array.isArray(ranked) ? ranked : [];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineMutationSelectedCandidates(ranked: RankedCandidate[], limit: number): Promise<RankedCandidate[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    ranked,
-    limit
-  }));
-  try {
-    const output = engine.chronofish_gpu_mutation_selected_candidates_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const selected = JSON.parse(readWasmString(engine, output)) as RankedCandidate[];
-    return Array.isArray(selected) ? selected : [];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineCandidateIndexes(candidates: RankedCandidate[]): Promise<number[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    candidates
-  }));
-  try {
-    const output = engine.chronofish_gpu_candidate_indexes_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const indexes = JSON.parse(readWasmString(engine, output)) as number[];
-    return Array.isArray(indexes) ? indexes : [];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuScoringSummary(scored: ScoredCandidates, pendingBoards: PendingBoardRef[]): Promise<string> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    scores: Array.from(scored.scores),
-    records: Array.from(scored.records),
-    pendingBoards
-  }));
-  try {
-    const output = engine.chronofish_gpu_scoring_summary_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuMutationSummary(mutated: MutatedCandidate[]): Promise<string> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    statuses: mutated.map((entry) => entry.mutationStatus)
-  }));
-  try {
-    const output = engine.chronofish_gpu_mutation_summary_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuTurnCompletionStep(
-  snapshot: GpuSnapshot,
-  movesLength: number,
-  pendingBoards: PendingBoardRef[],
-  status: TurnStatus,
-  visitedKeys: Iterable<string> = []
-): Promise<GpuTurnCompletionStep> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    snapshot,
-    movesLength,
-    pendingBoards,
-    status,
-    visitedKeys: Array.from(visitedKeys)
-  }));
-  try {
-    const output = engine.chronofish_gpu_turn_completion_step_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as GpuTurnCompletionStep;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineIncompleteTurnPendingPresentBoardCount(
-  status: TurnStatus,
-  pendingBoards: PendingBoardRef[]
-): Promise<number> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ status, pendingBoards }));
-  try {
-    return engine.chronofish_gpu_incomplete_turn_pending_present_board_count_json(ptr, len);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineFullSearchPrecondition(status: TurnStatus): Promise<GpuFullSearchPrecondition> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ status }));
-  try {
-    const output = engine.chronofish_gpu_full_search_precondition_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as GpuFullSearchPrecondition;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineChoiceAgreement(selected: SearchChoice, choices: SearchChoice[], limits: number[]): Promise<number[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    selected,
-    choices,
-    limits
-  }));
-  try {
-    const output = engine.chronofish_gpu_choice_agreement_choices_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const response = JSON.parse(readWasmString(engine, output)) as { agreements?: number[] };
-    return Array.isArray(response.agreements) ? response.agreements : [];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineFrontierChoiceDiagnostics(
-  selected: SearchChoice,
-  choices: SearchChoice[]
-): Promise<{
-  legalChoiceCount: number;
-  legalTacticalChoiceCount: number;
-  selectedMovePrunedRisk: number;
-  selectedMoveTactical: number;
-}> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    selected,
-    choices
-  }));
-  try {
-    const output = engine.chronofish_gpu_frontier_choice_diagnostics_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output));
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineSelectedSearchChoice<T extends SearchChoice>(request: unknown): Promise<(T & { choices: SearchChoice[] }) | null> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(request));
-  try {
-    const output = engine.chronofish_gpu_selected_choice_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as (T & { choices: SearchChoice[] }) | null;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineNonPostableResultSummary(result: unknown): Promise<string> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(result ?? null));
-  try {
-    const output = engine.chronofish_gpu_non_postable_result_summary_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function enginePostableSearchResult(result: unknown): Promise<boolean> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(result ?? null));
-  try {
-    const output = engine.chronofish_gpu_postable_search_result_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output) === "true";
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuSearchFailureSummary(snapshot: GpuSnapshot): Promise<string> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(snapshot));
-  try {
-    const output = engine.chronofish_gpu_search_failure_summary_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return readWasmString(engine, output);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineWithCompletedTurnChoice(
-  result: SearchResult,
-  moves: Move[],
-  gpuSearch = result.gpuSearch,
-  principalVariation?: Move[][]
-): Promise<SearchResult> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    result,
-    moves,
-    gpuSearch,
-    principalVariation
-  }));
-  try {
-    const output = engine.chronofish_gpu_completed_turn_choice_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as SearchResult;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function enginePickCandidateRecords(records: Int32Array, indices: number[]): Promise<Int32Array> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    records: Array.from(records),
-    indices
-  }));
-  try {
-    const output = engine.chronofish_gpu_pick_candidate_records_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const bytes = readWasmBytes(engine, output);
-    if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-      throw new Error("Engine picked candidate record byte length is not i32-aligned.");
-    }
-    return new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT).slice();
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineGpuMutationTurnCode(records: Int32Array): Promise<number> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({ records: Array.from(records) }));
-  try {
-    return engine.chronofish_gpu_mutation_turn_code_json(ptr, len);
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineCandidateIndex(scored: ScoredCandidates, move: Move): Promise<number> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    records: Array.from(scored.records),
-    move
-  }));
-  try {
-    const index = engine.chronofish_gpu_candidate_index_json(ptr, len);
-    if (index < -1) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return index;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineReplyPressureRankedRoots(
-  rankedRoots: RankedCandidate[],
-  pairScores: Int32Array,
-  replyCount: number
-): Promise<RankedCandidate[]> {
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    rankedRoots,
-    pairScores: Array.from(pairScores),
-    replyCount
-  }));
-  try {
-    const output = engine.chronofish_gpu_reply_pressure_ranked_roots_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    const ranked = JSON.parse(readWasmString(engine, output)) as RankedCandidate[];
-    return Array.isArray(ranked) ? ranked : [];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-function readEngineFrontierRoot(engine: ChronofishEngine, ptr: number): EncodedFrontierRoot {
-  if (!ptr) {
-    throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-  }
-  const bytes = readWasmBytes(engine, ptr);
-  if (bytes.byteLength % Int32Array.BYTES_PER_ELEMENT !== 0) {
-    throw new Error("Engine frontier root byte length is not i32-aligned.");
-  }
-  const words = new Int32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Int32Array.BYTES_PER_ELEMENT).slice();
-  return {
-    words,
-    boardCount: words[GPU_FRONTIER_HEADER_BOARD_COUNT] ?? 0,
-    hashLow: words[GPU_FRONTIER_HEADER_HASH_LOW] ?? 0,
-    hashHigh: words[GPU_FRONTIER_HEADER_HASH_HIGH] ?? 0
-  };
-}
-
-async function engineLegalTargets(game: GameSnapshot, position: Position): Promise<LegalTargetSelection> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  return JSON.parse(readWasmString(engine, engine.chronofish_legal_selection_json(
-    position.timelineId,
-    position.time,
-    position.x,
-    position.y
-  ))) as LegalTargetSelection;
-}
-
-async function engineApplyMove(game: GameSnapshot, move: Move): Promise<GameSnapshot> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  if (!engine.chronofish_apply_move(
-    move.from.timelineId,
-    move.from.time,
-    move.from.x,
-    move.from.y,
-    move.to.timelineId,
-    move.to.time,
-    move.to.x,
-    move.to.y
-  )) {
-    throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-  }
-  return JSON.parse(readWasmString(engine, engine.chronofish_snapshot_json())) as GameSnapshot;
-}
-
-async function engineSubmitTurn(game: GameSnapshot): Promise<TurnStatus> {
-  const engine = await validationEngine();
-  loadValidationSnapshot(engine, game);
-  return JSON.parse(readWasmString(engine, engine.chronofish_submit_turn_status_json())) as TurnStatus;
 }
 
 async function searchSingleMoveRepliesOnGpu(
@@ -1286,7 +459,7 @@ async function searchSingleMoveRepliesOnGpu(
     let score = entry.score;
     let principalVariation: Move[][] = [[entry.move]];
     if (!await gpuMutationStatusIsTerminal(entry.mutationStatus)) {
-      const childSnapshot = await engineSnapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
+      const childSnapshot = await engineGpuSearch.engineSnapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
       const reply = await bestReplyOnGpu(device, childSnapshot, nodes);
       if (reply.move) {
         score -= reply.score;
@@ -1297,7 +470,7 @@ async function searchSingleMoveRepliesOnGpu(
       moves: [entry.move],
       score,
       principalVariation,
-      depth: await engineGpuFullSearchReportedDepth(requestedDepth),
+      depth: await engineGpuSearch.engineGpuFullSearchReportedDepth(requestedDepth),
       nodes: mutated.length,
       status: "ok",
       gpu: true,
@@ -1320,19 +493,19 @@ async function completeGpuResultTurn(
   } = {}
 ): Promise<SearchResult | null> {
   if (!result?.moves?.length || result.gpuTerminal) {
-    return result?.moves?.length ? await engineWithCompletedTurnChoice(result, result.moves, result.gpuSearch) : result;
+    return result?.moves?.length ? await engineGpuSearch.engineWithCompletedTurnChoice(result, result.moves, result.gpuSearch) : result;
   }
   const rootTurn = snapshot.turn;
   let current = snapshot;
   const moves: Move[] = [];
   let extraNodes = 0;
-  const searchNodes = await engineGpuSearchNodes(nodes);
+  const searchNodes = await engineGpuSearch.engineGpuSearchNodes(nodes);
   for (const move of result.moves) {
     current = await applyGpuMoveToSnapshot(device, { ...current, turn: rootTurn }, move, { advanceTurn: true });
     moves.push(move);
     if (current.royalCaptureBy) {
       return {
-        ...(await engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
+        ...(await engineGpuSearch.engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
         gpuTerminal: true
       };
     }
@@ -1340,11 +513,11 @@ async function completeGpuResultTurn(
 
   while (true) {
     const status = await turnStatusOnGpu(device, { ...current, turn: rootTurn });
-    const pendingBoards = await enginePendingPresentBoards(current, rootTurn);
-    const completion = await engineGpuTurnCompletionStep(current, moves.length, pendingBoards, status);
+    const pendingBoards = await engineGpuSearch.enginePendingPresentBoards(current, rootTurn);
+    const completion = await engineGpuSearch.engineGpuTurnCompletionStep(current, moves.length, pendingBoards, status);
     if (completion.action === "terminal") {
       return {
-        ...(await engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
+        ...(await engineGpuSearch.engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
         gpuTerminal: true
       };
     }
@@ -1355,15 +528,15 @@ async function completeGpuResultTurn(
       break;
     }
     const stepSnapshot = { ...current, turn: rootTurn };
-    const inputs = await engineGpuCandidateInputsFromSnapshot(stepSnapshot, rootTurn);
+    const inputs = await engineGpuSearch.engineGpuCandidateInputsFromSnapshot(stepSnapshot, rootTurn);
     if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
       break;
     }
     const scored = await scoreCandidatesOnGpu(device, inputs, rootTurn);
-    const ranked = await engineRankedCandidates(scored, {
+    const ranked = await engineGpuSearch.engineRankedCandidates(scored, {
       pendingBoards,
       requirePending: true,
-      limit: await engineGpuSearchRankingLimit(nodes)
+      limit: await engineGpuSearch.engineGpuSearchRankingLimit(nodes)
     });
     if (ranked.length === 0) {
       break;
@@ -1378,29 +551,29 @@ async function completeGpuResultTurn(
     if (!selected) {
       break;
     }
-    current = await engineSnapshotWithGpuChildBoards(stepSnapshot, selected.childBoards, selected.mutationStatus, {
+    current = await engineGpuSearch.engineSnapshotWithGpuChildBoards(stepSnapshot, selected.childBoards, selected.mutationStatus, {
       move: selected.move,
       advanceTurn: true
     });
     moves.push(selected.move);
     if (await gpuMutationStatusIsTerminal(selected.mutationStatus)) {
       return {
-        ...(await engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
-        nodes: (result.nodes ?? 0) + extraNodes,
+        ...(await engineGpuSearch.engineWithCompletedTurnChoice(result, moves, `${result.gpuSearch ?? "gpu"}-turn-complete`)),
+        nodes: await engineGpuSearch.engineGpuAccumulatedSearchNodes(result.nodes, extraNodes),
         gpuTerminal: true
       };
     }
   }
 
   const finalStatus = await turnStatusOnGpu(device, { ...current, turn: rootTurn });
-  const finalPendingBoards = await enginePendingPresentBoards(current, rootTurn);
-  const finalCompletion = await engineGpuTurnCompletionStep(current, moves.length, finalPendingBoards, finalStatus);
+  const finalPendingBoards = await engineGpuSearch.enginePendingPresentBoards(current, rootTurn);
+  const finalCompletion = await engineGpuSearch.engineGpuTurnCompletionStep(current, moves.length, finalPendingBoards, finalStatus);
   if (finalCompletion.action !== "complete" && finalCompletion.action !== "terminal") {
     const fallback = await findCompleteGpuTurn(device, snapshot, rootTurn, searchNodes);
     if (fallback) {
-      return engineWithCompletedTurnChoice({
+      return engineGpuSearch.engineWithCompletedTurnChoice({
         ...result,
-        nodes: (result.nodes ?? 0) + extraNodes + fallback.nodes
+        nodes: await engineGpuSearch.engineGpuAccumulatedSearchNodes(result.nodes, extraNodes, fallback.nodes)
       }, fallback.moves, `${result.gpuSearch ?? "gpu"}-turn-fallback`);
     }
     return {
@@ -1408,12 +581,12 @@ async function completeGpuResultTurn(
       moves: [],
       score: result.score,
       depth: result.depth,
-      nodes: (result.nodes ?? 0) + extraNodes,
+      nodes: await engineGpuSearch.engineGpuAccumulatedSearchNodes(result.nodes, extraNodes),
       gpu: true,
       gpuSnapshot: result.gpuSnapshot,
       gpuSearch: `${result.gpuSearch ?? "gpu"}-turn-incomplete`,
       incompleteMoves: moves,
-      pendingPresentBoardCount: await engineIncompleteTurnPendingPresentBoardCount(finalStatus, finalPendingBoards),
+      pendingPresentBoardCount: await engineGpuSearch.engineIncompleteTurnPendingPresentBoardCount(finalStatus, finalPendingBoards),
       choices: []
     };
   }
@@ -1430,9 +603,9 @@ async function completeGpuResultTurn(
     }
   }
 
-  return engineWithCompletedTurnChoice({
+  return engineGpuSearch.engineWithCompletedTurnChoice({
     ...result,
-    nodes: (result.nodes ?? 0) + extraNodes
+    nodes: await engineGpuSearch.engineGpuAccumulatedSearchNodes(result.nodes, extraNodes)
   }, moves, moves.length > result.moves.length ? `${result.gpuSearch ?? "gpu"}-turn-complete` : result.gpuSearch, principalVariation);
 }
 
@@ -1445,10 +618,10 @@ async function completedGpuReplyTurn(
     randomSeed?: number | undefined;
   }
 ): Promise<Move[]> {
-  if (!(await engineGpuCompletedReplyShouldSearch(snapshot))) {
+  if (!(await engineGpuSearch.engineGpuCompletedReplyShouldSearch(snapshot))) {
     return [];
   }
-  const searchNodes = await engineGpuSearchNodes(nodes);
+  const searchNodes = await engineGpuSearch.engineGpuSearchNodes(nodes);
   const reply = await bestReplyOnGpu(device, snapshot, searchNodes);
   if (!reply.move) {
     return [];
@@ -1473,9 +646,9 @@ async function findCompleteGpuTurn(
   moves: Move[] = [],
   visited = new Set<string>()
 ): Promise<{ moves: Move[]; nodes: number } | null> {
-  const pendingBoards = await enginePendingPresentBoards(snapshot, rootTurn);
+  const pendingBoards = await engineGpuSearch.enginePendingPresentBoards(snapshot, rootTurn);
   const status = await turnStatusOnGpu(device, { ...snapshot, turn: rootTurn });
-  const completion = await engineGpuTurnCompletionStep(snapshot, moves.length, pendingBoards, status, visited);
+  const completion = await engineGpuSearch.engineGpuTurnCompletionStep(snapshot, moves.length, pendingBoards, status, visited);
   if (completion.action === "terminal" || completion.action === "complete") {
     return { moves, nodes: 0 };
   }
@@ -1487,20 +660,20 @@ async function findCompleteGpuTurn(
   nextVisited.add(completion.stateKey);
 
   const stepSnapshot = { ...snapshot, turn: rootTurn };
-  const inputs = await engineGpuCandidateInputsFromSnapshot(stepSnapshot, rootTurn);
+  const inputs = await engineGpuSearch.engineGpuCandidateInputsFromSnapshot(stepSnapshot, rootTurn);
   if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
     return null;
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, rootTurn);
-  const ranked = await engineRankedCandidates(scored, {
+  const ranked = await engineGpuSearch.engineRankedCandidates(scored, {
     pendingBoards,
     requirePending: true,
-    limit: await engineGpuSearchReplyLimit(nodes)
+    limit: await engineGpuSearch.engineGpuSearchReplyLimit(nodes)
   });
   const mutated = await mutateRankedCandidatesOnGpu(device, inputs, scored.records, ranked, { readChildren: true });
   const supported = await supportedMutatedCandidates(mutated);
   for (const candidate of supported) {
-    const child = await engineSnapshotWithGpuChildBoards(stepSnapshot, candidate.childBoards, candidate.mutationStatus, {
+    const child = await engineGpuSearch.engineSnapshotWithGpuChildBoards(stepSnapshot, candidate.childBoards, candidate.mutationStatus, {
       move: candidate.move,
       advanceTurn: true
     });
@@ -1525,27 +698,31 @@ async function applyGpuMoveToSnapshot(
   move: Move,
   { advanceTurn = false }: { advanceTurn?: boolean } = {}
 ): Promise<GpuSnapshot> {
-  const inputs = await engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
+  const inputs = await engineGpuSearch.engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
   if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
     throw new Error("No GPU move candidates are available.");
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
-  const index = await engineCandidateIndex(scored, move);
-  if (index < 0 || (scored.scores[index] ?? -2147483647) <= -2147480000) {
+  const index = await engineGpuSearch.engineCandidateIndex(scored, move);
+  if (index < 0) {
     throw new Error("GPU rejected that move.");
   }
-  const candidateRecords = await enginePickCandidateRecords(scored.records, [index]);
-  const ranked = [{ move, index: 0, score: scored.scores[index] ?? 0 }];
+  const score = await engineGpuSearch.engineCandidateScore(scored.scores, index, -2147483647);
+  if (await engineGpuSearch.engineCandidateScoreIsRejected(score)) {
+    throw new Error("GPU rejected that move.");
+  }
+  const candidateRecords = await engineGpuSearch.enginePickCandidateRecords(scored.records, [index]);
+  const ranked = [{ move, index: 0, score }];
   const mutated = await mutateRankedCandidatesOnGpu(device, inputs, candidateRecords, ranked, { readChildren: true });
   const [selected] = await supportedMutatedCandidates(mutated, { limit: 1 });
   if (!selected) {
     throw new Error("GPU move mutation is unsupported for that move.");
   }
-  return await engineSnapshotWithGpuChildBoards(snapshot, selected.childBoards, selected.mutationStatus, { move, advanceTurn });
+  return await engineGpuSearch.engineSnapshotWithGpuChildBoards(snapshot, selected.childBoards, selected.mutationStatus, { move, advanceTurn });
 }
 
 async function turnStatusOnGpu(device: GPUDevice, snapshot: GpuSnapshot): Promise<TurnStatus> {
-  const boardRecords = await engineTurnStatusRecords(snapshot);
+  const boardRecords = await engineGpuSearch.engineTurnStatusRecords(snapshot);
   const boardBuffer = storageBuffer(device, boardRecords, GPUBufferUsage.STORAGE);
   const resultBuffer = device.createBuffer({
     size: align4(4 * Int32Array.BYTES_PER_ELEMENT),
@@ -1571,7 +748,7 @@ async function turnStatusOnGpu(device: GPUDevice, snapshot: GpuSnapshot): Promis
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
   const result = await readInts(device, resultBuffer, 4 * Int32Array.BYTES_PER_ELEMENT);
-  return engineTurnStatusFromWords(result);
+  return engineGpuSearch.engineTurnStatusFromWords(result);
 }
 
 async function tryFullGpuSearch(
@@ -1580,15 +757,15 @@ async function tryFullGpuSearch(
   inputs: GpuCandidateInputs,
   { requestedDepth, nodes, turnStatus, temperature = 0, randomSeed = 0 }: { requestedDepth: number; nodes: number; turnStatus: TurnStatus; temperature?: number; randomSeed?: number }
 ): Promise<SearchResult> {
-  const precondition = await engineFullSearchPrecondition(turnStatus);
+  const precondition = await engineGpuSearch.engineFullSearchPrecondition(turnStatus);
   if (!precondition.supported) {
     throw new Error(precondition.error ?? "Full GPU search is not supported for this turn status.");
   }
 
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
-  const ranked = await engineRankedCandidates(scored, {
+  const ranked = await engineGpuSearch.engineRankedCandidates(scored, {
     requirePending: false,
-    limit: await engineGpuSearchRankingLimit(nodes)
+    limit: await engineGpuSearch.engineGpuSearchRankingLimit(nodes)
   });
   if (ranked.length === 0) {
     throw new Error("Full GPU search found no candidate moves.");
@@ -1601,11 +778,11 @@ async function tryFullGpuSearch(
   }
 
   const candidates: SearchResult[] = [];
-  for (const entry of await supportedMutatedCandidates(mutated, { limit: await engineGpuSearchValidationLimit(nodes) })) {
+  for (const entry of await supportedMutatedCandidates(mutated, { limit: await engineGpuSearch.engineGpuSearchValidationLimit(nodes) })) {
     let score = entry.score;
     let principalVariation: Move[][] = [[entry.move]];
     if (requestedDepth > 1 && !await gpuMutationStatusIsTerminal(entry.mutationStatus)) {
-      const childSnapshot = await engineSnapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
+      const childSnapshot = await engineGpuSearch.engineSnapshotWithGpuChildBoards(snapshot, entry.childBoards, entry.mutationStatus, { move: entry.move, advanceTurn: true });
       const reply = await bestReplyOnGpu(device, childSnapshot, nodes);
       score -= reply.score;
       if (reply.move) {
@@ -1616,7 +793,7 @@ async function tryFullGpuSearch(
       moves: [entry.move],
       score,
       principalVariation,
-      depth: await engineGpuFullSearchReportedDepth(requestedDepth),
+      depth: await engineGpuSearch.engineGpuFullSearchReportedDepth(requestedDepth),
       nodes: supported.length,
       status: "ok",
       gpu: true,
@@ -1635,13 +812,13 @@ async function tryFullGpuSearch(
 }
 
 async function bestReplyOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: number): Promise<ReplySearchResult> {
-  const inputs = await engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
+  const inputs = await engineGpuSearch.engineGpuCandidateInputsFromSnapshot(snapshot, snapshot.turn);
   if (inputs.sourceCount === 0 || inputs.targetCount === 0) {
     return { score: 0 };
   }
   const scored = await scoreCandidatesOnGpu(device, inputs, snapshot.turn);
-  const pendingBoards = await enginePendingPresentBoards(snapshot, snapshot.turn);
-  const [best] = await engineRankedCandidates(scored, {
+  const pendingBoards = await engineGpuSearch.enginePendingPresentBoards(snapshot, snapshot.turn);
+  const [best] = await engineGpuSearch.engineRankedCandidates(scored, {
     pendingBoards,
     requirePending: true,
     limit: 1
@@ -1650,7 +827,7 @@ async function bestReplyOnGpu(device: GPUDevice, snapshot: GpuSnapshot, nodes: n
 }
 
 async function selectSearchCandidate<T extends SearchChoice>(candidates: T[], temperature = 0, randomSeed = 0): Promise<(T & { choices: SearchChoice[] }) | null> {
-  return engineSelectedSearchChoice<T>({
+  return engineGpuSearch.engineSelectedSearchChoice<T>({
     temperature,
     randomSeed,
     candidates
@@ -1673,46 +850,30 @@ async function supportedMutatedCandidates(
     return [];
   }
   const requireChildBoards = options.requireChildBoards !== false;
-  const engine = await validationEngine();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify({
-    candidates: candidates.map((candidate) => ({
-      mutationStatus: candidate.mutationStatus,
-      hasChildBoards: Boolean(candidate.childBoards)
-    })),
-    limit: options.limit,
+  const indexes = await engineGpuSearch.engineSupportedMutationCandidateIndexes(
+    candidates,
+    options.limit,
     requireChildBoards
-  }));
-  try {
-    const output = engine.chronofish_gpu_supported_mutation_candidate_indexes_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+  );
+  const supported: MutatedCandidate[] = [];
+  for (const index of indexes) {
+    const candidate = candidates[index];
+    if (candidate) {
+      supported.push(candidate);
     }
-    const indexes = JSON.parse(readWasmString(engine, output)) as number[];
-    const supported: MutatedCandidate[] = [];
-    for (const index of indexes) {
-      const candidate = candidates[index];
-      if (candidate) {
-        supported.push(candidate);
-      }
-    }
-    return supported;
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
   }
+  return supported;
 }
 
 async function gpuMutationStatusIsTerminal(status: number): Promise<boolean> {
-  const engine = await validationEngine();
-  return engine.chronofish_gpu_mutation_status_is_terminal(status) !== 0;
+  return engineGpuSearch.engineGpuMutationStatusIsTerminal(status);
 }
 
-let gpuDeadlineAt = 0;
-
 async function scoreCandidatesOnGpu(device: GPUDevice, inputs: GpuCandidateInputs, turn: Color): Promise<ScoredCandidates> {
-  const engine = await validationEngine();
+  const engine = await engineGpuSearch.validationEngine();
   const candidateCount = inputs.sourceCount * inputs.targetCount;
   const maxBindingSize = device.limits?.maxStorageBufferBindingSize ?? 128 * 1024 * 1024;
-  const maxCandidatesPerBatch = engineGpuCandidateMaxCandidatesPerBatch(engine, maxBindingSize);
+  const maxCandidatesPerBatch = engineGpuSearch.engineGpuCandidateMaxCandidatesPerBatch(engine, maxBindingSize);
   if (inputs.targetCount > maxCandidatesPerBatch) {
     throw new Error(`GPU move generation target set is too large for this device (${inputs.targetCount} targets).`);
   }
@@ -1721,11 +882,11 @@ async function scoreCandidatesOnGpu(device: GPUDevice, inputs: GpuCandidateInput
   const pipeline = await createComputePipelineChecked(device, "score_candidates", GPU_MOVEGEN_SHADER, "score_candidates");
   const records = new Int32Array(candidateCount * GPU_CANDIDATE_STRIDE);
   const scores = new Int32Array(candidateCount);
-  const sourceBatchSize = engineGpuCandidateSourceBatchSize(engine, maxCandidatesPerBatch, inputs.targetCount);
+  const sourceBatchSize = engineGpuSearch.engineGpuCandidateSourceBatchSize(engine, maxCandidatesPerBatch, inputs.targetCount);
 
   for (let sourceStart = 0; sourceStart < inputs.sourceCount; sourceStart += sourceBatchSize) {
-    const sourceCount = engineGpuCandidateBatchSourceCount(engine, inputs.sourceCount, sourceStart, sourceBatchSize);
-    const batchCandidateCount = engineGpuCandidateBatchCandidateCount(engine, sourceCount, inputs.targetCount);
+    const sourceCount = engineGpuSearch.engineGpuCandidateBatchSourceCount(engine, inputs.sourceCount, sourceStart, sourceBatchSize);
+    const batchCandidateCount = engineGpuSearch.engineGpuCandidateBatchCandidateCount(engine, sourceCount, inputs.targetCount);
     const sourceBuffer = storageBuffer(
       device,
       inputs.sources.subarray(sourceStart * GPU_SOURCE_STRIDE, (sourceStart + sourceCount) * GPU_SOURCE_STRIDE),
@@ -1755,7 +916,7 @@ async function scoreCandidatesOnGpu(device: GPUDevice, inputs: GpuCandidateInput
     const pass = encoder.beginComputePass();
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
-    pass.dispatchWorkgroups(engineGpuCandidateScoreWorkgroups(engine, batchCandidateCount));
+    pass.dispatchWorkgroups(engineGpuSearch.engineGpuCandidateScoreWorkgroups(engine, batchCandidateCount));
     pass.end();
     device.queue.submit([encoder.finish()]);
     await device.queue.onSubmittedWorkDone();
@@ -1782,13 +943,13 @@ async function mutateRankedCandidatesOnGpu(
   ranked: RankedCandidate[],
   { readChildren = false }: { readChildren?: boolean } = {}
 ): Promise<MutatedCandidate[]> {
-  const engine = await validationEngine();
-  const limit = engineGpuMutationCandidateLimit(engine, ranked.length);
+  const engine = await engineGpuSearch.validationEngine();
+  const limit = engineGpuSearch.engineGpuMutationCandidateLimit(engine, ranked.length);
   if (limit === 0 || !inputs.mutationBoards || inputs.boardCount === 0) {
     return [];
   }
-  const selected = await engineMutationSelectedCandidates(ranked, limit);
-  const candidateRecords = await enginePickCandidateRecords(allCandidateRecords, await engineCandidateIndexes(selected));
+  const selected = await engineGpuSearch.engineMutationSelectedCandidates(ranked, limit);
+  const candidateRecords = await engineGpuSearch.enginePickCandidateRecords(allCandidateRecords, await engineGpuSearch.engineCandidateIndexes(selected));
   const candidateBuffer = storageBuffer(device, candidateRecords, GPUBufferUsage.STORAGE);
   const boardBuffer = storageBuffer(device, inputs.mutationBoards, GPUBufferUsage.STORAGE);
   const childBoardBuffer = device.createBuffer({
@@ -1803,7 +964,7 @@ async function mutateRankedCandidatesOnGpu(
   const view = new DataView(params);
   view.setUint32(0, limit, true);
   view.setUint32(4, inputs.boardCount, true);
-  view.setUint32(8, await engineGpuMutationTurnCode(candidateRecords), true);
+  view.setUint32(8, await engineGpuSearch.engineGpuMutationTurnCode(candidateRecords), true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
   const pipeline = await createComputePipelineChecked(device, "mutate_candidates", GPU_MUTATE_SHADER, "mutate_candidates");
   const encoder = device.createCommandEncoder();
@@ -1815,7 +976,7 @@ async function mutateRankedCandidatesOnGpu(
   const pass = encoder.beginComputePass();
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
-  pass.dispatchWorkgroups(engineGpuMutationCandidateWorkgroups(engine, limit));
+  pass.dispatchWorkgroups(engineGpuSearch.engineGpuMutationCandidateWorkgroups(engine, limit));
   pass.end();
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
@@ -1828,9 +989,10 @@ async function mutateRankedCandidatesOnGpu(
   childBoardBuffer.destroy();
   statusBuffer.destroy();
   paramsBuffer.destroy();
+  const mutationStatuses = await engineGpuSearch.engineGpuMutationStatuses(statuses, selected.length);
   return selected.map((entry, index) => ({
     ...entry,
-    mutationStatus: statuses[index] ?? 0,
+    mutationStatus: mutationStatuses[index]!,
     childBoards: childBoards?.subarray(index * GPU_MUTATION_CHILD_STRIDE, (index + 1) * GPU_MUTATION_CHILD_STRIDE) ?? null
   }));
 }
@@ -1843,9 +1005,9 @@ async function scoreRootCandidatesWithReplies(
   allReplyRecords: Int32Array,
   allReplyScores: Int32Array
 ): Promise<RankedCandidate[]> {
-  const engine = await validationEngine();
-  const replyLimit = engineGpuReplyPressureReplyLimit(engine);
-  const rankedReplies = await engineRankedCandidates(
+  const engine = await engineGpuSearch.validationEngine();
+  const replyLimit = engineGpuSearch.engineGpuReplyPressureReplyLimit(engine);
+  const rankedReplies = await engineGpuSearch.engineRankedCandidates(
     { records: allReplyRecords, scores: allReplyScores },
     { requirePending: false, limit: replyLimit }
   );
@@ -1853,10 +1015,10 @@ async function scoreRootCandidatesWithReplies(
     return rankedRoots;
   }
 
-  const rootRecords = await enginePickCandidateRecords(allRootRecords, rankedRoots.map((entry) => entry.index));
-  const replyRecords = await enginePickCandidateRecords(allReplyRecords, rankedReplies.map((entry) => entry.index));
-  const rootScores = new Int32Array(rankedRoots.map((entry) => allRootScores[entry.index] ?? -2147483647));
-  const replyScores = new Int32Array(rankedReplies.map((entry) => allReplyScores[entry.index] ?? -2147483647));
+  const rootRecords = await engineGpuSearch.enginePickCandidateRecords(allRootRecords, await engineGpuSearch.engineCandidateIndexes(rankedRoots));
+  const replyRecords = await engineGpuSearch.enginePickCandidateRecords(allReplyRecords, await engineGpuSearch.engineCandidateIndexes(rankedReplies));
+  const rootScores = await engineGpuSearch.engineCandidateScores(allRootScores, rankedRoots, -2147483647);
+  const replyScores = await engineGpuSearch.engineCandidateScores(allReplyScores, rankedReplies, -2147483647);
   const pairCount = rankedRoots.length * rankedReplies.length;
   const rootBuffer = storageBuffer(device, rootRecords, GPUBufferUsage.STORAGE);
   const replyBuffer = storageBuffer(device, replyRecords, GPUBufferUsage.STORAGE);
@@ -1882,15 +1044,15 @@ async function scoreRootCandidatesWithReplies(
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(
-    engineGpuReplyScoreWorkgroupsX(engine, rankedRoots.length),
-    engineGpuReplyScoreWorkgroupsY(engine, rankedReplies.length)
+    engineGpuSearch.engineGpuReplyScoreWorkgroupsX(engine, rankedRoots.length),
+    engineGpuSearch.engineGpuReplyScoreWorkgroupsY(engine, rankedReplies.length)
   );
   pass.end();
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
   const pairScores = await readInts(device, pairBuffer, pairCount * Int32Array.BYTES_PER_ELEMENT);
 
-  return engineReplyPressureRankedRoots(rankedRoots, pairScores, rankedReplies.length);
+  return engineGpuSearch.engineReplyPressureRankedRoots(rankedRoots, pairScores, rankedReplies.length);
 }
 
 async function getGpuDevice(): Promise<GPUDevice | null> {
@@ -2004,7 +1166,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       if (!position) {
         throw new Error("GPU legal target request is missing a source position.");
       }
-      const selection = await engineLegalTargets(clientGame, position);
+      const selection = await engineGpuSearch.engineLegalTargets(clientGame, position);
       self.postMessage({ id, ok: true, selection });
       return;
     }
@@ -2013,13 +1175,13 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       if (!move) {
         throw new Error("GPU move request is missing a move.");
       }
-      const game = await engineApplyMove(clientGame, move);
+      const game = await engineGpuSearch.engineApplyMove(clientGame, move);
       self.postMessage({ id, ok: true, game });
       return;
     }
 
     if (clientGame && type === "submitTurn") {
-      const status = await engineSubmitTurn(clientGame);
+      const status = await engineGpuSearch.engineSubmitTurn(clientGame);
       self.postMessage({ id, ok: true, status });
       return;
     }
@@ -2032,15 +1194,15 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       throw new Error("GPU worker calculations require a client game snapshot.");
     }
 
-    const snapshotOverride = await engineGpuSnapshot(clientGame);
+    const snapshotOverride = await engineGpuSearch.engineGpuSnapshot(clientGame);
     if (!snapshotOverride) {
       throw new Error("GPU worker calculations require a client game snapshot.");
     }
 
-    const searchConfig = await engineGpuWorkerSearchConfig(depth, minDepth, timeMs);
-    gpuDeadlineAt = searchConfig.deadlineDelayMs == null
+    const searchConfig = await engineGpuSearch.engineGpuWorkerSearchConfig(depth, minDepth, timeMs);
+    engineGpuSearch.setGpuSearchDeadline(searchConfig.deadlineDelayMs == null
       ? Number.POSITIVE_INFINITY
-      : Date.now() + searchConfig.deadlineDelayMs;
+      : Date.now() + searchConfig.deadlineDelayMs);
     try {
       const gpuResult = await tryGpuSearch({
         depth: searchConfig.requestedDepth,
@@ -2053,8 +1215,8 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         temperature,
         randomSeed
       });
-      if (gpuResult && await enginePostableSearchResult(gpuResult)) {
-        const validatedResult = await validateSearchResultBeforePost(snapshotOverride, gpuResult, clientGame);
+      if (gpuResult && await engineGpuSearch.enginePostableSearchResult(gpuResult)) {
+        const validatedResult = await engineGpuSearch.validateSearchResultBeforePost(snapshotOverride, gpuResult, clientGame);
         if (!validatedResult) {
           throw new Error("GPU search produced a turn that failed authoritative WASM replay.");
         }
@@ -2065,16 +1227,16 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         return;
       }
       if (gpuResult) {
-        throw new Error(`GPU search produced a non-postable result (${await engineNonPostableResultSummary(gpuResult)})`);
+        throw new Error(`GPU search produced a non-postable result (${await engineGpuSearch.engineNonPostableResultSummary(gpuResult)})`);
       }
     } catch (gpuError) {
       console.debug?.("GPU search failed", gpuError);
       if (gpuMode === "full") {
         try {
           const hybridResult = await tryGpuSearch({
-            depth: requestedDepth,
+            depth: searchConfig.requestedDepth,
             nodes,
-            timeMs: searchTimeMs,
+            timeMs: searchConfig.searchTimeMs,
             gpuMode: "hybrid",
             disableNeural,
             snapshotOverride,
@@ -2082,8 +1244,8 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
             temperature,
             randomSeed
           });
-          if (hybridResult && await enginePostableSearchResult(hybridResult)) {
-            const validatedResult = await validateSearchResultBeforePost(snapshotOverride, hybridResult, clientGame);
+          if (hybridResult && await engineGpuSearch.enginePostableSearchResult(hybridResult)) {
+            const validatedResult = await engineGpuSearch.validateSearchResultBeforePost(snapshotOverride, hybridResult, clientGame);
             if (!validatedResult) {
               throw new Error("Hybrid GPU search produced a turn that failed authoritative WASM replay.", { cause: gpuError });
             }
@@ -2111,7 +1273,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
 
 async function gpuSearchFailureSummary(snapshot: GpuSnapshot): Promise<string> {
   try {
-    return await engineGpuSearchFailureSummary(snapshot);
+    return await engineGpuSearch.engineGpuSearchFailureSummary(snapshot);
   } catch (error) {
     return `summary failed: ${errorMessage(error)}`;
   }

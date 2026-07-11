@@ -1,4 +1,4 @@
-import { readWasmString, writeWasmString } from "./engine-io.js";
+import { engineGpuSearchColorCode } from "./engine-gpu-search.js";
 import type { BoardSquares, ChronofishEngine, Color, EnPassantTarget, MoveOrigin, Position, TimelineOwner } from "./types.js";
 
 export interface GpuBoardSnapshot {
@@ -55,16 +55,7 @@ export function colorCode(color: Color | string | number | null | undefined, eng
   }
   if (typeof color === "string") {
     if (engine) {
-      const input = writeWasmString(engine, color);
-      try {
-        const output = engine.chronofish_gpu_search_color_code_json(input.ptr, input.len);
-        if (!output) {
-          throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-        }
-        return Number.parseInt(readWasmString(engine, output), 10);
-      } finally {
-        engine.chronofish_dealloc(input.ptr, input.len);
-      }
+      return engineGpuSearchColorCode(engine, color);
     }
     const normalized = color.toLowerCase();
     if (normalized === "black") {

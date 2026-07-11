@@ -1,4 +1,6 @@
 use super::{training, GpuKernel, GpuKernelSet, WgslShader};
+#[cfg(all(not(target_arch = "wasm32"), feature = "neural-wgpu"))]
+use crate::cpu::{AiSearchResult, MoveStep};
 use crate::{
     cpu::{search_deadline, SearchOptions, ValueEvaluator},
     wasm_api::parse_game_snapshot,
@@ -166,6 +168,14 @@ pub struct FrontierTuning {
 pub struct FrontierSelectionPlan {
     pub candidate_capacity: usize,
     pub selection_capacity: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrontierOrchestrationPlan {
+    pub max_cycles: usize,
+    pub per_parent_limit: i32,
+    pub state_limits: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,6 +373,13 @@ struct GpuTimelineJson {
     label: Option<String>,
     owner: String,
     boards: Vec<GpuBoardJson>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuSnapshotSearchSize {
+    board_count: usize,
+    timeline_count: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -668,6 +685,46 @@ pub fn frontier_next_active_state_limit(
 ) -> usize {
     let per_parent_limit = per_parent_limit.max(1) as usize;
     frontier_width.min(active_state_limit.saturating_mul(per_parent_limit))
+}
+
+pub fn frontier_orchestration_plan(
+    requested_depth: i32,
+    timeline_count: usize,
+    frontier_width: usize,
+) -> FrontierOrchestrationPlan {
+    let max_cycles = frontier_max_cycles(requested_depth, timeline_count).max(0) as usize;
+    let per_parent_limit = frontier_per_parent_limit(frontier_width);
+    let mut active_state_limit = 1;
+    let mut state_limits = Vec::with_capacity(max_cycles.saturating_add(1));
+    for _ in 0..max_cycles {
+        state_limits.push(active_state_limit);
+        active_state_limit =
+            frontier_next_active_state_limit(frontier_width, active_state_limit, per_parent_limit);
+    }
+    state_limits.push(active_state_limit);
+    FrontierOrchestrationPlan {
+        max_cycles,
+        per_parent_limit,
+        state_limits,
+    }
+}
+
+pub fn frontier_orchestration_plan_json(request_json: &str) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Request {
+        requested_depth: i32,
+        timeline_count: usize,
+        frontier_width: usize,
+    }
+    let request = serde_json::from_str::<Request>(request_json)
+        .map_err(|error| format!("GPU frontier orchestration request is invalid: {error}"))?;
+    serde_json::to_string(&frontier_orchestration_plan(
+        request.requested_depth,
+        request.timeline_count,
+        request.frontier_width,
+    ))
+    .map_err(|error| format!("GPU frontier orchestration response failed to encode: {error}"))
 }
 
 pub fn gpu_candidate_move_from_record(records: &[i32], index: usize) -> GpuCandidateMove {
@@ -1366,6 +1423,21 @@ pub fn gpu_frontier_root_i32s_from_snapshot_json(
     Ok(encode_frontier_root_from_gpu_snapshot_json(snapshot_json, max_boards)?.words)
 }
 
+pub fn gpu_snapshot_search_size_json(snapshot_json: &str) -> Result<String, String> {
+    let snapshot = serde_json::from_str::<GpuSnapshotJson>(snapshot_json)
+        .map_err(|error| format!("GPU snapshot search-size JSON is invalid: {error}"))?;
+    let size = GpuSnapshotSearchSize {
+        board_count: snapshot
+            .timelines
+            .iter()
+            .map(|timeline| timeline.boards.len())
+            .sum(),
+        timeline_count: snapshot.timelines.len(),
+    };
+    serde_json::to_string(&size)
+        .map_err(|error| format!("GPU snapshot search-size response failed to encode: {error}"))
+}
+
 pub fn gpu_pending_present_boards_json_from_snapshot_json(
     snapshot_json: &str,
 ) -> Result<String, String> {
@@ -1686,6 +1758,28 @@ pub fn gpu_candidate_indexes_json(request_json: &str) -> Result<String, String> 
         .map_err(|error| format!("GPU candidate indexes response failed to encode: {error}"))
 }
 
+pub fn gpu_candidate_scores_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuCandidateScoresRequest>(request_json)
+        .map_err(|error| format!("GPU candidate scores request is invalid: {error}"))?;
+    let fallback = request.fallback.unwrap_or(i32::MIN + 1);
+    let scores = request
+        .candidates
+        .iter()
+        .map(|candidate| {
+            let index = gpu_candidate_json_index(candidate)?;
+            let index = usize::try_from(index)
+                .map_err(|_| "GPU candidate score index is negative.".to_string())?;
+            Ok(request.scores.get(index).copied().unwrap_or(fallback))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    serde_json::to_string(&scores)
+        .map_err(|error| format!("GPU candidate scores response failed to encode: {error}"))
+}
+
+pub fn gpu_candidate_score_is_rejected(score: i32) -> bool {
+    score <= -2_147_480_000
+}
+
 struct GpuRankedCandidateEntries<'a> {
     records: &'a [i32],
     ranked: Vec<(usize, i32)>,
@@ -1847,6 +1941,31 @@ pub fn gpu_mutation_summary_json(request_json: &str) -> Result<String, String> {
     Ok(gpu_mutation_summary_from_i32s(&request.statuses))
 }
 
+pub fn gpu_mutation_statuses_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuMutationStatusesRequest>(request_json)
+        .map_err(|error| format!("GPU mutation statuses JSON request is invalid: {error}"))?;
+    let statuses = (0..request.candidate_count)
+        .map(|index| request.statuses.get(index).copied().unwrap_or(0))
+        .collect::<Vec<_>>();
+    serde_json::to_string(&statuses)
+        .map_err(|error| format!("GPU mutation statuses JSON response failed to encode: {error}"))
+}
+
+pub fn gpu_frontier_readback_summary_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuFrontierReadbackSummaryRequest>(request_json)
+        .map_err(|error| format!("GPU frontier readback summary request is invalid: {error}"))?;
+    let summary = GpuFrontierReadbackSummary {
+        nodes: request.counters.get(3).copied().unwrap_or(0),
+        selected_count: request.counters.get(1).copied().unwrap_or(0),
+        candidate_overflow: request.counters.get(2).copied().unwrap_or(0) != 0,
+        tactical_candidates: request.counters.get(4).copied().unwrap_or(0),
+        selected_tactical_candidates: request.counters.get(5).copied().unwrap_or(0),
+    };
+    serde_json::to_string(&summary).map_err(|error| {
+        format!("GPU frontier readback summary response failed to encode: {error}")
+    })
+}
+
 #[derive(serde::Deserialize)]
 struct GpuPendingBoardRefJson {
     #[serde(rename = "timelineId")]
@@ -1895,6 +2014,12 @@ struct GpuChoiceAgreementChoicesRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct GpuPolicyChoiceAgreementDiagnosticsRequest {
+    selected: serde_json::Value,
+    choices: Vec<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GpuSnapshotChildBoardsRequest {
     snapshot: GpuSnapshotJson,
@@ -1908,6 +2033,14 @@ struct GpuSnapshotChildBoardsRequest {
 #[derive(serde::Serialize)]
 struct GpuChoiceAgreementResponse {
     agreements: Vec<i32>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuPolicyChoiceAgreementDiagnostics {
+    top_policy_choice_agreement: i32,
+    top5_policy_choice_agreement: i32,
+    top20_policy_choice_agreement: i32,
 }
 
 #[derive(serde::Deserialize)]
@@ -1973,6 +2106,13 @@ struct GpuCandidateIndexesRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct GpuCandidateScoresRequest {
+    scores: Vec<i32>,
+    candidates: Vec<serde_json::Value>,
+    fallback: Option<i32>,
+}
+
+#[derive(serde::Deserialize)]
 struct GpuTurnStatusRequest {
     records: Vec<i32>,
 }
@@ -1993,6 +2133,28 @@ struct GpuFullSearchPreconditionResponse {
 #[derive(serde::Deserialize)]
 struct GpuMutationSummaryRequest {
     statuses: Vec<i32>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuMutationStatusesRequest {
+    statuses: Vec<i32>,
+    candidate_count: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct GpuFrontierReadbackSummaryRequest {
+    counters: Vec<u32>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GpuFrontierReadbackSummary {
+    nodes: u32,
+    selected_count: u32,
+    candidate_overflow: bool,
+    tactical_candidates: u32,
+    selected_tactical_candidates: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -2215,6 +2377,28 @@ pub fn gpu_choice_agreement_choices_json(request_json: &str) -> Result<String, S
     let agreements = gpu_choice_agreements(&selected, &choices, &request.limits);
     serde_json::to_string(&GpuChoiceAgreementResponse { agreements })
         .map_err(|error| format!("GPU choice agreement response failed to encode: {error}"))
+}
+
+pub fn gpu_policy_choice_agreement_diagnostics_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<GpuPolicyChoiceAgreementDiagnosticsRequest>(request_json)
+        .map_err(|error| {
+            format!("GPU policy choice agreement diagnostics request is invalid: {error}")
+        })?;
+    let selected = gpu_choice_moves(&request.selected)?;
+    let choices = request
+        .choices
+        .iter()
+        .map(gpu_choice_moves)
+        .collect::<Result<Vec<_>, _>>()?;
+    let agreements = gpu_choice_agreements(&selected, &choices, &[1, 5, 20]);
+    let diagnostics = GpuPolicyChoiceAgreementDiagnostics {
+        top_policy_choice_agreement: agreements.first().copied().unwrap_or(0),
+        top5_policy_choice_agreement: agreements.get(1).copied().unwrap_or(0),
+        top20_policy_choice_agreement: agreements.get(2).copied().unwrap_or(0),
+    };
+    serde_json::to_string(&diagnostics).map_err(|error| {
+        format!("GPU policy choice agreement diagnostics response failed to encode: {error}")
+    })
 }
 
 pub fn gpu_move_plan_key_json(request_json: &str) -> Result<String, String> {
@@ -4045,7 +4229,7 @@ fn native_frontier_search_result(
             backend: None,
         });
     };
-    let step = crate::MoveStep {
+    let step = MoveStep {
         from: crate::Position {
             timeline_id: best.move_record[0],
             time: best.move_record[1],
@@ -4072,7 +4256,7 @@ fn native_frontier_search_result(
             step.to.y
         ));
     }
-    let result = crate::AiSearchResult {
+    let result = AiSearchResult {
         moves: vec![step],
         score: best.score,
         depth: search.rounds.len().min(depth as usize) as i32,
@@ -4430,6 +4614,16 @@ pub fn gpu_completed_reply_should_search(
     !royal_capture_present && now_ms < deadline_at_ms
 }
 
+pub fn gpu_frontier_cycle_should_stop(
+    cycle: usize,
+    cycles_completed: usize,
+    requested_depth: usize,
+    now_ms: f64,
+    deadline_at_ms: f64,
+) -> bool {
+    cycle > 0 && cycles_completed >= requested_depth && now_ms >= deadline_at_ms
+}
+
 pub fn gpu_diagnostic_rate(numerator: f64, denominator: f64) -> f64 {
     if !numerator.is_finite() || !denominator.is_finite() || denominator <= 0.0 {
         return 0.0;
@@ -4472,6 +4666,10 @@ pub fn gpu_search_nodes(nodes: f64) -> f64 {
     } else {
         64.0
     }
+}
+
+pub fn gpu_accumulated_search_nodes(base_nodes: f64, extra_nodes: f64, fallback_nodes: f64) -> f64 {
+    base_nodes + extra_nodes + fallback_nodes
 }
 
 pub fn gpu_mutation_candidate_limit(candidate_count: usize) -> usize {

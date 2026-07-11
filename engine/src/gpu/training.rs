@@ -440,6 +440,35 @@ struct SearchResultLabelSampleRequest {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchResultLabelSampleFromResultRequest {
+    sample: TrainingSample,
+    result: Option<SearchResultLabelResultJson>,
+    label_kind: String,
+    label_weight: f32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultLabelResultJson {
+    score: Option<i32>,
+    moves: Option<Vec<SearchResultMoveJson>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultTurnRequest {
+    result: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResultTurnResponse {
+    moves: Vec<serde_json::Value>,
+    score: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SearchResultMoveJson {
     from: SearchResultMovePositionJson,
     to: SearchResultMovePositionJson,
@@ -547,6 +576,46 @@ pub fn search_result_label_sample_json(request_json: &str) -> Result<String, Str
         request.label_weight,
     ))
     .map_err(|error| format!("Search result label sample response failed to encode: {error}"))
+}
+
+pub fn search_result_label_sample_from_result_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<SearchResultLabelSampleFromResultRequest>(request_json)
+        .map_err(|error| {
+            format!("Search result label sample-from-result request is not valid JSON: {error}")
+        })?;
+    let Some(result) = request.result else {
+        return Ok("null".to_string());
+    };
+    let Some(first_move) = result.moves.and_then(|moves| moves.into_iter().next()) else {
+        return Ok("null".to_string());
+    };
+    serde_json::to_string(&Some(search_result_label_sample(
+        request.sample,
+        result.score,
+        Some(first_move),
+        request.label_kind,
+        request.label_weight,
+    )))
+    .map_err(|error| {
+        format!("Search result label sample-from-result response failed to encode: {error}")
+    })
+}
+
+pub fn search_result_turn_json(request_json: &str) -> Result<String, String> {
+    let request = serde_json::from_str::<SearchResultTurnRequest>(request_json)
+        .map_err(|error| format!("Search result turn request is not valid JSON: {error}"))?;
+    let result = request.result.unwrap_or(serde_json::Value::Null);
+    let moves = result
+        .get("moves")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let score = result
+        .get("score")
+        .filter(|score| score.is_number())
+        .cloned();
+    serde_json::to_string(&SearchResultTurnResponse { moves, score })
+        .map_err(|error| format!("Search result turn response failed to encode: {error}"))
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1609,6 +1678,14 @@ pub fn compact_training_samples(samples: &[Option<TrainingSample>]) -> Vec<Train
 
 pub fn gpu_training_worker_count(total: usize, requested_workers: usize) -> usize {
     total.min(requested_workers.clamp(1, MAX_PARALLEL_GPU_TRAINING_WORKERS))
+}
+
+pub fn gpu_duel_training_worker_count(
+    total: usize,
+    search_workers: usize,
+    self_play_workers: usize,
+) -> usize {
+    gpu_training_worker_count(total, search_workers.min(self_play_workers))
 }
 
 pub fn training_label_worker_count(
@@ -2776,6 +2853,59 @@ pub fn collect_search_label_samples(
         source: request.mode.source_name(),
         requested,
         generated_positions,
+        labeled_positions,
+    })
+}
+
+/// Collect search labels through the engine's GPU-search API. This is kept
+/// separate from `collect_search_label_samples`, whose explicit non-search
+/// modes intentionally retain their CPU/self-play behavior.
+pub fn collect_native_gpu_search_label_samples(
+    request: SearchLabelBatchRequest,
+    model_path: &str,
+) -> Result<SearchLabelBatchResponse, String> {
+    if request.mode != SearchLabelMode::Search {
+        return Err("native GPU search labels require sample mode `search`".to_string());
+    }
+    let base = match request.snapshot_json.as_deref() {
+        Some(snapshot) => parse_game_snapshot(snapshot)?,
+        None => Game::new(),
+    };
+    let requested = request.count;
+    let mut samples = Vec::with_capacity(requested);
+    for index in 0..requested {
+        let game = generate_label_position(&base, index, &request);
+        let response = crate::gpu::search::search(crate::gpu::search::GpuSearchRequest {
+            snapshot_json: Some(game.to_json()),
+            model_path: Some(model_path.to_string()),
+            depth: request.label_depth,
+            min_depth: request.label_min_depth,
+            nodes: request.label_nodes,
+            time_ms: request.label_time_ms,
+        })?;
+        let sample = sample_from_game_label(&game, 0.0, request.label_weight);
+        let labeled = search_result_label_sample_from_result_json(
+            &serde_json::json!({
+                "sample": sample,
+                "result": serde_json::from_str::<serde_json::Value>(&response.result_json)
+                    .map_err(|error| format!("native GPU search result is not valid JSON: {error}"))?,
+                "labelKind": "gpu-search",
+                "labelWeight": request.label_weight,
+            })
+            .to_string(),
+        )?;
+        if let Some(sample) = serde_json::from_str::<Option<TrainingSample>>(&labeled)
+            .map_err(|error| format!("native GPU search label is not valid JSON: {error}"))?
+        {
+            samples.push(sample);
+        }
+    }
+    let labeled_positions = samples.len();
+    Ok(SearchLabelBatchResponse {
+        samples,
+        source: "native-gpu-search-batch",
+        requested,
+        generated_positions: requested,
         labeled_positions,
     })
 }

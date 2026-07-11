@@ -314,6 +314,27 @@ pub unsafe extern "C" fn chronofish_cpu_worker_search_config_json(
 
 /// # Safety
 ///
+/// `ptr` must point to `len` bytes of readable UTF-8 CPU worker search result
+/// JSON in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_cpu_worker_search_result_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "CPU worker search result request") else {
+        return std::ptr::null();
+    };
+    match crate::cpu::search::cpu_worker_search_result_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
 /// `ptr` must point to `len` bytes of readable UTF-8 CPU apply-turn JSON in
 /// this WASM instance for the duration of the call.
 #[no_mangle]
@@ -1134,6 +1155,50 @@ pub unsafe extern "C" fn chronofish_search_result_label_sample_json(
 
 /// # Safety
 ///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON containing a search
+/// result label sample-from-result request in this WASM instance for the
+/// duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_search_result_label_sample_from_result_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "Search result label sample-from-result request")
+    else {
+        return std::ptr::null();
+    };
+    match crate::gpu::training::search_result_label_sample_from_result_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON containing a worker
+/// search result in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_search_result_turn_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "Search result turn request") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::training::search_result_turn_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
 /// `ptr` must point to `len` bytes of readable UTF-8 JSON containing training
 /// mode options in this WASM instance for the duration of the call.
 #[no_mangle]
@@ -1339,6 +1404,15 @@ pub extern "C" fn chronofish_gpu_training_worker_count(
     requested_workers: usize,
 ) -> usize {
     crate::gpu::training::gpu_training_worker_count(total, requested_workers)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_gpu_duel_training_worker_count(
+    total: usize,
+    search_workers: usize,
+    self_play_workers: usize,
+) -> usize {
+    crate::gpu::training::gpu_duel_training_worker_count(total, search_workers, self_play_workers)
 }
 
 #[no_mangle]
@@ -2303,6 +2377,23 @@ pub extern "C" fn chronofish_gpu_completed_reply_should_search(
 }
 
 #[no_mangle]
+pub extern "C" fn chronofish_gpu_frontier_cycle_should_stop(
+    cycle: usize,
+    cycles_completed: usize,
+    requested_depth: usize,
+    now_ms: f64,
+    deadline_at_ms: f64,
+) -> i32 {
+    i32::from(crate::gpu::search::gpu_frontier_cycle_should_stop(
+        cycle,
+        cycles_completed,
+        requested_depth,
+        now_ms,
+        deadline_at_ms,
+    ))
+}
+
+#[no_mangle]
 pub extern "C" fn chronofish_gpu_diagnostic_rate(numerator: f64, denominator: f64) -> f64 {
     crate::gpu::search::gpu_diagnostic_rate(numerator, denominator)
 }
@@ -2328,6 +2419,15 @@ pub extern "C" fn chronofish_gpu_nodes_per_second(nodes: f64, latency_ms: f64) -
 #[no_mangle]
 pub extern "C" fn chronofish_gpu_search_nodes(nodes: f64) -> f64 {
     crate::gpu::search::gpu_search_nodes(nodes)
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_gpu_accumulated_search_nodes(
+    base_nodes: f64,
+    extra_nodes: f64,
+    fallback_nodes: f64,
+) -> f64 {
+    crate::gpu::search::gpu_accumulated_search_nodes(base_nodes, extra_nodes, fallback_nodes)
 }
 
 #[no_mangle]
@@ -2459,6 +2559,27 @@ pub extern "C" fn chronofish_frontier_max_cycles(
     timeline_count: usize,
 ) -> i32 {
     crate::gpu::search::frontier_max_cycles(requested_depth, timeline_count)
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 GPU frontier
+/// orchestration JSON in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_frontier_orchestration_plan_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU frontier orchestration request") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::frontier_orchestration_plan_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
 }
 
 #[no_mangle]
@@ -2919,6 +3040,51 @@ pub unsafe extern "C" fn chronofish_cpu_reference_score_delta_json(
     }
 }
 
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON containing a CPU
+/// reference score-from-result request in this WASM instance for the duration
+/// of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_cpu_reference_score_from_result_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "CPU reference score-from-result request") else {
+        return std::ptr::null();
+    };
+    match crate::cpu::search::cpu_reference_score_from_result_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON containing a CPU
+/// reference score delta-from-result request in this WASM instance for the
+/// duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_cpu_reference_score_delta_from_result_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "CPU reference score delta-from-result request")
+    else {
+        return std::ptr::null();
+    };
+    match crate::cpu::search::cpu_reference_score_delta_from_result_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn chronofish_cpu_reference_candidate_average(
     score: i32,
@@ -3044,6 +3210,32 @@ pub unsafe extern "C" fn chronofish_cpu_training_adjudication_score_json(
         &request.candidate_color,
         request.baseline_score,
     )
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 JSON containing a CPU
+/// training adjudication score-from-result request in this WASM instance for
+/// the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_cpu_training_adjudication_score_from_result_json(
+    ptr: *const u8,
+    len: usize,
+) -> i32 {
+    let Some(text) = wasm_input_text(
+        ptr,
+        len,
+        "CPU training adjudication score-from-result request",
+    ) else {
+        return 0;
+    };
+    match crate::cpu::search::cpu_training_adjudication_score_from_result_json(text) {
+        Ok(score) => score,
+        Err(error) => {
+            set_last_message(&error);
+            0
+        }
+    }
 }
 
 #[no_mangle]
@@ -3682,6 +3874,27 @@ pub unsafe extern "C" fn chronofish_frontier_root_snapshot_bytes(
 /// `ptr` must point to `len` bytes of readable UTF-8 GPU snapshot JSON in this
 /// WASM instance for the duration of the call.
 #[no_mangle]
+pub unsafe extern "C" fn chronofish_gpu_snapshot_search_size_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU snapshot search size") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::gpu_snapshot_search_size_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 GPU snapshot JSON in this
+/// WASM instance for the duration of the call.
+#[no_mangle]
 pub unsafe extern "C" fn chronofish_gpu_pending_present_boards_json(
     ptr: *const u8,
     len: usize,
@@ -3937,6 +4150,53 @@ pub unsafe extern "C" fn chronofish_gpu_candidate_indexes_json(
 
 /// # Safety
 ///
+/// `ptr` must point to `len` bytes of readable UTF-8 candidate-scores JSON
+/// request data in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_gpu_candidate_scores_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU candidate scores request") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::gpu_candidate_scores_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn chronofish_gpu_candidate_score_is_rejected(score: i32) -> i32 {
+    crate::gpu::search::gpu_candidate_score_is_rejected(score) as i32
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 frontier readback-summary
+/// JSON request data in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_gpu_frontier_readback_summary_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU frontier readback summary request") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::gpu_frontier_readback_summary_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
 /// `ptr` must point to `len` bytes of readable little-endian i32 scoring-summary
 /// request data in this WASM instance for the duration of the call.
 #[no_mangle]
@@ -4028,6 +4288,27 @@ pub unsafe extern "C" fn chronofish_gpu_mutation_summary_json(
     };
     match crate::gpu::search::gpu_mutation_summary_json(text) {
         Ok(summary) => set_output(summary),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 GPU mutation statuses JSON
+/// in this WASM instance for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_gpu_mutation_statuses_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU mutation statuses JSON request") else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::gpu_mutation_statuses_json(text) {
+        Ok(statuses) => set_output(statuses),
         Err(error) => {
             set_last_message(&error);
             std::ptr::null()
@@ -4133,6 +4414,29 @@ pub unsafe extern "C" fn chronofish_gpu_selected_choice_json(
         return std::ptr::null();
     };
     match crate::gpu::search::gpu_search_selected_choice_json(text) {
+        Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 choice-agreement JSON
+/// containing raw GPU search choices in this WASM instance for the duration of
+/// the call.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_gpu_policy_choice_agreement_diagnostics_json(
+    ptr: *const u8,
+    len: usize,
+) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "GPU policy choice agreement diagnostics request")
+    else {
+        return std::ptr::null();
+    };
+    match crate::gpu::search::gpu_policy_choice_agreement_diagnostics_json(text) {
         Ok(json) => set_output(json),
         Err(error) => {
             set_last_message(&error);

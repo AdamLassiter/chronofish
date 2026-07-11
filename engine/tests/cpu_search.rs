@@ -19,13 +19,16 @@ use chronofish_engine::cpu::search::{
     cpu_reference_collection_should_continue,
     cpu_reference_comparison_count,
     cpu_reference_score_delta,
+    cpu_reference_score_delta_from_result_json,
     cpu_reference_score_delta_json,
+    cpu_reference_score_from_result_json,
     cpu_reference_should_continue,
     cpu_reference_worker_count,
     cpu_screening_game_count,
     cpu_screening_training_config,
     cpu_search_label_weight,
     cpu_training_adjudication_score,
+    cpu_training_adjudication_score_from_result_json,
     cpu_training_budget_ms,
     cpu_training_candidate_count,
     cpu_training_candidate_improved,
@@ -43,6 +46,7 @@ use chronofish_engine::cpu::search::{
     cpu_training_should_continue,
     cpu_training_winner_score,
     cpu_worker_search_config_json,
+    cpu_worker_search_result_json,
     crossover_cpu_parameters,
     mode_label_target,
     move_agreement_bonus,
@@ -137,6 +141,40 @@ fn cpu_worker_search_config_matches_browser_worker_contract() {
 }
 
 #[test]
+fn cpu_worker_search_result_matches_browser_worker_contract() {
+    let result = cpu_worker_search_result_json(
+        r#"{"status":"ok","moves":[{"from":{"timelineId":0,"time":0,"x":0,"y":1},"to":{"timelineId":0,"time":1,"x":0,"y":2}}],"score":12}"#,
+    )
+    .expect("CPU worker search result");
+    let value: serde_json::Value =
+        serde_json::from_str(&result).expect("CPU worker search result JSON");
+    assert_eq!(value["cpuSearch"], "heuristic");
+    assert_eq!(value["principalVariation"][0], value["moves"]);
+
+    let empty = cpu_worker_search_result_json(r#"{"status":"ok","moves":[]}"#)
+        .expect("empty CPU worker search result");
+    let empty_value: serde_json::Value =
+        serde_json::from_str(&empty).expect("empty CPU worker search result JSON");
+    assert_eq!(
+        empty_value["principalVariation"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    let existing = cpu_worker_search_result_json(
+        r#"{"status":"ok","moves":[],"principalVariation":[[{"from":{"timelineId":1,"time":0,"x":1,"y":1},"to":{"timelineId":1,"time":1,"x":1,"y":2}}]]}"#,
+    )
+    .expect("existing CPU worker search result");
+    let existing_value: serde_json::Value =
+        serde_json::from_str(&existing).expect("existing CPU worker search result JSON");
+    assert_eq!(
+        existing_value["principalVariation"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+}
+
+#[test]
 fn cpu_apply_turn_matches_browser_worker_contract() {
     let response = cpu_apply_turn_json(
         r#"{
@@ -152,6 +190,17 @@ fn cpu_apply_turn_matches_browser_worker_contract() {
     assert_eq!(value["status"]["nextTurn"], "white");
     assert_eq!(value["game"]["turn"], "white");
     assert!(value["game"]["timelines"].as_array().is_some());
+
+    let omitted_moves = cpu_apply_turn_json(
+        r#"{
+            "game": { "turn": "white", "timelines": [] }
+        }"#,
+    )
+    .expect("CPU apply turn without moves");
+    let omitted_value: serde_json::Value =
+        serde_json::from_str(&omitted_moves).expect("CPU apply turn response JSON");
+    assert_eq!(omitted_value["status"]["complete"], false);
+    assert_eq!(omitted_value["game"]["turn"], "white");
 }
 
 #[test]
@@ -688,6 +737,56 @@ fn cpu_reference_score_delta_json_accepts_browser_move_contract() {
 }
 
 #[test]
+fn cpu_reference_score_helpers_accept_worker_search_results() {
+    let response = cpu_reference_score_from_result_json(
+        r#"{
+            "result": {
+                "score": 120,
+                "moves": [{
+                    "from": { "timelineId": 0, "time": 0, "x": 1, "y": 1 },
+                    "to": { "timelineId": 0, "time": 1, "x": 1, "y": 2 }
+                }]
+            }
+        }"#,
+    )
+    .expect("CPU reference score from result");
+    let value: serde_json::Value =
+        serde_json::from_str(&response).expect("CPU reference score JSON");
+    assert_eq!(value["score"], 120);
+    assert_eq!(value["moves"].as_array().map(Vec::len), Some(1));
+
+    let fallback = cpu_reference_score_from_result_json(r#"{"result":null}"#)
+        .expect("fallback CPU reference score");
+    let fallback_value: serde_json::Value =
+        serde_json::from_str(&fallback).expect("fallback CPU reference score JSON");
+    assert_eq!(fallback_value["score"], 0);
+    assert!(fallback_value.get("moves").is_none());
+
+    let delta = cpu_reference_score_delta_from_result_json(
+        r#"{
+            "candidateResult": {
+                "score": 120,
+                "moves": [{
+                    "from": { "timelineId": 0, "time": 0, "x": 1, "y": 1 },
+                    "to": { "timelineId": 0, "time": 1, "x": 1, "y": 2 }
+                }]
+            },
+            "referenceScore": 100,
+            "referenceMoves": [{
+                "from": { "timelineId": 0, "time": 0, "x": 1, "y": 1 },
+                "to": { "timelineId": 0, "time": 1, "x": 1, "y": 2 }
+            }],
+            "drawWindow": 25
+        }"#,
+    )
+    .expect("CPU reference score delta from result");
+    let delta_value: serde_json::Value =
+        serde_json::from_str(&delta).expect("CPU reference score delta JSON");
+    assert_eq!(delta_value["score"], 45);
+    assert_eq!(delta_value["nearDraw"], true);
+}
+
+#[test]
 fn cpu_paired_match_scores_match_browser_training_policy() {
     assert_eq!(CPU_TRAINING_WIN_SCORE, 100_000);
     assert_eq!(cpu_training_no_move_score(true), -100_000);
@@ -699,6 +798,20 @@ fn cpu_paired_match_scores_match_browser_training_policy() {
 
     assert_eq!(cpu_training_adjudication_score("white", "white", 125), 125);
     assert_eq!(cpu_training_adjudication_score("black", "white", 125), -125);
+    assert_eq!(
+        cpu_training_adjudication_score_from_result_json(
+            r#"{ "currentTurn": "black", "candidateColor": "white", "result": { "score": 125 } }"#
+        )
+        .expect("adjudication score from result"),
+        -125
+    );
+    assert_eq!(
+        cpu_training_adjudication_score_from_result_json(
+            r#"{ "currentTurn": "white", "candidateColor": "white", "result": null }"#
+        )
+        .expect("neutral adjudication score from missing result"),
+        0
+    );
 }
 
 fn parameters(values: &[(&str, i32)]) -> CpuParameters {

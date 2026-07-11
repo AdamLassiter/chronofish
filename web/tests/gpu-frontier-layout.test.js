@@ -17,9 +17,33 @@ async function fileExists(file) {
   }
 }
 
+async function readGpuSearchWorkerSources() {
+  const [worker, bindings] = await Promise.all([
+    readFile(path.join(root, "src/ai-worker.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-search.ts"), "utf8")
+  ]);
+  return `${worker}\n${bindings}`;
+}
+
+async function readAiFrontierSources() {
+  const [frontier, bindings] = await Promise.all([
+    readFile(path.join(root, "src/ai-frontier.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-search.ts"), "utf8")
+  ]);
+  return `${frontier}\n${bindings}`;
+}
+
+async function readTrainingWorkerSources() {
+  const [worker, bindings] = await Promise.all([
+    readFile(path.join(root, "src/training-worker.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-training.ts"), "utf8")
+  ]);
+  return `${worker}\n${bindings}`;
+}
+
 test("GPU frontier uses parent-plus-delta candidates and pooled retained states", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const source = await readAiFrontierSources();
+  const worker = await readGpuSearchWorkerSources();
   const layout = await readFile(path.join(root, "src/ai-layout.ts"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -59,9 +83,9 @@ test("GPU frontier uses parent-plus-delta candidates and pooled retained states"
   assert.match(source, /frontierStateBytes\(this\.tuning\.maxBoards, this\.engine\)/);
   assert.match(source, /align4\(Math\.max\(4, byteLength\), this\.engine\)/);
   assert.match(source, /align4\(data\.byteLength, this\.engine\)/);
-  assert.match(source, /engine\.chronofish_align4\(value\)/);
-  assert.match(source, /engine\.chronofish_frontier_state_stride\(maxBoards\)/);
-  assert.match(source, /engine\.chronofish_frontier_state_bytes\(maxBoards\)/);
+  assert.match(source, /"chronofish_align4"/);
+  assert.match(source, /"chronofish_frontier_state_stride"/);
+  assert.match(source, /"chronofish_frontier_state_bytes"/);
   assert.match(worker, /const runtime = await frontierRuntimeFor\(device, tuning\)/);
   assert.match(worker, /const engine = await validationEngine\(\)/);
   assert.match(worker, /new FrontierGpuPipeline\(device, tuning, undefined, engine\)/);
@@ -143,7 +167,7 @@ test("GPU frontier pruning is deterministic and diversity bounded", async () => 
 });
 
 test("GPU frontier pipelines use explicit superset bind layouts", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
 
   assert.match(source, /frontierPipelineLayouts/);
   assert.match(source, /frontier_select\.layout/);
@@ -157,8 +181,8 @@ test("GPU frontier pipelines use explicit superset bind layouts", async () => {
 });
 
 test("GPU frontier reports scoped validation failures by cycle", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
+  const source = await readAiFrontierSources();
 
   assert.match(worker, /pushGpuValidationScope/);
   assert.match(worker, /popGpuValidationScope\(device, validationScope, `GPU frontier cycle \$\{cycle\}`\)/);
@@ -168,7 +192,7 @@ test("GPU frontier reports scoped validation failures by cycle", async () => {
 });
 
 test("GPU frontier clears transient buffers before each expansion cycle", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
 
   assert.match(source, /encoder\.clearBuffer\(buffers\.candidates\)/);
   assert.match(source, /encoder\.clearBuffer\(buffers\.deltas\)/);
@@ -177,7 +201,7 @@ test("GPU frontier clears transient buffers before each expansion cycle", async 
 });
 
 test("GPU frontier chunks expansion dispatches by tuned adapter limit", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_expand.wgsl"), "utf8");
 
   assert.match(source, /dispatchCandidateLimit/);
@@ -192,8 +216,8 @@ test("GPU frontier chunks expansion dispatches by tuned adapter limit", async ()
 });
 
 test("GPU frontier board capacity scales with search growth instead of always reserving 64 boards", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const source = await readAiFrontierSources();
+  const worker = await readGpuSearchWorkerSources();
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
 
@@ -202,7 +226,7 @@ test("GPU frontier board capacity scales with search growth instead of always re
   assert.doesNotMatch(source, /nextPowerOfTwo\(Math\.max\(boardCount, boardCount \+ Math\.max\(0, additionalBoardCapacity\)\)\)/);
   assert.match(engineSearch, /board_count\.max\(board_count\.saturating_add\(additional_board_capacity\)\)/);
   assert.match(wasmApi, /additional_board_capacity: usize/);
-  assert.match(worker, /maxCycles \* 2/);
+  assert.match(worker, /provisionalCycles \* 2/);
 });
 
 test("GPU frontier materializes only retained deltas and completes whole turns", async () => {
@@ -241,7 +265,7 @@ test("GPU frontier move generation includes special pawn cases", async () => {
 
 test("GPU snapshot wire codes have engine-owned counterparts", async () => {
   const snapshot = await readFile(path.join(root, "src/ai-snapshot.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
@@ -299,10 +323,10 @@ test("GPU snapshot wire codes have engine-owned counterparts", async () => {
   assert.match(worker, /engine\.chronofish_gpu_turn_status_records_snapshot_bytes\(ptr, len\)/);
   assert.match(worker, /engine\.chronofish_gpu_turn_status_json\(ptr, len\)/);
   assert.doesNotMatch(worker, /engine\.chronofish_gpu_turn_status_json_bytes\(ptr, byteLength\)/);
-  assert.match(worker, /return engineTurnStatusFromWords\(result\)/);
+  assert.match(worker, /return engineGpuSearch\.engineTurnStatusFromWords\(result\)/);
   assert.doesNotMatch(worker, /colorFromCode/);
   assert.doesNotMatch(worker, /oppositeColor/);
-  assert.match(worker, /const boardRecords = await engineTurnStatusRecords\(snapshot\)/);
+  assert.match(worker, /const boardRecords = await engineGpuSearch\.engineTurnStatusRecords\(snapshot\)/);
   assert.match(worker, /boardRecords\.length \/ GPU_TURN_STATUS_RECORD_STRIDE/);
   assert.doesNotMatch(worker, /records\.length \/ GPU_TURN_STATUS_RECORD_STRIDE/);
   assert.match(engineTypes, /chronofish_gpu_turn_status_records_snapshot_bytes\(ptr: number, length: number\): number/);
@@ -402,7 +426,7 @@ test("GPU snapshot wire codes have engine-owned counterparts", async () => {
   assert.doesNotMatch(worker, /function candidateMetaFromRecords/);
   assert.doesNotMatch(worker, /sourceMeta: candidateMetaFromRecords/);
   assert.doesNotMatch(worker, /timelineId: records\[offset \+ 2\] \?\? 0/);
-  assert.match(worker, /sourceGame\s*\?\s*await engineGpuCandidateInputs\(sourceGame\)\s*:\s*await engineGpuCandidateInputsFromSnapshot\(snapshot, snapshot\.turn\)/);
+  assert.match(worker, /sourceGame\s*\?\s*await engineGpuSearch\.engineGpuCandidateInputs\(sourceGame\)\s*:\s*await engineGpuSearch\.engineGpuCandidateInputsFromSnapshot\(snapshot, snapshot\.turn\)/);
   assert.doesNotMatch(worker, /buildGpuCandidateInputsFromSnapshot/);
 });
 
@@ -430,8 +454,8 @@ test("normal server exposes the committed GPU value model read-only", async () =
 test("GPU frontier projects retained states sparsely for neural evaluation", async () => {
   const shader = await readFile(path.join(searchShaderRoot, "frontier_neural.wgsl"), "utf8");
   const source = await readFile(path.join(root, "src/ai-frontier-neural.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
-  const frontier = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
+  const frontier = await readAiFrontierSources();
   const forward = await readFile(path.join(searchShaderRoot, "frontier_forward.wgsl"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -458,7 +482,7 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.match(source, /#cacheStats\.misses \+= stateCount/);
   assert.match(source, /#cacheStats\.stores \+= batchCount/);
   assert.match(source, /hitRate: frontierNeuralCacheHitRate\(this\.\#cacheStats\.hits, this\.\#cacheStats\.misses, this\.\#engine \?\? undefined\)/);
-  assert.match(source, /engine\.chronofish_frontier_neural_cache_hit_rate\(hits, misses\)/);
+  assert.match(source, /"chronofish_frontier_neural_cache_hit_rate"/);
   assert.doesNotMatch(source, /Math\.round\(\(this\.\#cacheStats\.hits \/ lookups\) \* 1000\) \/ 1000/);
   assert.match(source, /sharedBoardEncoder/);
   assert.match(source, /engine: ChronofishEngine/);
@@ -469,19 +493,19 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.match(source, /this\.policyFeatureBuffer\("next", stateCount, modelBuffers\.fastNet\.inputSize, modelBuffers\.engine\)/);
   assert.match(source, /this\.policyFeatureBuffer\("current", stateCount, inputSize, modelBuffers\.engine\)/);
   assert.match(source, /gpuBuffer\(this\.device, capacity \* model\.projectionSize \* 4, 0, engine\)/);
-  assert.match(source, /uniformBytes\(device, readWasmBytes\(engine, engine\.chronofish_frontier_neural_params_bytes/);
+  assert.match(source, /"chronofish_frontier_neural_params_bytes"/);
   assert.match(source, /align4\(byteLength, engine\)/);
-  assert.match(source, /engine\.chronofish_align4\(value\)/);
+  assert.match(source, /"chronofish_align4"/);
   assert.match(source, /frontierNeuralEffectiveBatchSize\(modelBuffers\.engine, stateCount, batchSize\)/);
   assert.match(source, /frontierNeuralBatchCount\(modelBuffers\.engine, stateCount, stateOffset, effectiveBatchSize\)/);
   assert.match(frontier, /frontierCycleStateCount\(this\.tuning\.frontierWidth, options\.stateCount \?\? this\.tuning\.frontierWidth, this\.engine\)/);
-  assert.match(frontier, /engine\.chronofish_frontier_cycle_state_count\(frontierWidth, requestedStateCount\)/);
+  assert.match(frontier, /"chronofish_frontier_cycle_state_count"/);
   assert.match(frontier, /frontierExpansionSourceScanLimit\(this\.tuning\.candidateWorkgroupSize, this\.tuning\.dispatchCandidateLimit, this\.engine\)/);
   assert.match(frontier, /frontierExpansionSourceScanCount\(sourceScanLimit, sourceScans, base, this\.engine\)/);
   assert.match(frontier, /frontierMinimaxBoundedDepth\(targetDepth, GPU_FRONTIER_ANCESTRY_STRIDE, this\.engine\)/);
-  assert.match(frontier, /engine\.chronofish_frontier_expansion_source_scan_limit\(candidateWorkgroupSize, dispatchCandidateLimit\)/);
-  assert.match(frontier, /engine\.chronofish_frontier_expansion_source_scan_count\(sourceScanLimit, sourceScans, sourceScanBase\)/);
-  assert.match(frontier, /engine\.chronofish_frontier_minimax_bounded_depth\(targetDepth, ancestryStride\)/);
+  assert.match(frontier, /"chronofish_frontier_expansion_source_scan_limit"/);
+  assert.match(frontier, /"chronofish_frontier_expansion_source_scan_count"/);
+  assert.match(frontier, /"chronofish_frontier_minimax_bounded_depth"/);
   assert.doesNotMatch(frontier, /Math\.max\(1, Math\.min\(this\.tuning\.frontierWidth, options\.stateCount \?\? this\.tuning\.frontierWidth\)\)/);
   assert.doesNotMatch(frontier, /const sourceScanLimit = Math\.max\(this\.tuning\.candidateWorkgroupSize, this\.tuning\.dispatchCandidateLimit\)/);
   assert.doesNotMatch(frontier, /const count = Math\.min\(sourceScanLimit, sourceScans - base\)/);
@@ -537,14 +561,14 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.match(source, /retained-state-value-and-auxiliary-heads/);
   assert.match(forward, /forward_layer_masked/);
   assert.match(forward, /active_states\[sample\] == 0u/);
-  assert.match(worker, /let activeStateLimit = 1/);
-  assert.match(worker, /stateCount: activeStateLimit/);
+  assert.match(worker, /stateCount: stateLimits\[cycle\] \?\? 1/);
+  assert.match(worker, /const nextStateLimit = stateLimits\[cycle \+ 1\] \?\? 1/);
   assert.match(frontier, /const sourceScans = stateCount \* this\.tuning\.maxBoards \* 64/);
 });
 
 test("GPU frontier neural evaluation uses adapter-sized batches", async () => {
   const source = await readFile(path.join(root, "src/ai-frontier-neural.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_neural.wgsl"), "utf8");
 
   assert.match(source, /effectiveBatchSize/);
@@ -598,8 +622,8 @@ test("GPU frontier loads CFNN once and evaluates without prediction readback", a
 });
 
 test("GPU workers validate an in-memory candidate model before promotion", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
-  const trainer = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
+  const trainer = await readTrainingWorkerSources();
   const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -612,8 +636,8 @@ test("GPU workers validate an in-memory candidate model before promotion", async
   assert.match(trainer, /modelBytes: candidateModel/);
   assert.match(trainer, /temperature: 0/);
   assert.match(trainer, /sampleSeed\("loss-log"/);
-  assert.match(trainer, /chronofish_training_sample_seed\(ptr, len, index, salt\)/);
-  assert.match(trainer, /chronofish_training_search_seed_json\(ptr, len, salt\)/);
+  assert.match(trainer, /chronofish_training_sample_seed/);
+  assert.match(trainer, /chronofish_training_search_seed_json/);
   assert.doesNotMatch(trainer, /Math\.imul\(hash, 16777619\)/);
   assert.match(engineTraining, /pub fn sample_seed/);
   assert.match(engineTraining, /pub fn search_seed_json/);
@@ -628,9 +652,9 @@ test("GPU workers validate an in-memory candidate model before promotion", async
 });
 
 test("GPU frontier applies serialized policy priors before candidate pruning", async () => {
-  const frontier = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const frontier = await readAiFrontierSources();
   const neural = await readFile(path.join(root, "src/ai-frontier-neural.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_policy.wgsl"), "utf8");
   const stateShader = await readFile(path.join(searchShaderRoot, "frontier_state.wgsl"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
@@ -645,8 +669,8 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
   assert.doesNotMatch(neural, /policyWeightsForModel/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_compact_value_model_frontier_layout_json/);
   assert.match(neural, /quantizePolicyWeights\(policyWeights, engine\)/);
-  assert.match(neural, /chronofish_quantized_policy_upload_bytes\(input\.ptr, input\.len\)/);
-  assert.match(neural, /chronofish_f32_to_f16_upload_bytes\(input\.ptr, input\.len\)/);
+  assert.match(neural, /"chronofish_quantized_policy_upload_bytes"/);
+  assert.match(neural, /"chronofish_f32_to_f16_upload_bytes"/);
   assert.doesNotMatch(neural, /Math\.round\(value \/ scale\)/);
   assert.doesNotMatch(neural, /function float32ToFloat16Bits/);
   assert.match(neural, /format: "int8-dequantized-upload"/);
@@ -682,7 +706,7 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
 });
 
 test("GPU frontier result labels neural mode only when the neural pass ran", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
 
   assert.match(worker, /let modelUsed = false/);
   assert.match(worker, /modelUsed = await runtime\.neural\.encode/);
@@ -692,7 +716,7 @@ test("GPU frontier result labels neural mode only when the neural pass ran", asy
 });
 
 test("GPU worker replays every posted search result through authoritative WASM", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
@@ -729,7 +753,7 @@ test("GPU worker replays every posted search result through authoritative WASM",
 });
 
 test("GPU frontier publishes diagnostics needed for rollout gates", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/ai-worker-types.ts"), "utf8");
   const controller = await readFile(path.join(root, "src/bot-controller.ts"), "utf8");
   const source = await readFile(path.join(root, "scripts/gpu-frontier-smoke.mjs"), "utf8");
@@ -750,16 +774,25 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(worker, /candidateOverflow: readback\.candidateOverflow \? 1 : 0/);
   assert.match(worker, /tacticalCandidates: readback\.tacticalCandidates/);
   assert.match(worker, /selectedTacticalCandidates: readback\.selectedTacticalCandidates/);
-  assert.match(worker, /candidateSelectionRate: gpuDiagnosticRate\(readback\.selectedCount, readback\.nodes, runtime\.pipeline\.engine\)/);
-  assert.match(worker, /tacticalSelectionRate: gpuDiagnosticRate\(readback\.selectedTacticalCandidates, readback\.tacticalCandidates, runtime\.pipeline\.engine\)/);
-  assert.match(worker, /effectiveBranchingFactor: gpuEffectiveBranchingFactor\(readback\.selectedCount, cyclesCompleted, runtime\.pipeline\.engine\)/);
-  assert.match(worker, /latencyMs: gpuReportedLatencyMs\(latencyMs, runtime\.pipeline\.engine\)/);
-  assert.match(worker, /nodesPerSecond: gpuNodesPerSecond\(readback\.nodes, latencyMs, runtime\.pipeline\.engine\)/);
+  assert.match(worker, /candidateSelectionRate: engineGpuSearch\.gpuDiagnosticRate\(readback\.selectedCount, readback\.nodes, frontierEngine\)/);
+  assert.match(worker, /tacticalSelectionRate: engineGpuSearch\.gpuDiagnosticRate\(readback\.selectedTacticalCandidates, readback\.tacticalCandidates, frontierEngine\)/);
+  assert.match(worker, /effectiveBranchingFactor: engineGpuSearch\.gpuEffectiveBranchingFactor\(readback\.selectedCount, cyclesCompleted, frontierEngine\)/);
+  assert.match(worker, /engine\.chronofish_gpu_frontier_readback_summary_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /nodes: counters\[3\] \?\? 0/);
+  assert.doesNotMatch(worker, /selectedCount: counters\[1\] \?\? 0/);
+  assert.doesNotMatch(worker, /candidateOverflow: \(counters\[2\] \?\? 0\) !== 0/);
+  assert.match(worker, /latencyMs: engineGpuSearch\.gpuReportedLatencyMs\(latencyMs, frontierEngine\)/);
+  assert.match(worker, /nodesPerSecond: engineGpuSearch\.gpuNodesPerSecond\(readback\.nodes, latencyMs, frontierEngine\)/);
   assert.doesNotMatch(worker, /function ratio/);
   assert.match(worker, /searchController: "puct-frontier-graph"/);
-  assert.match(worker, /const maxCycles = await engineFrontierMaxCycles\(requestedDepth, snapshot\.timelines\.length\)/);
-  assert.match(worker, /const perParentLimit = await engineFrontierPerParentLimit\(tuning\.frontierWidth\)/);
-  assert.match(worker, /activeStateLimit = await engineFrontierNextActiveStateLimit\(tuning\.frontierWidth, activeStateLimit, perParentLimit\)/);
+  assert.match(worker, /const searchSize = await engineGpuSearch\.engineGpuSnapshotSearchSize\(snapshot\)/);
+  assert.match(worker, /const orchestration = await engineFrontierOrchestrationPlan\(/);
+  assert.match(worker, /searchSize\.boardCount/);
+  assert.match(worker, /engine\.chronofish_gpu_snapshot_search_size_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /snapshot\.timelines\.reduce\(\(sum, timeline\) => sum \+ timeline\.boards\.length, 0\)/);
+  assert.doesNotMatch(worker, /engineFrontierMaxCycles\(requestedDepth, snapshot\.timelines\.length\)/);
+  assert.match(worker, /const \{ maxCycles, tuning, perParentLimit, stateLimits \} = orchestration/);
+  assert.match(worker, /const nextStateLimit = stateLimits\[cycle \+ 1\] \?\? 1/);
   assert.doesNotMatch(worker, /activeStateLimit = Math\.min\(tuning\.frontierWidth, activeStateLimit \* perParentLimit\)/);
   assert.match(worker, /engine\.chronofish_gpu_search_ranking_limit/);
   assert.match(worker, /engine\.chronofish_gpu_search_reply_limit/);
@@ -767,33 +800,46 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(worker, /engine\.chronofish_gpu_diagnostic_rate\(numerator, denominator\)/);
   assert.match(worker, /engine\.chronofish_gpu_effective_branching_factor\(selectedCount, cyclesCompleted\)/);
   assert.match(worker, /chronofish_gpu_completed_reply_should_search\(snapshot\.royalCaptureBy \? 1 : 0, Date\.now\(\), gpuDeadlineAt\) !== 0/);
+  assert.match(worker, /chronofish_gpu_frontier_cycle_should_stop\(cycle, cyclesCompleted, requestedDepth, Date\.now\(\), gpuDeadlineAt\) !== 0/);
   assert.match(worker, /engine\.chronofish_gpu_reported_latency_ms\(latencyMs\)/);
   assert.match(worker, /engine\.chronofish_gpu_nodes_per_second\(nodes, latencyMs\)/);
+  assert.match(worker, /engine\.chronofish_gpu_accumulated_search_nodes\(baseNodes \?\? 0, extraNodes, fallbackNodes\)/);
   assert.doesNotMatch(worker, /Number\.isFinite\(numerator\)/);
   assert.doesNotMatch(worker, /Math\.round\(\(numerator \/ denominator\) \* 1000\) \/ 1000/);
   assert.doesNotMatch(worker, /Math\.round\(\(selectedCount \/ cyclesCompleted\) \* 100\) \/ 100/);
   assert.doesNotMatch(worker, /snapshot\.royalCaptureBy \|\| Date\.now\(\) >= gpuDeadlineAt/);
+  assert.doesNotMatch(worker, /cycle > 0 && cyclesCompleted >= requestedDepth && Date\.now\(\) >= gpuDeadlineAt/);
   assert.doesNotMatch(worker, /const replyLimit = 512/);
   assert.doesNotMatch(worker, /Number\.isFinite\(latencyMs\)/);
   assert.doesNotMatch(worker, /Math\.round\(\(nodes \* 1000\) \/ boundedLatency\)/);
+  assert.doesNotMatch(worker, /\(result\.nodes \?\? 0\) \+ extraNodes/);
   assert.match(engineSearch, /pub fn gpu_diagnostic_rate/);
   assert.match(engineSearch, /pub fn gpu_reply_pressure_reply_limit/);
   assert.match(engineSearch, /pub fn gpu_effective_branching_factor/);
   assert.match(engineSearch, /pub fn gpu_completed_reply_should_search/);
+  assert.match(engineSearch, /pub fn gpu_frontier_cycle_should_stop/);
+  assert.match(engineSearch, /pub fn gpu_frontier_readback_summary_json/);
   assert.match(engineSearch, /pub fn gpu_reported_latency_ms/);
   assert.match(engineSearch, /pub fn gpu_nodes_per_second/);
+  assert.match(engineSearch, /pub fn gpu_accumulated_search_nodes/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_diagnostic_rate/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_reply_pressure_reply_limit/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_effective_branching_factor/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_completed_reply_should_search/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_frontier_cycle_should_stop/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_frontier_readback_summary_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_reported_latency_ms/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_nodes_per_second/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_accumulated_search_nodes/);
   assert.match(engineTypes, /chronofish_gpu_diagnostic_rate\(numerator: number, denominator: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_reply_pressure_reply_limit\(\): number/);
   assert.match(engineTypes, /chronofish_gpu_effective_branching_factor\(selectedCount: number, cyclesCompleted: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_completed_reply_should_search\(royalCapturePresent: number, nowMs: number, deadlineAtMs: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_frontier_cycle_should_stop\(cycle: number, cyclesCompleted: number, requestedDepth: number, nowMs: number, deadlineAtMs: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_frontier_readback_summary_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_reported_latency_ms\(latencyMs: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_nodes_per_second\(nodes: number, latencyMs: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_accumulated_search_nodes\(baseNodes: number, extraNodes: number, fallbackNodes: number\): number/);
   assert.match(worker, /engine\.chronofish_gpu_search_validation_limit/);
   assert.match(worker, /engine\.chronofish_gpu_search_nodes/);
   assert.match(worker, /engine\.chronofish_gpu_mutation_candidate_limit/);
@@ -807,8 +853,8 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(worker, /engineGpuCandidateScoreWorkgroups\(engine, batchCandidateCount\)/);
   assert.match(worker, /engineGpuReplyScoreWorkgroupsX\(engine, rankedRoots\.length\)/);
   assert.match(worker, /engineGpuReplyScoreWorkgroupsY\(engine, rankedReplies\.length\)/);
-  assert.match(worker, /if \(!\(await engineGpuCompletedReplyShouldSearch\(snapshot\)\)\)/);
-  assert.match(worker, /depth: await engineGpuFullSearchReportedDepth\(requestedDepth\)/);
+  assert.match(worker, /if \(!\(await engineGpuSearch\.engineGpuCompletedReplyShouldSearch\(snapshot\)\)\)/);
+  assert.match(worker, /depth: await engineGpuSearch\.engineGpuFullSearchReportedDepth\(requestedDepth\)/);
   assert.doesNotMatch(worker, /const maxDispatchWorkgroups = 65_535/);
   assert.doesNotMatch(worker, /Math\.floor\(maxBindingSize \/ \(GPU_CANDIDATE_STRIDE \* Int32Array\.BYTES_PER_ELEMENT\)\)/);
   assert.doesNotMatch(worker, /Math\.ceil\(batchCandidateCount \/ 64\)/);
@@ -828,6 +874,7 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(engineSearch, /pub fn frontier_max_cycles/);
   assert.match(engineSearch, /pub fn frontier_per_parent_limit/);
   assert.match(engineSearch, /pub fn frontier_next_active_state_limit/);
+  assert.match(engineSearch, /pub fn frontier_orchestration_plan/);
   assert.match(engineSearch, /pub fn gpu_search_ranking_limit/);
   assert.match(engineSearch, /pub fn gpu_search_reply_limit/);
   assert.match(engineSearch, /pub fn gpu_reply_pressure_reply_limit/);
@@ -846,6 +893,7 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(wasmApi, /pub extern "C" fn chronofish_frontier_max_cycles/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_frontier_per_parent_limit/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_frontier_next_active_state_limit/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_frontier_orchestration_plan_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_search_ranking_limit/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_search_reply_limit/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_reply_pressure_reply_limit/);
@@ -864,6 +912,10 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(engineTypes, /chronofish_frontier_max_cycles\(requestedDepth: number, timelineCount: number\): number/);
   assert.match(engineTypes, /chronofish_frontier_per_parent_limit\(frontierWidth: number\): number/);
   assert.match(engineTypes, /chronofish_frontier_next_active_state_limit\(frontierWidth: number, activeStateLimit: number, perParentLimit: number\): number/);
+  assert.match(engineTypes, /chronofish_frontier_orchestration_plan_json\(ptr: number, length: number\): number/);
+  assert.match(worker, /const orchestration = await engineFrontierOrchestrationPlan\(/);
+  assert.doesNotMatch(worker, /async function engineFrontierPerParentLimit\(/);
+  assert.doesNotMatch(worker, /async function engineFrontierNextActiveStateLimit\(/);
   assert.match(engineTypes, /chronofish_gpu_search_ranking_limit\(nodes: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_search_reply_limit\(nodes: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_reply_pressure_reply_limit\(\): number/);
@@ -880,7 +932,7 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(engineTypes, /chronofish_gpu_reply_score_workgroups_x\(rootCount: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_reply_score_workgroups_y\(replyCount: number\): number/);
   assert.match(worker, /graphDeduplication: 1/);
-  assert.match(worker, /const choiceDiagnostics = await engineFrontierChoiceDiagnostics\(selected, selected\.choices\)/);
+  assert.match(worker, /const choiceDiagnostics = await engineGpuSearch\.engineFrontierChoiceDiagnostics\(selected, selected\.choices\)/);
   assert.match(worker, /legalChoiceCount: choiceDiagnostics\.legalChoiceCount/);
   assert.match(worker, /legalTacticalChoiceCount: choiceDiagnostics\.legalTacticalChoiceCount/);
   assert.match(worker, /engine\.chronofish_gpu_frontier_choice_diagnostics_json\(ptr, len\)/);
@@ -889,15 +941,21 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
   assert.match(engineTypes, /chronofish_gpu_frontier_choice_diagnostics_json\(ptr: number, length: number\): number/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_frontier_choice_diagnostics_json/);
   assert.match(engineSearch, /pub fn gpu_frontier_choice_diagnostics_json/);
-  assert.match(worker, /const policyChoiceAgreement = await engineChoiceAgreement\(selected, selected\.choices, \[1, 5, 20\]\)/);
-  assert.match(worker, /topPolicyChoiceAgreement: policyChoiceAgreement\[0\] \?\? 0/);
-  assert.match(worker, /top5PolicyChoiceAgreement: policyChoiceAgreement\[1\] \?\? 0/);
-  assert.match(worker, /top20PolicyChoiceAgreement: policyChoiceAgreement\[2\] \?\? 0/);
-  assert.match(worker, /engine\.chronofish_gpu_choice_agreement_choices_json\(ptr, len\)/);
+  assert.match(worker, /const policyChoiceAgreement = await engineGpuSearch\.enginePolicyChoiceAgreementDiagnostics\(selected, selected\.choices\)/);
+  assert.match(worker, /topPolicyChoiceAgreement: policyChoiceAgreement\.topPolicyChoiceAgreement/);
+  assert.match(worker, /top5PolicyChoiceAgreement: policyChoiceAgreement\.top5PolicyChoiceAgreement/);
+  assert.match(worker, /top20PolicyChoiceAgreement: policyChoiceAgreement\.top20PolicyChoiceAgreement/);
+  assert.match(worker, /engine\.chronofish_gpu_policy_choice_agreement_diagnostics_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /policyChoiceAgreement\[0\]/);
+  assert.doesNotMatch(worker, /policyChoiceAgreement\[1\]/);
+  assert.doesNotMatch(worker, /policyChoiceAgreement\[2\]/);
   assert.doesNotMatch(worker, /function choiceAgreement/);
   assert.match(engineTypes, /chronofish_gpu_choice_agreement_choices_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_policy_choice_agreement_diagnostics_json\(ptr: number, length: number\): number/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_choice_agreement_choices_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_policy_choice_agreement_diagnostics_json/);
   assert.match(engineSearch, /pub fn gpu_choice_agreement_choices_json/);
+  assert.match(engineSearch, /pub fn gpu_policy_choice_agreement_diagnostics_json/);
   assert.match(engineSearch, /pub fn gpu_choice_agreement_json/);
   assert.match(worker, /selectedMovePrunedRisk: choiceDiagnostics\.selectedMovePrunedRisk/);
   assert.match(worker, /selectedMoveTactical: choiceDiagnostics\.selectedMoveTactical/);
@@ -925,17 +983,18 @@ test("GPU frontier publishes diagnostics needed for rollout gates", async () => 
 });
 
 test("GPU frontier keeps pruned overflow searches when selected states exist", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_expand.wgsl"), "utf8");
 
   assert.match(shader, /atomicStore\(&counters\[2\], 1u\)/);
-  assert.match(worker, /candidateOverflow: \(counters\[2\] \?\? 0\) !== 0/);
+  assert.match(worker, /engineGpuFrontierReadbackSummary\(counters\)/);
+  assert.doesNotMatch(worker, /candidateOverflow: \(counters\[2\] \?\? 0\) !== 0/);
   assert.match(worker, /if \(readback\.candidateOverflow && readback\.selectedCount === 0\)/);
   assert.match(worker, /GPU frontier candidate capacity overflowed before completing search/);
 });
 
 test("GPU readbacks copy mapped ranges before unmapping", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
 
   assert.match(worker, /const statesCopy = bytes\.slice\(0, stateByteLength\)/);
   assert.match(worker, /const countersCopy = bytes\.slice\(stateByteLength, stateByteLength \+ counterByteLength\)/);
@@ -985,7 +1044,7 @@ test("GPU frontier smoke harness covers board-count and tactical fixtures", asyn
 });
 
 test("full GPU mode enters the resident frontier before legacy CPU candidate products", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const body = worker.slice(worker.indexOf("async function tryGpuSearch"), worker.indexOf("async function tryGpuResidentFrontierSearch"));
 
   assert.ok(body.indexOf("if (gpuMode === \"full\")") < body.indexOf("engineGpuCandidateInputsFromSnapshot"));
@@ -1000,7 +1059,7 @@ test("GPU bot search uses one worker and one device queue", async () => {
 });
 
 test("GPU training harness uses bounded parallel WebGPU workers", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
@@ -1012,19 +1071,20 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.doesNotMatch(workerTypes, /const MAX_PARALLEL_GPU_TRAINING_WORKERS/);
   assert.match(constants, /export const MAX_PLAYOUT_PLIES = 10/);
   assert.doesNotMatch(worker, /MAX_PLAYOUT_PLIES[\s\S]*from "\.\/training-gpu-constants\.js"/);
-  assert.match(worker, /chronofish_gpu_training_worker_count\(total, requestedWorkers\)/);
-  assert.match(worker, /chronofish_training_label_worker_count\(\s*jobCount,\s*requestedWorkers \?\? -1,\s*navigator\.hardwareConcurrency \?\? 4\s*\)/);
-  assert.match(worker, /chronofish_training_split_work_json\(total, workers\)/);
-  assert.match(worker, /chronofish_training_sample_plies\(index, encodeOnly \? 1 : 0\)/);
+  assert.match(worker, /chronofish_gpu_training_worker_count/);
+  assert.match(worker, /chronofish_gpu_duel_training_worker_count/);
+  assert.match(worker, /chronofish_training_label_worker_count/);
+  assert.match(worker, /chronofish_training_split_work_json/);
+  assert.match(worker, /chronofish_training_sample_plies/);
   assert.match(worker, /function rolloutPlyOffset\(ply: number, workerIndex: number\): number/);
-  assert.match(worker, /chronofish_gpu_rollout_ply_offset\(ply, workerIndex\)/);
+  assert.match(worker, /chronofish_gpu_rollout_ply_offset/);
   assert.doesNotMatch(worker, /ply \+ workerIndex \* gpuRolloutMaxPlies\(0, 0\)/);
   assert.match(worker, /chronofish_training_worker_request_timeout_ms/);
   assert.match(worker, /chronofish_training_worker_search_time_ms/);
-  assert.match(worker, /chronofish_training_worker_request_timeout_ms_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_training_worker_search_time_ms_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_loss_log_replay_logs_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_training_metrics_summary_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_training_worker_request_timeout_ms_json/);
+  assert.match(worker, /chronofish_training_worker_search_time_ms_json/);
+  assert.match(worker, /chronofish_loss_log_replay_logs_json/);
+  assert.match(worker, /chronofish_training_metrics_summary_json/);
   assert.doesNotMatch(worker, /Number\(payload\.nodes\) \|\| 1/);
   assert.doesNotMatch(worker, /Number\(payload\.timeMs\) \|\| 0/);
   assert.doesNotMatch(worker, /Math\.min\(MAX_PARALLEL_GPU_TRAINING_WORKERS, Math\.floor\(requestedWorkers\) \|\| 1\)/);
@@ -1033,6 +1093,8 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.doesNotMatch(worker, /Math\.floor\(total \/ workers\) \+ \(index < total % workers \? 1 : 0\)/);
   assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(positions\.length, config\.searchWorkers\)/);
   assert.match(worker, /const workerCount = gpuTrainingWorkerCount\(target, config\.selfPlayWorkers\)/);
+  assert.match(worker, /const workerCount = gpuDuelTrainingWorkerCount\(target, config\.searchWorkers, config\.selfPlayWorkers\)/);
+  assert.doesNotMatch(worker, /Math\.min\(config\.searchWorkers, config\.selfPlayWorkers\)/);
   assert.match(worker, /collectGpuPositions\(game, config, target, progress, "search", config\.searchWorkers\)/);
   assert.match(worker, /const warmupPlies = gpuWarmupPlies\(workerIndex\)/);
   assert.match(worker, /const warmupConfig = gpuWarmupSearchConfig\(config\)/);
@@ -1054,12 +1116,14 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.match(engineTraining, /pub const GPU_POSITION_GENERATION_TIME_MS: u64 = 3_000/);
   assert.match(engineTraining, /pub fn split_work/);
   assert.match(engineTraining, /pub fn gpu_training_worker_count/);
+  assert.match(engineTraining, /pub fn gpu_duel_training_worker_count/);
   assert.match(engineTraining, /pub fn training_label_worker_count/);
   assert.match(engineTraining, /pub fn sample_plies/);
   assert.match(engineTraining, /pub fn gpu_rollout_ply_offset/);
   assert.match(engineTraining, /pub fn worker_request_timeout_ms/);
   assert.match(engineTraining, /pub fn worker_search_time_ms/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_training_worker_count/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_duel_training_worker_count/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_training_label_worker_count/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_training_split_work_json/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_training_sample_plies/);
@@ -1074,6 +1138,7 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_loss_log_replay_logs_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_training_metrics_summary_json/);
   assert.match(engineTypes, /chronofish_gpu_training_worker_count\(total: number, requestedWorkers: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_duel_training_worker_count\(total: number, searchWorkers: number, selfPlayWorkers: number\): number/);
   assert.match(engineTypes, /chronofish_training_label_worker_count\(jobCount: number, requestedWorkers: number, hardwareCores: number\): number/);
   assert.match(engineTypes, /chronofish_training_split_work_json\(total: number, workers: number\): number/);
   assert.match(engineTypes, /chronofish_training_sample_plies\(index: number, encodeOnly: number\): number/);
@@ -1092,13 +1157,13 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
 });
 
 test("GPU training rollouts apply complete returned turns", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const applyWorkerTurn = worker.slice(worker.indexOf("async function applyWorkerTurn"), worker.indexOf("async function applyCpuWorkerTurn"));
 
   assert.match(worker, /async function applyWorkerTurn/);
-  assert.match(applyWorkerTurn, /engine\.chronofish_cpu_apply_turn_json\(ptr, len\)/);
+  assert.match(applyWorkerTurn, /chronofish_cpu_apply_turn_json/);
   assert.doesNotMatch(applyWorkerTurn, /for \(const move of moves\)/);
   assert.doesNotMatch(applyWorkerTurn, /loadTrainingSnapshot/);
   assert.doesNotMatch(applyWorkerTurn, /engine\.chronofish_apply_move\(/);
@@ -1116,7 +1181,7 @@ test("GPU training rollouts apply complete returned turns", async () => {
 });
 
 test("GPU worker non-search commands use engine WASM instead of WebGPU", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const handler = worker.slice(worker.indexOf("self.addEventListener"), worker.indexOf("const snapshotOverride"));
@@ -1138,13 +1203,13 @@ test("GPU worker non-search commands use engine WASM instead of WebGPU", async (
 });
 
 test("GPU worker gets search snapshots from the engine boundary", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const snapshotModule = await readFile(path.join(root, "src/ai-snapshot.ts"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineSnapshot = await readFile(path.join(repoRoot, "engine/src/gpu_snapshot.rs"), "utf8");
 
-  assert.match(worker, /const snapshotOverride = await engineGpuSnapshot\(clientGame\)/);
+  assert.match(worker, /const snapshotOverride = await engineGpuSearch\.engineGpuSnapshot\(clientGame\)/);
   assert.match(worker, /engine\.chronofish_gpu_snapshot_json\(\)/);
   assert.doesNotMatch(worker, /parseGpuSnapshotBytes/);
   assert.doesNotMatch(worker, /engine\.chronofish_gpu_snapshot_bytes\(\)/);
@@ -1157,25 +1222,28 @@ test("GPU worker gets search snapshots from the engine boundary", async () => {
 });
 
 test("stale GPU search generations cannot publish results", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
 
   assert.match(worker, /activeSearchGeneration/);
   assert.match(worker, /searchGeneration !== activeSearchGeneration/);
 });
 
 test("GPU frontier deadline cannot interrupt the requested depth", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
+  const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
-  assert.match(worker, /cyclesCompleted >= requestedDepth && Date\.now\(\) >= gpuDeadlineAt/);
+  assert.match(worker, /engineGpuSearch\.engineGpuFrontierCycleShouldStop\(frontierEngine, cycle, cyclesCompleted, requestedDepth\)/);
+  assert.match(engineSearch, /cycle > 0 && cycles_completed >= requested_depth && now_ms >= deadline_at_ms/);
+  assert.doesNotMatch(worker, /cycle > 0 && cyclesCompleted >= requestedDepth && Date\.now\(\) >= gpuDeadlineAt/);
 });
 
 test("hybrid GPU depth-one search uses engine pending boards for turn completion", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
 
-  assert.match(worker, /const pendingBoards = await enginePendingPresentBoards\(snapshot, snapshot\.turn\)/);
+  assert.match(worker, /const pendingBoards = await engineGpuSearch\.enginePendingPresentBoards\(snapshot, snapshot\.turn\)/);
   assert.match(worker, /async function enginePendingPresentBoards/);
   assert.match(worker, /chronofish_gpu_pending_present_boards_json\(ptr, len\)/);
   assert.match(worker, /async function engineIncompleteTurnPendingPresentBoardCount/);
@@ -1196,8 +1264,8 @@ test("hybrid GPU depth-one search uses engine pending boards for turn completion
 });
 
 test("GPU candidate selection accepts single-move choices", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
-  const trainingWorker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
+  const trainingWorker = await readTrainingWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
@@ -1213,7 +1281,9 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.doesNotMatch(worker, /engine\.chronofish_gpu_move_plan_key_json\(ptr, len\)/);
   assert.match(worker, /engine\.chronofish_gpu_frontier_choices_json_bytes\(/);
   assert.match(worker, /engineValidatedFrontierChoice\(candidate, moves, seenKeys, choices\.length, 12, gpuSearch\)/);
+  assert.match(worker, /validateFirstFrontierTurn\(snapshot, candidate\.moves, sourceGame\)/);
   assert.match(worker, /engine\.chronofish_gpu_validated_frontier_choice_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /candidate\.moves \?\? \[\]/);
   assert.doesNotMatch(worker, /const seen = new Set<string>\(\)/);
   assert.doesNotMatch(worker, /seen\.has\(key\)/);
   assert.doesNotMatch(worker, /seen\.add\(key\)/);
@@ -1223,7 +1293,7 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.doesNotMatch(worker, /function moveFromFrontierWords/);
   assert.doesNotMatch(worker, /GPU_FRONTIER_MOVE_STRIDE/);
   assert.match(trainingWorker, /function engineMovePlanKey/);
-  assert.match(trainingWorker, /engine\.chronofish_gpu_move_plan_key_json\(ptr, len\)/);
+  assert.match(trainingWorker, /chronofish_gpu_move_plan_key_json/);
   assert.doesNotMatch(trainingWorker, /function movesKey/);
   assert.doesNotMatch(worker, /await engineSummarizeSearchChoices\(candidates\)/);
   assert.doesNotMatch(worker, /engine\.chronofish_gpu_summarize_search_choices_json\(ptr, len\)/);
@@ -1238,9 +1308,20 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.match(worker, /engine\.chronofish_gpu_pick_candidate_records_json\(ptr, len\)/);
   assert.match(worker, /engine\.chronofish_gpu_mutation_selected_candidates_json\(ptr, len\)/);
   assert.match(worker, /engine\.chronofish_gpu_candidate_indexes_json\(ptr, len\)/);
+  assert.match(worker, /engine\.chronofish_gpu_candidate_scores_json\(ptr, len\)/);
+  assert.match(worker, /engine\.chronofish_gpu_candidate_score_is_rejected\(score\) !== 0/);
+  assert.match(worker, /engine\.chronofish_gpu_mutation_statuses_json\(ptr, len\)/);
   assert.match(worker, /engine\.chronofish_gpu_mutation_turn_code_json\(ptr, len\)/);
   assert.doesNotMatch(worker, /ranked\.slice\(0, limit\)/);
   assert.doesNotMatch(worker, /selected\.map\(\(entry\) => entry\.index\)/);
+  assert.doesNotMatch(worker, /rankedRoots\.map\(\(entry\) => entry\.index\)/);
+  assert.doesNotMatch(worker, /rankedReplies\.map\(\(entry\) => entry\.index\)/);
+  assert.doesNotMatch(worker, /rankedRoots\.map\(\(entry\) => allRootScores\[entry\.index\]/);
+  assert.doesNotMatch(worker, /rankedReplies\.map\(\(entry\) => allReplyScores\[entry\.index\]/);
+  assert.doesNotMatch(worker, /score: scored\.scores\[index\] \?\? 0/);
+  assert.doesNotMatch(worker, /scored\.scores\[index\] \?\? -2147483647/);
+  assert.doesNotMatch(worker, /<= -2147480000/);
+  assert.doesNotMatch(worker, /mutationStatus: statuses\[index\] \?\? 0/);
   assert.doesNotMatch(worker, /candidateRecords\[1\] \?\? 0/);
   assert.match(worker, /records: Array\.from\(records\),\s*indices/s);
   const pickCandidateRecordsHelper = worker.slice(worker.indexOf("async function enginePickCandidateRecords"), worker.indexOf("async function engineCandidateIndex"));
@@ -1267,6 +1348,9 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.match(engineTypes, /chronofish_gpu_pick_candidate_records_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_mutation_selected_candidates_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_candidate_indexes_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_candidate_scores_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_candidate_score_is_rejected\(score: number\): number/);
+  assert.match(engineTypes, /chronofish_gpu_mutation_statuses_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_mutation_turn_code_json\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_candidate_index_bytes\(ptr: number, length: number\): number/);
   assert.match(engineTypes, /chronofish_gpu_candidate_index_json\(ptr: number, length: number\): number/);
@@ -1281,6 +1365,9 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_pick_candidate_records_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_mutation_selected_candidates_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_candidate_indexes_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_candidate_scores_json/);
+  assert.match(wasmApi, /pub extern "C" fn chronofish_gpu_candidate_score_is_rejected/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_mutation_statuses_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_mutation_turn_code_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_candidate_index_bytes/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_candidate_index_json/);
@@ -1295,13 +1382,16 @@ test("GPU candidate selection accepts single-move choices", async () => {
   assert.match(engineSearch, /pub fn gpu_pick_candidate_records_json/);
   assert.match(engineSearch, /pub fn gpu_mutation_selected_candidates_json/);
   assert.match(engineSearch, /pub fn gpu_candidate_indexes_json/);
+  assert.match(engineSearch, /pub fn gpu_candidate_scores_json/);
+  assert.match(engineSearch, /pub fn gpu_candidate_score_is_rejected/);
+  assert.match(engineSearch, /pub fn gpu_mutation_statuses_json/);
   assert.match(engineSearch, /pub fn gpu_mutation_turn_code_json/);
   assert.match(engineSearch, /pub fn gpu_candidate_index_from_i32s/);
   assert.match(engineSearch, /pub fn gpu_candidate_index_json/);
 });
 
 test("GPU frontier smoke harness can force device-loss cleanup and rebuild", async () => {
-  const worker = await readFile(path.join(root, "src/ai-worker.ts"), "utf8");
+  const worker = await readGpuSearchWorkerSources();
   const gpuDevice = await readFile(path.join(root, "src/ai-gpu-device.ts"), "utf8");
 
   assert.match(worker, /debugLoseDevice/);
@@ -1313,7 +1403,7 @@ test("GPU frontier smoke harness can force device-loss cleanup and rebuild", asy
 });
 
 test("GPU frontier tuning uses timestamp queries when available", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
 
   assert.match(source, /autotuneFrontier/);
   assert.match(source, /timestamp-query/);
@@ -1322,7 +1412,7 @@ test("GPU frontier tuning uses timestamp queries when available", async () => {
 });
 
 test("GPU frontier tuning stays below browser watchdog-sized passes", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_state.wgsl"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -1350,6 +1440,7 @@ test("GPU frontier tuning stays below browser watchdog-sized passes", async () =
   assert.match(engineSearch, /pub struct FrontierTuningLimits/);
   assert.match(engineSearch, /pub struct FrontierTuning/);
   assert.match(engineSearch, /pub fn derive_frontier_tuning/);
+  assert.match(engineSearch, /pub fn gpu_snapshot_search_size_json/);
   assert.match(engineSearch, /pub fn gpu_frontier_positive_limit/);
   assert.match(engineSearch, /pub fn gpu_frontier_workgroup_size/);
   assert.match(engineSearch, /pub fn gpu_frontier_clamp_usize/);
@@ -1357,7 +1448,9 @@ test("GPU frontier tuning stays below browser watchdog-sized passes", async () =
   assert.match(engineSearch, /gpu_frontier_workgroup_size\(max_invocations\)/);
   assert.match(engineSearch, /gpu_frontier_next_power_of_two\(/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_derive_frontier_tuning_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_snapshot_search_size_json/);
   assert.match(engineTypes, /chronofish_derive_frontier_tuning_json\(/);
+  assert.match(engineTypes, /chronofish_gpu_snapshot_search_size_json\(ptr: number, length: number\): number/);
   assert.match(source, /minimax_reduce_stage/);
   assert.match(source, /frontierMinimaxWorkgroups\(this\.tuning\.frontierWidth, this\.engine\)/);
   assert.doesNotMatch(source, /Math\.ceil\(this\.tuning\.frontierWidth \/ 64\)/);
@@ -1371,7 +1464,7 @@ test("GPU frontier tuning stays below browser watchdog-sized passes", async () =
 });
 
 test("GPU frontier sorts a bounded shortlist instead of full candidate capacity", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_select.wgsl"), "utf8");
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -1409,7 +1502,7 @@ test("GPU frontier sorts a bounded shortlist instead of full candidate capacity"
 });
 
 test("GPU frontier fills from unsorted candidates when shortlist pruning underfills", async () => {
-  const source = await readFile(path.join(root, "src/ai-frontier.ts"), "utf8");
+  const source = await readAiFrontierSources();
   const shader = await readFile(path.join(searchShaderRoot, "frontier_select.wgsl"), "utf8");
 
   assert.match(source, /markUnique/);
@@ -1432,7 +1525,7 @@ test("GPU policy training applies label weights to move priors", async () => {
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const shader = await readFile(path.join(trainingShaderRoot, "policy.wgsl"), "utf8");
   const lossShader = await readFile(path.join(trainingShaderRoot, "policy_loss.wgsl"), "utf8");
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
@@ -1447,15 +1540,20 @@ test("GPU policy training applies label weights to move priors", async () => {
   assert.doesNotMatch(worker, /chronofish_policy_bucket_from_move_values\(/);
   assert.match(engineTypes, /chronofish_policy_bucket_from_move_values\(/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_policy_bucket_from_move_values/);
-  assert.match(worker, /searchResultLabelSample\(position\.sample, result\.score, result\.moves\[0\], "search", 1\.0\)/);
-  assert.match(worker, /searchResultLabelSample\(position\.sample, result\.score, result\.moves\[0\], "cpu", cpuSearchLabelWeight\(config\)\)/);
-  assert.match(worker, /searchResultLabelSample\([\s\S]*position\.sample,[\s\S]*result\.score,[\s\S]*result\.moves\[0\],[\s\S]*labelKind,[\s\S]*baseLabelWeight \* labelWeightMultiplier\(position\)[\s\S]*\)/);
-  assert.match(worker, /chronofish_search_result_label_sample_json\(ptr, len\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\(position\.sample, response\.result, "search", 1\.0\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\(position\.sample, response\.result, "cpu", cpuSearchLabelWeight\(config\)\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\([\s\S]*position\.sample,[\s\S]*response\.result,[\s\S]*labelKind,[\s\S]*baseLabelWeight \* labelWeightMultiplier\(position\)[\s\S]*\)/);
+  assert.match(worker, /chronofish_search_result_label_sample_from_result_json/);
+  assert.doesNotMatch(worker, /result\.moves\[0\]/);
+  assert.doesNotMatch(worker, /result\?\.moves\?\.length/);
   assert.doesNotMatch(worker, /labelKind: "search"[\s\S]*labelWeight: 1\.0[\s\S]*pseudo: false/);
   assert.doesNotMatch(worker, /labelKind: "cpu"[\s\S]*labelWeight: cpuSearchLabelWeight\(config\)[\s\S]*pseudo: false/);
   assert.match(engineTypes, /chronofish_search_result_label_sample_json\(ptr: number, length: number\): number/);
+  assert.match(engineTypes, /chronofish_search_result_label_sample_from_result_json\(ptr: number, length: number\): number/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_search_result_label_sample_json/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_search_result_label_sample_from_result_json/);
   assert.match(engineTraining, /pub fn search_result_label_sample_json/);
+  assert.match(engineTraining, /pub fn search_result_label_sample_from_result_json/);
   assert.match(trainer, /policyTrainingIndices\(samples, true, engine\)/);
   assert.match(trainer, /chronofish_policy_training_indices_bytes/);
   assert.match(trainer, /hasPolicyTrainingTarget\(sample, engine\)/);
@@ -1526,7 +1624,7 @@ test("GPU policy training applies label weights to move priors", async () => {
 });
 
 test("GPU training distinguishes completed outcomes from search bootstraps", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const delta = await readFile(path.join(trainingShaderRoot, "output_delta.wgsl"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
@@ -1536,16 +1634,17 @@ test("GPU training distinguishes completed outcomes from search bootstraps", asy
   assert.match(worker, /kind: "partial"/);
   assert.match(worker, /"duel-search"/);
   assert.match(worker, /relabelOutcomeSamplesWithEngine/);
-  assert.match(worker, /chronofish_relabel_outcome_samples_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_relabel_outcome_samples_json/);
   assert.match(worker, /const labelPolicy = trainingLabelPolicy\(\)/);
-  assert.match(worker, /searchResultLabelSample\(encoded, result\?\.score, moves\[0\], "duel", labelPolicy\.duelLabelWeight\)/);
-  assert.match(worker, /searchResultLabelSample\(encoded, result\?\.score, moves\[0\], "outcome", labelPolicy\.outcomeLabelWeight\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\(encoded, result, "duel", labelPolicy\.duelLabelWeight\)/);
+  assert.match(worker, /searchResultLabelSampleFromResult\(encoded, result, "outcome", labelPolicy\.outcomeLabelWeight\)/);
+  assert.doesNotMatch(worker, /searchResultLabelSample\(encoded, result\?\.score, moves\[0\]/);
   assert.match(worker, /labelWeight: labelPolicy\.duelLabelWeight/);
   assert.match(worker, /labelWeight: labelPolicy\.duelDrawLabelWeight/);
   assert.doesNotMatch(worker, /label: normalizeSearchScore\(result\?\.score \?\? 0\),[\s\S]*policy: policyBucket\(moves\[0\]\),[\s\S]*labelKind: "duel"/);
   assert.doesNotMatch(worker, /label: normalizeSearchScore\(result\?\.score \?\? 0\),[\s\S]*policy: policyBucket\(moves\[0\]\),[\s\S]*labelKind: "outcome"/);
   assert.match(worker, /distillSamplesWithEngine\(samples, labels\)/);
-  assert.match(worker, /chronofish_distill_training_samples_with_labels_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_distill_training_samples_with_labels_json/);
   assert.doesNotMatch(worker, /labelKind: "distilled"[\s\S]*labelWeight: trainingLabelPolicy\(\)\.distilledLabelWeight[\s\S]*pseudo: true/);
   assert.doesNotMatch(worker, /labelWeight: 1\.35/);
   assert.doesNotMatch(worker, /labelWeight: 1\.25/);
@@ -1609,12 +1708,12 @@ test("GPU training distinguishes completed outcomes from search bootstraps", asy
 });
 
 test("GPU training has staged curriculum and tactical adversarial label modes", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const workerTypes = await readFile(path.join(root, "src/training-worker-types.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
-  const trainingCli = await readFile(path.join(repoRoot, "engine/src/cpu/training/cli.rs"), "utf8");
+  const trainingCli = await readFile(path.join(repoRoot, "engine/src/gpu/cli.rs"), "utf8");
   const ui = await readFile(path.join(root, "src/training-ui.ts"), "utf8");
   const html = await readFile(path.join(root, "src/index.html"), "utf8");
 
@@ -1625,11 +1724,11 @@ test("GPU training has staged curriculum and tactical adversarial label modes", 
   assert.match(worker, /curriculumGame/);
   assert.match(worker, /generateTacticalPositionGame/);
   assert.match(worker, /tacticalPositionPriority/);
-  assert.match(worker, /chronofish_curriculum_game_snapshot_json\(ptr, len, index\)/);
-  assert.match(worker, /chronofish_tactical_position_priority_snapshot_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_tactical_position_attempt_count\(index\)/);
-  assert.match(worker, /chronofish_tactical_position_use_best_source\(bestPriority\)/);
-  assert.match(worker, /chronofish_tactical_position_selection_json\(bestPriority, generatedPriority\)/);
+  assert.match(worker, /chronofish_curriculum_game_snapshot_json/);
+  assert.match(worker, /chronofish_tactical_position_priority_snapshot_json/);
+  assert.match(worker, /chronofish_tactical_position_attempt_count/);
+  assert.match(worker, /chronofish_tactical_position_use_best_source/);
+  assert.match(worker, /chronofish_tactical_position_selection_json/);
   assert.doesNotMatch(worker, /const attempts = 1 \+ \(index % 4\)/);
   assert.doesNotMatch(worker, /bestPriority > 0 \? best : game/);
   assert.doesNotMatch(worker, /if \(priority > bestPriority\)/);
@@ -1703,10 +1802,10 @@ test("GPU training has staged curriculum and tactical adversarial label modes", 
 });
 
 test("GPU distillation labels searched positions instead of duplicating the root snapshot", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
-  const trainingCli = await readFile(path.join(repoRoot, "engine/src/cpu/training/cli.rs"), "utf8");
+  const trainingCli = await readFile(path.join(repoRoot, "engine/src/gpu/cli.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
@@ -1727,12 +1826,12 @@ test("GPU distillation labels searched positions instead of duplicating the root
   assert.match(engineTraining, /distilled sample mode requires a compact value model/);
   assert.match(trainingCli, /--gpu-distill-samples/);
   assert.match(trainingCli, /"--gpu-model" \| "--gpu-value-model"/);
-  assert.match(trainingCli, /config\.gpu_value_model_path = model_path/);
-  assert.match(trainingCli, /fn gpu_value_model_path\(config: &TrainerConfig\) -> &str/);
-  assert.match(trainingCli, /fn load_gpu_value_model\(config: &TrainerConfig\)/);
+  assert.match(trainingCli, /self\.gpu_value_model_path = value\.to_string\(\)/);
+  assert.match(trainingCli, /fn gpu_value_model_path\(config: &GpuCliConfig\) -> &str/);
+  assert.match(trainingCli, /fn load_gpu_value_model\(config: &GpuCliConfig\)/);
   assert.match(trainingCli, /gpu_sample_distill_model/);
   assert.match(trainingCli, /load_gpu_value_model\(config\)/);
-  assert.match(trainingCli, /distill_training_samples\(&samples, &model\)/);
+  assert.match(trainingCli, /distill_training_samples\(&samples, &load_gpu_value_model\(config\)\)/);
   assert.match(trainingCli, /source_model=\{\}/);
   assert.doesNotMatch(worker, /const positions = await collectSamples\(game, config, true/);
 });
@@ -1809,7 +1908,7 @@ test("GPU training validation split falls back to a high-signal holdout", async 
   assert.match(sampleHelpers, /groupTrainingIndicesByPosition\(samples, trainIndices\)/);
   assert.match(sampleHelpers, /function validationSamplePriority/);
   assert.match(sampleHelpers, /trainingLabelPriority\(sample\.labelKind, sample\.pseudo\)/);
-  assert.match(sampleHelpers, /chronofish_training_label_priority\(input\.ptr, input\.len, pseudo \? 1 : 0\)/);
+  assert.match(sampleHelpers, /"chronofish_training_label_priority", labelKind \?\? "", pseudo \? 1 : 0/);
   assert.match(sampleHelpers, /Math\.max\(0, sample\.labelWeight \?\? 1\)/);
 });
 
@@ -1818,7 +1917,7 @@ test("GPU training selects a device-sized high-signal working set", async () => 
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
-  const trainingCli = await readFile(path.join(repoRoot, "engine/src/cpu/training/cli.rs"), "utf8");
+  const trainingCli = await readFile(path.join(repoRoot, "engine/src/gpu/cli.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
@@ -2047,7 +2146,7 @@ test("GPU training unlocks hidden-layer backpropagation only with enough unique 
   assert.match(engineTypes, /chronofish_count_non_zero_f32_bytes\(ptr: number, length: number\): number/);
   assert.match(trainer, /projectionHash\(rawIndex: number, projectionIndex: number, seed: number, engine\?: ChronofishEngine\)/);
   assert.match(trainer, /initialHiddenWeights\(inputSize: number, hiddenLayers: number\[\], engine\?: ChronofishEngine\)/);
-  assert.match(trainer, /chronofish_initial_hidden_weights_bytes\(input\.ptr, input\.len\)/);
+  assert.match(trainer, /"chronofish_initial_hidden_weights_bytes"/);
   assert.match(trainer, /splitHiddenWeights\(hiddenWeights: Float32Array, inputSize: number, hiddenLayers: number\[\], engine\?: ChronofishEngine\)/);
   assert.match(trainer, /concatFloat32\(arrays: Float32Array\[\], engine\?: ChronofishEngine\)/);
   assert.match(trainer, /countNonZero\(values: ArrayLike<number>, engine\?: ChronofishEngine\)/);
@@ -2096,7 +2195,7 @@ test("GPU and CPU-head optimizers retain momentum without checkpoint readbacks",
 
 test("GPU value inference restores the normalized training score scale", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
@@ -2109,10 +2208,10 @@ test("GPU value inference restores the normalized training score scale", async (
   assert.match(constants, /export const VALUE_SCORE_SCALE = 20_000/);
   assert.doesNotMatch(worker, /function normalizeSearchScore/);
   assert.doesNotMatch(worker, /chronofish_normalized_search_score\(score\)/);
-  assert.match(worker, /chronofish_search_result_label_sample_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_search_result_label_sample_from_result_json/);
   assert.match(worker, /function engineOppositeColor/);
   assert.doesNotMatch(worker, /function oppositeColor/);
-  assert.match(worker, /engine\.chronofish_opposite_color_json\(ptr, len\)/);
+  assert.match(worker, /chronofish_opposite_color_json/);
   assert.doesNotMatch(worker, /import \{ train, predictValues, normalizedSearchScore \}/);
   assert.match(shader, /clamp\(predictions\[state\] \* apply_params\.value_scale \+ apply_params\.value_bias, -1\.0, 1\.0\)/);
   assert.match(shader, /neural \* 20000\.0/);
@@ -2218,7 +2317,11 @@ test("GPU training batches feature projection directly into the final buffer", a
 });
 
 test("training label workers encode positions through engine WASM", async () => {
-  const worker = await readFile(path.join(root, "src/training-label-worker.ts"), "utf8");
+  const [workerSource, binding] = await Promise.all([
+    readFile(path.join(root, "src/training-label-worker.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-training.ts"), "utf8")
+  ]);
+  const worker = `${workerSource}\n${binding}`;
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
@@ -2226,8 +2329,9 @@ test("training label workers encode positions through engine WASM", async () => 
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
 
   assert.equal(await fileExists(path.join(root, "src/training-encoding.ts")), false);
-  assert.match(worker, /instantiateChronofishWasm\("\.\/chronofish_engine\.wasm"\)/);
-  assert.match(worker, /chronofish_training_samples_json\(ptr, len\)/);
+  assert.match(workerSource, /new GpuTrainingBinding\(\)/);
+  assert.match(binding, /instantiateChronofishWasm\("\.\/chronofish_engine\.wasm"\)/);
+  assert.match(binding, /chronofish_training_samples_json/);
   assert.match(worker, /readWasmString\(engine, output\)/);
   assert.match(trainer, /NEURAL_BOARD_PLANES[\s\S]*from "\.\/training-gpu-constants\.js"/);
   assert.match(trainer, /base \+ 31 \* NEURAL_BOARD_SQUARES/);
@@ -2250,18 +2354,22 @@ test("training label workers encode positions through engine WASM", async () => 
 });
 
 test("GPU replay deduplicates positions and keeps validation groups separate", async () => {
-  const worker = await readFile(path.join(root, "src/training-worker.ts"), "utf8");
-  const labels = await readFile(path.join(root, "src/training-label-worker.ts"), "utf8");
+  const worker = await readTrainingWorkerSources();
+  const [labelSource, binding] = await Promise.all([
+    readFile(path.join(root, "src/training-label-worker.ts"), "utf8"),
+    readFile(path.join(root, "src/engine-gpu-training.ts"), "utf8")
+  ]);
+  const labels = `${labelSource}\n${binding}`;
   const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(root, "src/types.ts"), "utf8");
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
 
   assert.equal(await fileExists(path.join(root, "src/training-replay.ts")), false);
-  assert.match(labels, /chronofish_training_samples_json\(ptr, len\)/);
+  assert.match(labels, /chronofish_training_samples_json/);
   assert.doesNotMatch(labels, /function positionKey/);
-  assert.match(worker, /chronofish_dedupe_training_samples_json\(ptr, len\)/);
-  assert.match(worker, /chronofish_append_replay_samples_json\(ptr, len, maxBuffer\)/);
+  assert.match(worker, /chronofish_dedupe_training_samples_json/);
+  assert.match(worker, /chronofish_append_replay_samples_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_dedupe_training_samples_json/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_append_replay_samples_json/);
   assert.match(engineTypes, /chronofish_dedupe_training_samples_json\(ptr: number, length: number\): number/);
@@ -2279,7 +2387,7 @@ test("GPU replay deduplicates positions and keeps validation groups separate", a
 
 test("GPU replay retention prioritizes stronger label sources", async () => {
   const engineTraining = await readFile(path.join(repoRoot, "engine/src/gpu/training.rs"), "utf8");
-  const trainingCli = await readFile(path.join(repoRoot, "engine/src/cpu/training/cli.rs"), "utf8");
+  const trainingCli = await readFile(path.join(repoRoot, "engine/src/gpu/cli.rs"), "utf8");
   const engineModelTests = await readFile(path.join(repoRoot, "engine/tests/gpu_model.rs"), "utf8");
 
   assert.equal(await fileExists(path.join(root, "src/training-replay.ts")), false);
@@ -2300,7 +2408,7 @@ test("GPU replay retention prioritizes stronger label sources", async () => {
   assert.match(trainingCli, /let samples = crate::gpu::training::dedupe_training_samples\(samples\);/);
   assert.match(trainingCli, /train_value_head_cpu\(\s*&model,\s*&samples,/s);
   assert.match(trainingCli, /select_training_working_set_for_projection\(\s*&samples,/s);
-  assert.match(trainingCli, /append_replay_samples\(&buffer, &samples, max_buffer\)/);
+  assert.match(trainingCli, /append_replay_samples\(\s*&buffer,\s*&samples,\s*config\.gpu_replay_max\.max\(1\),/s);
   assert.match(trainingCli, /model_path: Some\(gpu_value_model_path\(config\)\.to_string\(\)\)/);
   assert.match(trainingCli, /let model = load_gpu_value_model\(config\);/);
   assert.match(trainingCli, /--gpu-replay-append/);

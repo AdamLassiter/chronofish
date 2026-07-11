@@ -1,6 +1,5 @@
-import { readWasmString, writeWasmString } from "./engine-io.js";
-import { instantiateChronofishWasm } from "./wasm-loader.js";
-import type { ChronofishEngine, Color, GameSnapshot } from "./types.js";
+import { GpuTrainingBinding } from "./engine-gpu-training.js";
+import type { Color, GameSnapshot } from "./types.js";
 
 interface WorkerScope {
   addEventListener(type: "message", listener: (event: MessageEvent<TrainingLabelRequest>) => void | Promise<void>): void;
@@ -28,7 +27,7 @@ interface NeuralSample {
 }
 
 const workerSelf = self as unknown as WorkerScope;
-let enginePromise: Promise<ChronofishEngine> | null = null;
+const trainingBinding = new GpuTrainingBinding();
 
 workerSelf.addEventListener("message", async (event) => {
   const { id, type, game, games, encodeOnly } = event.data;
@@ -64,23 +63,7 @@ async function neuralPosition(game: GameSnapshot): Promise<NeuralSample> {
 }
 
 async function neuralPositions(games: GameSnapshot[]): Promise<NeuralSample[]> {
-  const engine = await engineInstance();
-  const { ptr, len } = writeWasmString(engine, JSON.stringify(games));
-  try {
-    const output = engine.chronofish_training_samples_json(ptr, len);
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as NeuralSample[];
-  } finally {
-    engine.chronofish_dealloc(ptr, len);
-  }
-}
-
-async function engineInstance() {
-  enginePromise ??= instantiateChronofishWasm("./chronofish_engine.wasm")
-    .then((instance) => instance.exports as unknown as ChronofishEngine);
-  return enginePromise;
+  return trainingBinding.trainingSamples<NeuralSample[]>(games);
 }
 
 function errorMessage(error: unknown): string {

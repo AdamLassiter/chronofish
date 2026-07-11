@@ -1,6 +1,9 @@
 pub mod search;
 pub mod training;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cli;
+
 #[cfg(all(not(target_arch = "wasm32"), feature = "neural-wgpu"))]
 pub mod native;
 

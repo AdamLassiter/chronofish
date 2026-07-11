@@ -18,17 +18,22 @@ test("package exposes the browser training benchmark", () => {
 });
 
 test("CPU worker supports authoritative whole-turn application", async () => {
-  const worker = await readFile(path.join(root, "src/cpu-ai-worker.ts"), "utf8");
+  const worker = `${await readFile(path.join(root, "src/cpu-ai-worker.ts"), "utf8")}\n${await readFile(path.join(root, "src/engine-cpu-search.ts"), "utf8")}`;
 
   assert.match(worker, /type\?: "search" \| "applyTurn"/);
   assert.match(worker, /if \(type === "applyTurn"\)/);
-  assert.match(worker, /const applied = cpuApplyTurn\(engine, game, moves \?\? \[\]\)/);
+  assert.match(worker, /const applied = await binding\.applyTurn\(game, moves\)/);
   assert.match(worker, /engine\.chronofish_cpu_apply_turn_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /moves \?\? \[\]/);
   assert.doesNotMatch(worker, /engine\.chronofish_apply_move/);
   assert.doesNotMatch(worker, /engine\.chronofish_submit_turn\(\)/);
   assert.doesNotMatch(worker, /const snapshot = snapshotJson\(engine\)/);
-  assert.match(worker, /function cpuWorkerSearchConfig/);
+  assert.match(worker, /private searchConfig/);
   assert.match(worker, /engine\.chronofish_cpu_worker_search_config_json\(ptr, len\)/);
+  assert.match(worker, /private searchResult/);
+  assert.match(worker, /engine\.chronofish_cpu_worker_search_result_json\(ptr, len\)/);
+  assert.doesNotMatch(worker, /principalVariation \?\?=/);
+  assert.doesNotMatch(worker, /cpuSearch = "heuristic"/);
 });
 
 test("build output declares package version on the main page", async () => {

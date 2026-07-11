@@ -1,5 +1,5 @@
 import { elements } from "./dom.js";
-import { readWasmString, writeWasmString } from "./engine-io.js";
+import * as engineBotPolicy from "./engine-bot-policy.js";
 import type { ChronofishEngine, Color, GameSnapshot, Move, Piece, PieceType, Position } from "./types.js";
 
 const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
@@ -438,16 +438,12 @@ export function createBotController({
 
   function botSearchConfig(effort: BotEffort): BotSearchConfig {
     const engine = loadedEngine();
-    const output = engine.chronofish_bot_search_config_json(
+    return engineBotPolicy.resultValue<BotSearchConfig>(engine, "chronofish_bot_search_config_json",
       effort.depth ?? Number.NaN,
       effort.minDepth ?? Number.NaN,
       effort.nodes ?? Number.NaN,
       effort.timeMs ?? Number.NaN
     );
-    if (!output) {
-      throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-    }
-    return JSON.parse(readWasmString(engine, output)) as BotSearchConfig;
   }
 
   function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
@@ -465,13 +461,7 @@ export function createBotController({
   }
 
   function resultEndsInRoyalCapture(result: AiSearchResult): boolean {
-    const engine = loadedEngine();
-    const { ptr, len } = writeWasmString(engine, JSON.stringify(result));
-    try {
-      return engine.chronofish_bot_result_ends_in_royal_capture_json(ptr, len) !== 0;
-    } finally {
-      engine.chronofish_dealloc(ptr, len);
-    }
+    return engineBotPolicy.jsonBoolean(loadedEngine(), "chronofish_bot_result_ends_in_royal_capture_json", result);
   }
 
   function botGpuMode(): "full" | "hybrid" {
@@ -654,17 +644,7 @@ export function createBotController({
   }
 
   function selectBestAiResult(results: AiSearchResult[]): AiSearchResult | null {
-    const engine = loadedEngine();
-    const { ptr, len } = writeWasmString(engine, JSON.stringify(results));
-    try {
-      const output = engine.chronofish_bot_select_best_result_json(ptr, len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return JSON.parse(readWasmString(engine, output)) as AiSearchResult | null;
-    } finally {
-      engine.chronofish_dealloc(ptr, len);
-    }
+    return engineBotPolicy.jsonValue<AiSearchResult | null>(loadedEngine(), "chronofish_bot_select_best_result_json", results);
   }
 
   function selectDeepestStoredResult(pending: PendingSearch): AiSearchResult | null {
@@ -715,20 +695,10 @@ export function createBotController({
   }
 
   function rankedBotChoices(results: PendingResult[], selectedResult: AiSearchResult | null): RankedBotChoice[] {
-    const engine = loadedEngine();
-    const { ptr, len } = writeWasmString(engine, JSON.stringify({
+    return engineBotPolicy.jsonValue<RankedBotChoice[]>(loadedEngine(), "chronofish_bot_ranked_choices_json", {
       results,
       selectedMoves: selectedResult?.moves ?? []
-    }));
-    try {
-      const output = engine.chronofish_bot_ranked_choices_json(ptr, len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return JSON.parse(readWasmString(engine, output)) as RankedBotChoice[];
-    } finally {
-      engine.chronofish_dealloc(ptr, len);
-    }
+    });
   }
 
   function buildBotDecisionRecord(pending: PendingSearch | null, result: AiSearchResult): BotDecisionRecord | null {
@@ -758,17 +728,11 @@ export function createBotController({
   }
 
   function normalizePrincipalVariation(variation: PrincipalVariation | undefined, fallback: Move[]): PrincipalVariation {
-    const engine = loadedEngine();
-    const { ptr, len } = writeWasmString(engine, JSON.stringify({ variation: variation ?? [], fallback }));
-    try {
-      const output = engine.chronofish_gpu_normalize_principal_variation_json(ptr, len);
-      if (!output) {
-        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
-      }
-      return JSON.parse(readWasmString(engine, output)) as PrincipalVariation;
-    } finally {
-      engine.chronofish_dealloc(ptr, len);
-    }
+    return engineBotPolicy.jsonValue<PrincipalVariation>(
+      loadedEngine(),
+      "chronofish_gpu_normalize_principal_variation_json",
+      { variation: variation ?? [], fallback }
+    );
   }
 
   function recordBotDecision(result: AiSearchResult): void {
