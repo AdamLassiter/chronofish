@@ -10,7 +10,8 @@ multiplayer rooms.
 The project currently includes:
 
 - a Rust engine crate with game state, legal moves, turn submission, checkmate
-  detection, alpha-beta bot search, and a native training harness;
+  detection, CPU and GPU bot search, shared GPU training/search contracts, and
+  native CPU and GPU training harnesses;
 - a TypeScript frontend with local play, online rooms, spectators, CPU and
   WebGPU bots, bot-vs-human games, bot-vs-bot games, and browser training tools;
 - a Rust `axum` server that serves `web/dist`, the built engine WASM, and room
@@ -24,13 +25,14 @@ chronofish/
   engine/                  Rust engine crate and native trainer
     src/ai/                AI search, evaluation, weights, and parameters
     src/notation/          Notation formatting, parsing, and replay
-    src/training/          Native genetic training harness
+    src/gpu/               GPU search, training contracts, canonical WGSL, and native WGPU CLI
+    src/training/          Native CPU heuristic training harness
     models/cpu-v1/         CPU effort, evaluation, training, and hall-of-fame data
     models/gpu-v1/         Compact browser value model and backups
   pretty-log/              Terminal output helper used by native training
   server/                  Rust static file and multiplayer room server
   web/                     Browser frontend npm project
-    src/                   TypeScript, CSS, HTML, workers, and WGSL shaders
+    src/                   TypeScript UI, workers, and Rust/WASM/WGPU bindings
     scripts/               Build and source-check scripts
     tests/                 Frontend functional tests
     dist/                  Generated frontend bundle (ignored)
@@ -192,6 +194,31 @@ The default setup still uses orthodox pieces, but the engine models the variant
 pieces from the rules reference so they can be introduced later without changing
 the representation.
 
+### GPU Ownership and Runtime Paths
+
+The GPU implementation is engine-owned. `engine/src/gpu/search.rs` and
+`engine/src/gpu/training.rs` define the search, sample, model, replay, layout,
+and training contracts. Their WGSL sources under `engine/src/gpu/**/shaders/`
+are canonical and are compiled by both the native WGPU path and the browser
+bundle. This keeps shader layouts and engine-visible results consistent across
+runtimes.
+
+There are two ways to use that implementation:
+
+- **Native Rust:** `./train gpu` runs the `gpu` binary with the `neural-wgpu`
+  feature. It performs GPU search, feature projection, value/policy inference,
+  and value/policy optimization without a browser.
+- **Browser:** the frontend owns UI, workers, WASM instantiation, and WebGPU
+  device/buffer/pipeline dispatch. Thin bindings in `web/src/engine-gpu-*.ts`,
+  `engine-cpu-search.ts`, and `engine-bot-policy.ts` marshal to the Rust/WASM
+  ABI; they do not reimplement game rules, search policy, model layouts, replay
+  handling, or training policy in TypeScript.
+
+The browser remains the interactive client and WebGPU host. Rust remains the
+source of truth for rules, CPU search, GPU search/training behavior, model
+formats, and GPU data layouts. CPU/WASM fallback paths remain available where a
+browser cannot use WebGPU.
+
 ## Training
 
 Chronofish has two separate training workflows.
@@ -242,9 +269,10 @@ Tune native value and policy optimization with `--gpu-learning-rate`,
 `--gpu-epochs`, `--gpu-weight-decay`, and `--gpu-momentum`.
 
 The native WGPU adapter must be available for GPU projection and training. Use
-`./train gpu --gpu-backend-info`, `--gpu-compile-shaders`, or
-`--gpu-dispatch-smoke` to diagnose the local GPU path. Search results and
-training samples use the same engine JSON contracts as the browser bindings.
+`./train gpu --gpu-backend-info`, `--gpu-compile-shaders`,
+`--gpu-compile-kernels`, `--gpu-dispatch-smoke`, or
+`--gpu-training-dispatch-smoke` to diagnose the local GPU path. Search results
+and training samples use the same engine JSON contracts as the browser bindings.
 In `--gpu-sample-mode search` (the default), CLI labels are produced by the
 native GPU search API; the explicit CPU, curriculum, tactical, distillation,
 outcome, and duel modes retain their corresponding engine-side collection
