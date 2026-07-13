@@ -11,6 +11,7 @@ interface CpuAiRequest {
   minDepth?: number;
   nodes?: number;
   timeMs?: number;
+  searchStrategy?: "alpha-beta" | "beam";
   partitionIndex?: number;
   parametersJson?: string;
 }
@@ -27,6 +28,7 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
     minDepth,
     nodes = 64,
     timeMs = 10_000,
+    searchStrategy,
     partitionIndex = 0,
     parametersJson
   } = event.data;
@@ -45,6 +47,7 @@ self.addEventListener("message", async (event: MessageEvent<CpuAiRequest>) => {
       ...(minDepth == null ? {} : { minDepth }),
       nodes,
       timeMs,
+      ...(searchStrategy == null ? {} : { searchStrategy }),
       ...(parametersJson == null ? {} : { parametersJson })
     });
     self.postMessage({ id, ok: true, result, partitionIndex });

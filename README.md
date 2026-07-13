@@ -41,6 +41,7 @@ chronofish/
   run                      Build the app and start the normal server
   train                    Build the app and start browser training mode
   train-cpu                Run native CPU heuristic tuning
+  train-gpu                Run native GPU value/policy training
   profile-cpu              Profile native CPU tuning with cargo-flamegraph
 ```
 
@@ -160,7 +161,9 @@ staged move, while `Reset` clears the current turn's staged moves. Checkmate and
 concessions leave the game in a post-match review state until dismissed.
 
 GPU bot modes require a browser with WebGPU support. CPU bot modes run the Rust
-search engine through WASM and also expose a custom depth, node, and time preset.
+search engine through WASM and also expose custom depth, node, time, and search
+strategy settings. Built-in CPU efforts use beam search by default; custom CPU
+difficulty can switch to alpha-beta when deeper tactical replies are preferred.
 
 The server stores rooms in memory, so restarting it clears all rooms. Match
 notation is appended to `logs/<room-id>.log`.
@@ -205,7 +208,7 @@ runtimes.
 
 There are two ways to use that implementation:
 
-- **Native Rust:** `./train gpu` runs the `gpu` binary with the `neural-wgpu`
+- **Native Rust:** `./train-gpu` runs the `gpu` binary with the `neural-wgpu`
   feature. It performs GPU search, feature projection, value/policy inference,
   and value/policy optimization without a browser.
 - **Browser:** the frontend owns UI, workers, WASM instantiation, and WebGPU
@@ -249,27 +252,27 @@ server does not expose writable training endpoints.
 ### Native GPU CLI
 
 The Rust training binary can run GPU search, sample collection, and value/policy
-training without starting Chromium. The `gpu` form of `./train` enables the
-engine's `neural-wgpu` feature:
+training without starting Chromium. `./train-gpu` enables the engine's
+`neural-wgpu` feature. `./train gpu ...` remains a compatible alias:
 
 ```sh
 # Search the default starting position, or pass a game snapshot JSON file.
-./train gpu --gpu-search --gpu-search-depth 2 --nodes 4096
-./train gpu --gpu-search fixtures/position.json --gpu-model engine/models/gpu-v1/value-model.cfnn
+./train-gpu --gpu-search --gpu-search-depth 2 --nodes 4096
+./train-gpu --gpu-search fixtures/position.json --gpu-model engine/models/gpu-v1/value-model.cfnn
 
 # Generate search labels, then train and write a replacement model.
-./train gpu --gpu-sample-search fixtures/position.json --gpu-sample-count 128 --out /tmp/chronofish-samples.json
-./train gpu --gpu-train-samples /tmp/chronofish-samples.json --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+./train-gpu --gpu-sample-search fixtures/position.json --gpu-sample-count 128 --out /tmp/chronofish-samples.json
+./train-gpu --gpu-train-samples /tmp/chronofish-samples.json --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
 
 # Collect labels and train in one command.
-./train gpu --gpu-train-search fixtures/position.json --gpu-sample-count 128 --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+./train-gpu --gpu-train-search fixtures/position.json --gpu-sample-count 128 --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
 ```
 
 Tune native value and policy optimization with `--gpu-learning-rate`,
 `--gpu-epochs`, `--gpu-weight-decay`, and `--gpu-momentum`.
 
 The native WGPU adapter must be available for GPU projection and training. Use
-`./train gpu --gpu-backend-info`, `--gpu-compile-shaders`,
+`./train-gpu --gpu-backend-info`, `--gpu-compile-shaders`,
 `--gpu-compile-kernels`, `--gpu-dispatch-smoke`, or
 `--gpu-training-dispatch-smoke` to diagnose the local GPU path. Search results
 and training samples use the same engine JSON contracts as the browser bindings.
@@ -375,7 +378,8 @@ The default output is `flamegraph.svg`.
 ## AI Effort Presets
 
 `engine/models/cpu-v1/effort.json` contains CPU runtime bot presets shared by
-the Rust engine and frontend via `/ai/effort.json`.
+the Rust engine and frontend via `/ai/effort.json`. Each CPU preset selects a
+`searchStrategy`; the included presets use `beam` by default.
 `engine/models/gpu-v1/effort.json` contains the corresponding GPU presets,
 including minimum depth, and is served via `/ai/gpu-effort.json`.
 

@@ -50,6 +50,7 @@ interface BotEffortConfig {
   minDepth?: number;
   nodes: number;
   timeMs: number;
+  searchStrategy?: "alpha-beta" | "beam";
 }
 
 type BotPresetName = "fast" | "balanced" | "expert";
@@ -169,7 +170,8 @@ const DEFAULT_CUSTOM_CPU_EFFORT: CustomCpuEffortConfig = {
   depth: 4,
   minDepth: 2,
   nodes: 80_000,
-  timeMs: 50_000
+  timeMs: 50_000,
+  searchStrategy: "beam"
 };
 let customCpuEffort: CustomCpuEffortConfig = loadCustomCpuEffort();
 const DEFAULT_CUSTOM_GPU_EFFORT: CustomGpuEffortConfig = {
@@ -408,7 +410,8 @@ function normalizeCustomCpuEffort(value: unknown): CustomCpuEffortConfig {
     depth,
     minDepth: Math.min(depth, clampInteger(candidate.minDepth, 1, 16, DEFAULT_CUSTOM_CPU_EFFORT.minDepth)),
     nodes: clampInteger(candidate.nodes, 1, 1_000_000, DEFAULT_CUSTOM_CPU_EFFORT.nodes),
-    timeMs: clampInteger(candidate.timeMs, 1, 600_000, DEFAULT_CUSTOM_CPU_EFFORT.timeMs)
+    timeMs: clampInteger(candidate.timeMs, 1, 600_000, DEFAULT_CUSTOM_CPU_EFFORT.timeMs),
+    searchStrategy: candidate.searchStrategy === "alpha-beta" ? "alpha-beta" : "beam"
   };
 }
 
@@ -439,7 +442,8 @@ function saveCustomCpuEffort(next: CustomCpuEffortConfig): void {
     depth: next.depth,
     minDepth: next.minDepth,
     nodes: next.nodes,
-    timeMs: next.timeMs
+    timeMs: next.timeMs,
+    searchStrategy: next.searchStrategy
   }));
 }
 
@@ -448,6 +452,7 @@ function syncCustomCpuInputs(): void {
   elements.customCpuMinDepthInput.value = String(customCpuEffort.minDepth);
   elements.customCpuNodesInput.value = String(customCpuEffort.nodes);
   elements.customCpuTimeMsInput.value = String(customCpuEffort.timeMs);
+  elements.customCpuSearchStrategyInput.value = customCpuEffort.searchStrategy ?? "beam";
 }
 
 function readCustomCpuInputs(): CustomCpuEffortConfig {
@@ -455,7 +460,8 @@ function readCustomCpuInputs(): CustomCpuEffortConfig {
     depth: elements.customCpuDepthInput.value,
     minDepth: elements.customCpuMinDepthInput.value,
     nodes: elements.customCpuNodesInput.value,
-    timeMs: elements.customCpuTimeMsInput.value
+    timeMs: elements.customCpuTimeMsInput.value,
+    searchStrategy: elements.customCpuSearchStrategyInput.value
   });
 }
 
@@ -482,6 +488,7 @@ function resetCustomCpuModal(): void {
   elements.customCpuMinDepthInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.minDepth);
   elements.customCpuNodesInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.nodes);
   elements.customCpuTimeMsInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.timeMs);
+  elements.customCpuSearchStrategyInput.value = DEFAULT_CUSTOM_CPU_EFFORT.searchStrategy ?? "beam";
 }
 
 function saveCustomGpuEffort(next: CustomGpuEffortConfig): void {

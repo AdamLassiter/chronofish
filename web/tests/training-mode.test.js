@@ -154,7 +154,7 @@ test("GPU worker caps preserve medium and high preset budgets", async () => {
   assert.match(ui, /samples: 8192/);
   assert.match(ui, /batch: 8192/);
   assert.match(ui, /validationInterval: 8192/);
-  assert.match(ui, /Math\.min\(highMemory \? 16 : 8, hardwareThreads - 1\)/);
+  assert.match(ui, /Math\.min\(8, hardwareThreads - 1\)/);
   assert.match(engineTraining, /pub fn clamp_training_integer/);
   assert.match(engineTraining, /pub fn clamp_training_number/);
   assert.match(engineTraining, /pub const MAX_GPU_TRAINING_SAMPLES: usize = 16_384/);

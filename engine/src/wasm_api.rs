@@ -9,6 +9,12 @@ thread_local! {
     static OUTPUT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
+// Raw WebAssembly i64 exports require JavaScript BigInt values. Browser-facing
+// time budgets are bounded well below i32::MAX, so expose them as Numbers.
+fn wasm_milliseconds(value: u64) -> i32 {
+    value.min(i32::MAX as u64) as i32
+}
+
 #[no_mangle]
 pub extern "C" fn chronofish_alloc(len: usize) -> *mut u8 {
     let mut buffer = Vec::with_capacity(len);
@@ -305,6 +311,37 @@ pub unsafe extern "C" fn chronofish_cpu_worker_search_config_json(
     };
     match crate::cpu::search::cpu_worker_search_config_json(text) {
         Ok(json) => set_output(json),
+        Err(error) => {
+            set_last_message(&error);
+            std::ptr::null()
+        }
+    }
+}
+
+/// # Safety
+///
+/// `ptr` must point to `len` bytes of readable UTF-8 CPU search configuration
+/// JSON in this WASM instance for the duration of the call. The current game
+/// must already have been loaded through the normal snapshot API.
+#[no_mangle]
+pub unsafe extern "C" fn chronofish_cpu_search_json(ptr: *const u8, len: usize) -> *const u8 {
+    let Some(text) = wasm_input_text(ptr, len, "CPU search request") else {
+        return std::ptr::null();
+    };
+    match crate::cpu::search::cpu_worker_search_config(text) {
+        Ok(config) => {
+            let json = with_game(|game| {
+                crate::cpu::search::search_game_json(
+                    game,
+                    config.depth,
+                    config.min_depth,
+                    config.nodes,
+                    config.time_ms,
+                    config.search_strategy,
+                )
+            });
+            set_output(json)
+        }
         Err(error) => {
             set_last_message(&error);
             std::ptr::null()
@@ -1547,13 +1584,13 @@ pub extern "C" fn chronofish_gpu_rollout_ply_offset(ply: usize, worker_index: us
 pub extern "C" fn chronofish_gpu_warmup_search_config_json(
     depth: i32,
     nodes: i32,
-    search_time_ms: u64,
+    search_time_ms: i32,
     exploration_temperature: f32,
 ) -> *const u8 {
     let config = crate::gpu::training::gpu_warmup_search_config(
         depth,
         nodes,
-        search_time_ms,
+        search_time_ms.max(0) as u64,
         exploration_temperature,
     );
     let response = serde_json::json!({
@@ -1744,13 +1781,19 @@ pub unsafe extern "C" fn chronofish_royal_capture_winner_snapshot_json(
 }
 
 #[no_mangle]
-pub extern "C" fn chronofish_training_worker_request_timeout_ms(nodes: i64, time_ms: i64) -> u64 {
-    crate::gpu::training::worker_request_timeout_ms(nodes, time_ms)
+pub extern "C" fn chronofish_training_worker_request_timeout_ms(nodes: i32, time_ms: i32) -> i32 {
+    wasm_milliseconds(crate::gpu::training::worker_request_timeout_ms(
+        i64::from(nodes),
+        i64::from(time_ms),
+    ))
 }
 
 #[no_mangle]
-pub extern "C" fn chronofish_training_worker_search_time_ms(nodes: i64, time_ms: i64) -> u64 {
-    crate::gpu::training::worker_search_time_ms(nodes, time_ms)
+pub extern "C" fn chronofish_training_worker_search_time_ms(nodes: i32, time_ms: i32) -> i32 {
+    wasm_milliseconds(crate::gpu::training::worker_search_time_ms(
+        i64::from(nodes),
+        i64::from(time_ms),
+    ))
 }
 
 /// # Safety
@@ -1761,12 +1804,12 @@ pub extern "C" fn chronofish_training_worker_search_time_ms(nodes: i64, time_ms:
 pub unsafe extern "C" fn chronofish_training_worker_request_timeout_ms_json(
     ptr: *const u8,
     len: usize,
-) -> u64 {
+) -> i32 {
     let Some(text) = wasm_input_text(ptr, len, "training worker timeout request") else {
         return 0;
     };
     match crate::gpu::training::worker_request_timeout_ms_json(text) {
-        Ok(value) => value,
+        Ok(value) => wasm_milliseconds(value),
         Err(error) => {
             set_last_message(&error);
             0
@@ -1782,12 +1825,12 @@ pub unsafe extern "C" fn chronofish_training_worker_request_timeout_ms_json(
 pub unsafe extern "C" fn chronofish_training_worker_search_time_ms_json(
     ptr: *const u8,
     len: usize,
-) -> u64 {
+) -> i32 {
     let Some(text) = wasm_input_text(ptr, len, "training worker search timeout request") else {
         return 0;
     };
     match crate::gpu::training::worker_search_time_ms_json(text) {
-        Ok(value) => value,
+        Ok(value) => wasm_milliseconds(value),
         Err(error) => {
             set_last_message(&error);
             0
@@ -2996,17 +3039,17 @@ pub extern "C" fn chronofish_cpu_training_position_target(
 
 #[no_mangle]
 pub extern "C" fn chronofish_cpu_training_budget_ms(
-    cpu_train_seconds: u64,
-    cpu_training_time_ms: u64,
+    cpu_train_seconds: i32,
+    cpu_training_time_ms: i32,
     cpu_max_match_plies: usize,
-    cpu_max_match_time_ms: u64,
-) -> u64 {
-    crate::cpu::search::cpu_training_budget_ms(
-        cpu_train_seconds,
-        cpu_training_time_ms,
+    cpu_max_match_time_ms: i32,
+) -> i32 {
+    wasm_milliseconds(crate::cpu::search::cpu_training_budget_ms(
+        cpu_train_seconds.max(0) as u64,
+        cpu_training_time_ms.max(0) as u64,
         cpu_max_match_plies,
-        cpu_max_match_time_ms,
-    )
+        cpu_max_match_time_ms.max(0) as u64,
+    ))
 }
 
 #[no_mangle]
@@ -3493,7 +3536,7 @@ pub unsafe extern "C" fn chronofish_gpu_candidate_inputs_snapshot_bytes(
     let Some(text) = wasm_input_text(ptr, len, "GPU candidate input snapshot request") else {
         return std::ptr::null();
     };
-    match crate::gpu::search::gpu_candidate_inputs_i32s_from_snapshot_json(text) {
+    match crate::gpu::search::gpu_candidate_inputs_i32s_from_gpu_snapshot_json(text) {
         Ok(words) => set_output_i32s(words),
         Err(error) => {
             set_last_message(&error);

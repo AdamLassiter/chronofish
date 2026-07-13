@@ -37,6 +37,31 @@ test("frontend loads GPU effort separately from CPU effort", async () => {
   assert.match(main, /bot-gpu-custom/);
 });
 
+test("CPU efforts default to beam search and custom CPU difficulty can override it", async () => {
+  const [effortText, main, controller, worker, binding, wasmApi, engineTypes] = await Promise.all([
+    readFile(path.join(repoRoot, "engine/models/cpu-v1/effort.json"), "utf8"),
+    readFile(path.join(webRoot, "src/main.ts"), "utf8"),
+    readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8"),
+    readFile(path.join(webRoot, "src/cpu-ai-worker.ts"), "utf8"),
+    readFile(path.join(webRoot, "src/engine-cpu-search.ts"), "utf8"),
+    readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8"),
+    readFile(path.join(webRoot, "src/types.ts"), "utf8")
+  ]);
+  const effort = JSON.parse(effortText);
+
+  for (const name of ["fast", "balanced", "expert"]) {
+    assert.equal(effort[name].searchStrategy, "beam");
+  }
+  assert.match(main, /searchStrategy: "beam"/);
+  assert.match(main, /candidate\.searchStrategy === "alpha-beta" \? "alpha-beta" : "beam"/);
+  assert.match(main, /customCpuSearchStrategyInput/);
+  assert.match(controller, /searchStrategy: effort\.searchStrategy/);
+  assert.match(worker, /searchStrategy\?: "alpha-beta" \| "beam"/);
+  assert.match(binding, /engine\.chronofish_cpu_search_json\(ptr, len\)/);
+  assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_search_json/);
+  assert.match(engineTypes, /chronofish_cpu_search_json\(ptr: number, length: number\): number/);
+});
+
 test("bot timeout preserves minimum depth and a completed legal result", async () => {
   const controller = await readBotControllerSources();
   const engineSearch = await readFile(path.join(repoRoot, "engine/src/gpu/search.rs"), "utf8");

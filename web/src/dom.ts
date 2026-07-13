@@ -40,6 +40,7 @@ export const elements = {
   customCpuMinDepthInput: queryElement<HTMLInputElement>("#custom-cpu-min-depth"),
   customCpuNodesInput: queryElement<HTMLInputElement>("#custom-cpu-nodes"),
   customCpuTimeMsInput: queryElement<HTMLInputElement>("#custom-cpu-time-ms"),
+  customCpuSearchStrategyInput: queryElement<HTMLSelectElement>("#custom-cpu-search-strategy"),
   customGpuModal: queryElement<HTMLElement>("#custom-gpu-modal"),
   customGpuPanel: queryElement<HTMLElement>("#custom-gpu-panel"),
   closeCustomGpuButton: queryElement<HTMLButtonElement>("#close-custom-gpu"),

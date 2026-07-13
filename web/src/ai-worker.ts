@@ -16,6 +16,7 @@ let cachedGpuDevice: GPUDevice | null = null;
 let frontierRuntime: { device: GPUDevice; pipeline: FrontierGpuPipeline; neural: FrontierNeuralEvaluator } | null = null;
 let activeSearchGeneration = 0;
 let frontierModelOverride: ArrayBuffer | null = null;
+let residentFrontierSearchTail: Promise<void> = Promise.resolve();
 
 async function tryGpuSearch({
   depth,
@@ -131,6 +132,30 @@ async function tryGpuResidentFrontierSearch(
     sourceGame?: GameSnapshot | undefined;
   }
 ): Promise<SearchResult> {
+  return withResidentFrontierSearchLock(() =>
+    tryGpuResidentFrontierSearchLocked(device, snapshot, {
+      requestedDepth,
+      nodes,
+      temperature,
+      randomSeed,
+      disableNeural,
+      sourceGame
+    })
+  );
+}
+
+async function tryGpuResidentFrontierSearchLocked(
+  device: GPUDevice,
+  snapshot: GpuSnapshot,
+  { requestedDepth, nodes, temperature, randomSeed, disableNeural, sourceGame }: {
+    requestedDepth: number;
+    nodes: number;
+    temperature: number;
+    randomSeed: number;
+    disableNeural: boolean;
+    sourceGame?: GameSnapshot | undefined;
+  }
+): Promise<SearchResult> {
   const searchSize = await engineGpuSearch.engineGpuSnapshotSearchSize(snapshot);
   const adapter = cachedGpuAdapter;
   if (!adapter) {
@@ -217,8 +242,6 @@ async function tryGpuResidentFrontierSearch(
       device.queue.submit([encoder.finish()]);
       await device.queue.onSubmittedWorkDone();
       await popGpuValidationScope(device, validationScope, `GPU frontier cycle ${cycle}`);
-      runtime.pipeline.releaseCycleTemporaries();
-      runtime.neural.releaseTemporaries();
       runtime.pipeline.swapFrontiers(buffers);
       runtime.neural.advancePolicyFeatures();
       cyclesCompleted += 1;
@@ -230,7 +253,6 @@ async function tryGpuResidentFrontierSearch(
     device.queue.submit([reduction.finish()]);
     await device.queue.onSubmittedWorkDone();
     await popGpuValidationScope(device, reductionValidationScope, "GPU frontier minimax reduction");
-    runtime.pipeline.releaseCycleTemporaries();
 
     const readback = await readFrontierOnce(device, buffers, tuning);
     if (readback.candidateOverflow && readback.selectedCount === 0) {
@@ -305,6 +327,20 @@ async function tryGpuResidentFrontierSearch(
     runtime.pipeline.pool.releaseSearchBuffers(buffers);
     runtime.pipeline.releaseCycleTemporaries();
     runtime.neural.releaseTemporaries();
+  }
+}
+
+async function withResidentFrontierSearchLock<T>(work: () => Promise<T>): Promise<T> {
+  let release!: () => void;
+  const previous = residentFrontierSearchTail;
+  residentFrontierSearchTail = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await previous;
+  try {
+    return await work();
+  } finally {
+    release();
   }
 }
 

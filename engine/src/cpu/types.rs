@@ -55,6 +55,12 @@ pub(crate) struct AiEffort {
     pub(crate) min_depth: i32,
     pub(crate) nodes: usize,
     pub(crate) time_ms: u64,
+    #[serde(default = "default_cpu_search_strategy")]
+    pub(crate) search_strategy: crate::cpu::search::CpuSearchStrategy,
+}
+
+pub(crate) const fn default_cpu_search_strategy() -> crate::cpu::search::CpuSearchStrategy {
+    crate::cpu::search::CpuSearchStrategy::Beam
 }
 
 pub(crate) const fn default_min_ai_search_depth() -> i32 {

@@ -1,8 +1,141 @@
+use clap::Parser;
+
 use super::*;
 use crate::cpu::EvalWeights;
 
+#[derive(Parser)]
+#[command(
+    name = "train-cpu",
+    about = "Run native CPU heuristic training and CPU search"
+)]
+struct CpuCliArgs {
+    /// Search budgets and output options shared with native GPU training.
+    #[command(flatten)]
+    common: crate::gpu::cli::CommonCliArgs,
+    /// Repeat training cycles until interrupted instead of running one training pass.
+    #[arg(long)]
+    train_cycle: bool,
+    /// Maximum generations to evaluate for genetic training.
+    #[arg(long)]
+    generations: Option<usize>,
+    /// Number of candidate parameter sets in each genetic generation.
+    #[arg(long)]
+    population: Option<usize>,
+    /// CPU training method: `sweep` or `genetic`.
+    #[arg(long = "strategy", visible_alias = "training-strategy")]
+    strategy: Option<String>,
+    /// Comma-separated parameter groups to tune during sweep training.
+    #[arg(long = "parameter-groups", visible_alias = "sweep-groups")]
+    parameter_groups: Option<String>,
+    /// Number of values sampled for each parameter in a sweep pass.
+    #[arg(long)]
+    sweep_points: Option<usize>,
+    /// Number of sweep passes; omit for the configured default.
+    #[arg(long)]
+    sweep_passes: Option<usize>,
+    /// Inclusive multiplier range for sweeps, formatted as `LOW,HIGH`.
+    #[arg(long)]
+    sweep_range: Option<String>,
+    /// Range-shrink multiplier applied between sweep passes.
+    #[arg(long)]
+    sweep_shrink: Option<f64>,
+    /// Search method used to generate training moves: `alpha-beta` or `beam`.
+    #[arg(long)]
+    search_strategy: Option<String>,
+    /// Deterministic random seed for candidate generation and matches.
+    #[arg(long)]
+    seed: Option<u64>,
+    /// Optional wall-clock safety limit for the entire training run, in seconds.
+    #[arg(long = "max-seconds", visible_aliases = ["time-seconds", "time-budget"])]
+    max_seconds: Option<u64>,
+    /// Score the heuristic weights stored in the given JSON file.
+    #[arg(long)]
+    score: Option<String>,
+    /// Score the built-in default heuristic weights and exit.
+    #[arg(long)]
+    score_default: bool,
+    /// Search a snapshot JSON file with the CPU bot; omit the value to use the initial position.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    cpu_search: Option<String>,
+    /// Comma-separated seeds for candidate-versus-baseline comparison games.
+    #[arg(long)]
+    compare_seeds: Option<String>,
+    /// Minimum wins required before a candidate can be promoted.
+    #[arg(long)]
+    min_wins: Option<usize>,
+    /// Minimum aggregate score delta required before a candidate can be promoted.
+    #[arg(long)]
+    min_total_delta: Option<i32>,
+    /// Command to run after a candidate is promoted; use an empty value to skip verification.
+    #[arg(long)]
+    verify: Option<String>,
+    /// Path to the current CPU parameter JSON file used as the baseline.
+    #[arg(long)]
+    ai_src: Option<String>,
+    /// Path to the JSONL hall of fame used as historical opponents.
+    #[arg(long)]
+    hall_of_fame: Option<String>,
+    /// Number of baseline opponent variants used in full candidate evaluation.
+    #[arg(long)]
+    opponent_variants: Option<usize>,
+    /// Number of baseline opponent variants used for preliminary screening.
+    #[arg(long)]
+    screening_opponent_variants: Option<usize>,
+    /// Paired games to play for each opponent variant.
+    #[arg(long)]
+    rounds_per_variant: Option<usize>,
+    /// Number of hall-of-fame entries available as opponents.
+    #[arg(long)]
+    hall_of_fame_entries: Option<usize>,
+    /// Number of current-generation candidates eligible for league matches.
+    #[arg(long)]
+    league_contenders: Option<usize>,
+    /// Number of hall-of-fame entries included in the league.
+    #[arg(long)]
+    league_hall_of_fame_entries: Option<usize>,
+    /// Minimum paired matches to play before accepting a decision.
+    #[arg(long)]
+    min_pairs: Option<usize>,
+    /// Paired matches evaluated concurrently in each batch.
+    #[arg(long)]
+    pair_batch: Option<usize>,
+    /// Maximum paired matches before a candidate is accepted or rejected.
+    #[arg(long)]
+    max_pairs: Option<usize>,
+    /// Number of recent game results used to detect draw stagnation.
+    #[arg(long)]
+    draw_window: Option<usize>,
+    /// Draw-rate threshold that stops an unproductive comparison.
+    #[arg(long)]
+    draw_rate_limit: Option<f64>,
+    /// Maximum plies in one comparison game before adjudication.
+    #[arg(long = "max-match-plies", visible_alias = "match-plies")]
+    max_match_plies: Option<i32>,
+    /// Maximum wall-clock time for one comparison game, in milliseconds.
+    #[arg(long = "max-match-ms", visible_alias = "match-ms")]
+    max_match_ms: Option<u64>,
+    /// Stop after this many generations without a promotable candidate.
+    #[arg(long)]
+    max_generations_without_candidate: Option<usize>,
+    /// Number of top candidates retained for final evaluation.
+    #[arg(long)]
+    finalists: Option<usize>,
+    /// Legacy training configuration path; retained for compatibility.
+    #[arg(long, hide = true)]
+    config: Option<String>,
+    /// Legacy runtime effort name; retained for compatibility.
+    #[arg(long, hide = true)]
+    effort: Option<String>,
+    /// Legacy search-depth override; retained for compatibility.
+    #[arg(long, hide = true)]
+    depth: Option<i32>,
+    /// Legacy ply-limit override; retained for compatibility.
+    #[arg(long, hide = true)]
+    plies: Option<usize>,
+}
+
 pub fn run_training_cli() {
-    let config = TrainerConfig::from_env(std::env::args().skip(1).collect());
+    let config = TrainerConfig::from_args(CpuCliArgs::parse());
 
     if config.train_cycle {
         // The top-level ./train script loops this mode until interrupted.
@@ -18,14 +151,6 @@ pub fn run_training_cli() {
             "{}",
             fitness(EvalWeights::default_tuned(), &config).summary()
         );
-        return;
-    }
-
-    let gpu_config =
-        config
-            .gpu
-            .with_run_options(config.nodes, config.training_time_ms, config.out.clone());
-    if crate::gpu::cli::run(&gpu_config) {
         return;
     }
 
@@ -56,9 +181,166 @@ pub fn run_training_cli() {
 }
 
 impl TrainerConfig {
+    fn from_args(args: CpuCliArgs) -> Self {
+        let training = load_training_parameters();
+        let seed = args.seed.unwrap_or_else(random_seed);
+        let compare_seeds_overridden = args.compare_seeds.is_some();
+        let mut config = Self {
+            generations: args.generations.unwrap_or(usize::MAX),
+            population: args
+                .population
+                .unwrap_or_else(|| training.candidates.unwrap_or_else(auto_population)),
+            training_time_ms: args.common.training_time_ms.unwrap_or(training.time_ms),
+            nodes: args.common.nodes.unwrap_or(training.nodes),
+            seed,
+            max_seconds: args.max_seconds,
+            out: args.common.out,
+            score: args.score,
+            score_default: args.score_default,
+            gpu: crate::gpu::cli::GpuCliConfig::default(),
+            cpu_search_snapshot: args.cpu_search,
+            train_cycle: args.train_cycle,
+            training_strategy: args
+                .strategy
+                .as_deref()
+                .map(CpuTrainingStrategy::parse)
+                .transpose()
+                .unwrap_or_else(|message| panic!("{message}"))
+                .unwrap_or(CpuTrainingStrategy::Sweep),
+            compare_seeds: args
+                .compare_seeds
+                .as_deref()
+                .and_then(|value| parse_seed_list(Some(value)))
+                .unwrap_or_else(|| default_compare_seeds(seed)),
+            min_wins: args.min_wins.unwrap_or(0),
+            min_total_delta: args.min_total_delta.unwrap_or(0),
+            verify: args.verify.unwrap_or_else(|| "cargo test -q".to_string()),
+            ai_src: args
+                .ai_src
+                .unwrap_or_else(|| "engine/models/cpu-v1/parameters.json".to_string()),
+            hall_of_fame: args.hall_of_fame.unwrap_or_else(default_hall_of_fame_path),
+            opponent_variants: args.opponent_variants.unwrap_or(training.opponent_variants),
+            screening_opponent_variants: args
+                .screening_opponent_variants
+                .unwrap_or(training.screening_opponent_variants),
+            rounds_per_variant: args
+                .rounds_per_variant
+                .unwrap_or(training.rounds_per_variant),
+            hall_of_fame_entries: args
+                .hall_of_fame_entries
+                .unwrap_or(training.hall_of_fame_entries),
+            league_contenders: args.league_contenders.unwrap_or(training.league_contenders),
+            league_hall_of_fame_entries: args
+                .league_hall_of_fame_entries
+                .unwrap_or(training.league_hall_of_fame_entries),
+            min_pairs: args.min_pairs.unwrap_or(training.min_pairs),
+            pair_batch: args
+                .pair_batch
+                .or(training.pair_batch)
+                .unwrap_or_else(|| host_parallelism().max(1)),
+            max_pairs: args.max_pairs.unwrap_or(training.max_pairs),
+            draw_window: args.draw_window.unwrap_or(training.draw_window),
+            draw_rate_limit: args.draw_rate_limit.unwrap_or(training.draw_rate_limit),
+            max_match_plies: args.max_match_plies.unwrap_or(training.max_match_plies),
+            max_match_time_ms: args.max_match_ms.unwrap_or(training.max_match_time_ms),
+            max_generations_without_candidate: args
+                .max_generations_without_candidate
+                .unwrap_or(training.max_generations_without_candidate),
+            finalist_count: args
+                .finalists
+                .or(training.finalists)
+                .unwrap_or_else(auto_finalists),
+            search_strategy: args
+                .search_strategy
+                .as_deref()
+                .map(TrainingSearchStrategy::parse)
+                .transpose()
+                .unwrap_or_else(|message| panic!("{message}"))
+                .unwrap_or(TrainingSearchStrategy::AlphaBeta),
+            sweep_parameter_groups: args
+                .parameter_groups
+                .as_deref()
+                .map(SweepParameterGroup::parse_list)
+                .transpose()
+                .unwrap_or_else(|message| panic!("{message}"))
+                .unwrap_or_else(|| vec![SweepParameterGroup::ClassicBasic]),
+            sweep_points: args.sweep_points.unwrap_or(5),
+            sweep_passes: args.sweep_passes.or(Some(2)),
+            sweep_range_low: 1.0 / 3.0,
+            sweep_range_high: 5.0 / 3.0,
+            sweep_shrink: args.sweep_shrink.unwrap_or(0.5),
+        };
+        if let Some(range) = args.sweep_range {
+            (config.sweep_range_low, config.sweep_range_high) =
+                parse_sweep_range(&range).unwrap_or_else(|message| panic!("{message}"));
+        }
+        config.normalize(compare_seeds_overridden);
+        config
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_env(args: Vec<String>) -> Self {
-        // The script-facing CLI is intentionally small, so hand parsing keeps the
-        // training harness dependency-free.
+        if args
+            .iter()
+            .any(|arg| arg.starts_with("--gpu-") || arg.starts_with("--sample-"))
+        {
+            let mut config = Self::from_args(
+                CpuCliArgs::try_parse_from(["train-cpu"])
+                    .expect("default CPU training arguments should parse"),
+            );
+            config.gpu = crate::gpu::cli::GpuCliConfig::from_env(args);
+            return config;
+        }
+        Self::from_args(
+            CpuCliArgs::try_parse_from(std::iter::once("train-cpu".to_string()).chain(args))
+                .unwrap_or_else(|error| error.exit()),
+        )
+    }
+
+    fn normalize(&mut self, compare_seeds_overridden: bool) {
+        self.population = self.population.max(4);
+        self.training_time_ms = self.training_time_ms.max(1);
+        self.nodes = self.nodes.max(1);
+        self.pair_batch = self.pair_batch.max(1);
+        self.opponent_variants = self.opponent_variants.max(1);
+        self.screening_opponent_variants = self
+            .screening_opponent_variants
+            .clamp(1, self.opponent_variants);
+        self.rounds_per_variant = self.rounds_per_variant.max(1);
+        self.hall_of_fame_entries = self.hall_of_fame_entries.max(1);
+        self.league_contenders = self.league_contenders.max(1);
+        self.league_hall_of_fame_entries = self.league_hall_of_fame_entries.max(1);
+        self.min_pairs = self.min_pairs.max(1);
+        self.max_pairs = self.max_pairs.max(self.min_pairs);
+        self.draw_window = self.draw_window.max(1);
+        self.draw_rate_limit = self.draw_rate_limit.clamp(0.0, 1.0);
+        self.max_match_plies = self.max_match_plies.max(1);
+        self.max_generations_without_candidate = self.max_generations_without_candidate.max(1);
+        self.finalist_count = self.finalist_count.clamp(2, self.population);
+        self.sweep_points = self.sweep_points.max(3);
+        if self.sweep_range_low <= 0.0 || self.sweep_range_high <= self.sweep_range_low {
+            self.sweep_range_low = 1.0 / 3.0;
+            self.sweep_range_high = 5.0 / 3.0;
+        }
+        self.sweep_shrink = self.sweep_shrink.clamp(0.01, 0.99);
+        if !compare_seeds_overridden {
+            self.compare_seeds = default_compare_seeds(self.seed);
+        }
+        if self.min_wins == 0 {
+            self.min_wins = self.compare_seeds.len() * 2 / 3 + 1;
+        }
+        if self.min_total_delta == 0 {
+            self.min_total_delta = (self.compare_seeds.len() as i32) * 50;
+        }
+    }
+
+    #[cfg(any())]
+    #[allow(dead_code)]
+    fn from_env_legacy(args: Vec<String>) -> Self {
+        // Clap owns the public option schema and diagnostics. The overlay below
+        // preserves defaults loaded from training.json and compatibility flags.
+        CpuCliArgs::try_parse_from(std::iter::once("train-cpu".to_string()).chain(args.clone()))
+            .unwrap_or_else(|error| error.exit());
         let seed = random_seed();
         let training = load_training_parameters();
         let mut config = Self {
@@ -388,6 +670,7 @@ fn cpu_search_request(config: &TrainerConfig) -> crate::cpu::search::CpuSearchRe
         min_depth: Some(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
         nodes: config.nodes.max(1).min(i32::MAX as usize) as i32,
         time_ms: config.training_time_ms.max(1).min(i32::MAX as u64) as i32,
+        search_strategy: crate::cpu::search::CpuSearchStrategy::Beam,
     }
 }
 

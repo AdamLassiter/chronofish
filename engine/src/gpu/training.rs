@@ -276,7 +276,10 @@ pub const AUXILIARY_VALUE_HEAD_COUNT: usize = 9;
 pub const MIN_POLICY_REPLAY_FRACTION: f32 = 0.25;
 pub const MIN_POLICY_WORKING_SET_FRACTION: f32 = 0.25;
 pub const MAX_PLAYOUT_PLIES: usize = 10;
-pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 16;
+// Each sampler owns a browser worker and its WebGPU device.  Keeping this
+// bounded avoids worker-loader/device failures on Firefox and lower-capability
+// adapters while still providing useful parallel label collection.
+pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 8;
 pub const GPU_WARMUP_MAX_TIME_MS: u64 = 5_000;
 pub const GPU_POSITION_GENERATION_TIME_MS: u64 = 3_000;
 pub const LABEL_REQUEST_MIN_TIMEOUT_MS: u64 = 30_000;

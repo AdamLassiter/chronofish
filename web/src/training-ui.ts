@@ -228,8 +228,8 @@ const TRAINING_PRESETS: Record<TrainingPresetName, TrainingPreset> = {
     cpuModes: ["vsGpu", "vsCpu", "self"],
     gpu: {
       samples: 8192,
-      selfPlayWorkers: 16,
-      searchWorkers: 16,
+      selfPlayWorkers: 8,
+      searchWorkers: 8,
       temperature: 0.35,
       depth: 6,
       nodes: 16384,
@@ -531,7 +531,7 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       trainingModes: selectedTrainingModes(selectedTrainingTab === "cpu" ? cpuModeSelect : trainingModeSelect, selectedTrainingTab === "cpu" ? ["vsCpu"] : ["vsGpu", "self"]),
       samples: clampNumber(samplesInput.value, 1, caps?.maxSamples ?? 512, caps?.samples ?? 64),
       selfPlayWorkers: clampNumber(selfPlayWorkersInput.value, 1, caps?.maxSelfPlayWorkers ?? 8, caps?.selfPlayWorkers ?? 2),
-      searchWorkers: clampNumber(searchWorkersInput.value, 1, caps?.maxSearchWorkers ?? 16, caps?.searchWorkers ?? 2),
+      searchWorkers: clampNumber(searchWorkersInput.value, 1, caps?.maxSearchWorkers ?? 8, caps?.searchWorkers ?? 2),
       explorationTemperature: clampNumber(temperatureInput.value, 0, 2, 0.25),
       depth: clampNumber(depthInput.value, 1, 8, 5),
       nodes: clampNumber(nodesInput.value, 1, caps?.maxNodes ?? 65536, caps?.nodes ?? 16384),
@@ -716,14 +716,14 @@ export function createTrainingController({ getEngine, getGame, resetAiWorker }: 
       const maxBatchByActivation = clampPowerOfTwo(Math.floor(maxStorageBinding / (1024 * Float32Array.BYTES_PER_ELEMENT)), 512, 16384);
       const highMemory = maxStorageBinding >= 512 * 1024 * 1024 || maxBufferSize >= 1024 * 1024 * 1024;
       const mediumMemory = maxStorageBinding >= 256 * 1024 * 1024 || maxBufferSize >= 512 * 1024 * 1024;
-      const maxWorkerBudget = Math.max(1, Math.min(highMemory ? 16 : 8, hardwareThreads - 1));
+      const maxWorkerBudget = Math.max(1, Math.min(8, hardwareThreads - 1));
       const config: TrainingGpuProfileConfig = {
         maxSamples: highMemory ? 16384 : 8192,
         samples: highMemory ? 8192 : mediumMemory ? 4096 : 1024,
         maxSelfPlayWorkers: maxWorkerBudget,
-        selfPlayWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 16 : mediumMemory ? 8 : 4)),
+        selfPlayWorkers: Math.max(1, Math.min(maxWorkerBudget, mediumMemory ? 8 : 4)),
         maxSearchWorkers: maxWorkerBudget,
-        searchWorkers: Math.max(1, Math.min(maxWorkerBudget, highMemory ? 16 : mediumMemory ? 8 : 4)),
+        searchWorkers: Math.max(1, Math.min(maxWorkerBudget, mediumMemory ? 8 : 4)),
         maxNodes: highMemory ? 16384 : 8192,
         nodes: highMemory ? 8192 : mediumMemory ? 4096 : 1024,
         maxEpochs: 16384,

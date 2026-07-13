@@ -228,6 +228,7 @@ pub(crate) struct TrainerConfig {
     pub(crate) out: Option<String>,
     pub(crate) score: Option<String>,
     pub(crate) score_default: bool,
+    #[allow(dead_code)]
     pub(crate) gpu: crate::gpu::cli::GpuCliConfig,
     pub(crate) cpu_search_snapshot: Option<String>,
     pub(crate) train_cycle: bool,

@@ -944,6 +944,25 @@ pub fn gpu_candidate_inputs_from_snapshot_json(
     Ok(gpu_candidate_inputs_from_game(&game))
 }
 
+/// Generates candidates from the compact GPU snapshot format used by the
+/// frontier and mutation paths. These snapshots carry flat `squares` records,
+/// so they must be converted back to the browser game representation before
+/// the authoritative snapshot parser is used.
+pub fn gpu_candidate_inputs_from_gpu_snapshot_json(
+    snapshot_json: &str,
+) -> Result<GpuCandidateInputs, String> {
+    let game_json = gpu_snapshot_game_json(snapshot_json)?;
+    gpu_candidate_inputs_from_snapshot_json(&game_json)
+}
+
+pub fn gpu_candidate_inputs_i32s_from_gpu_snapshot_json(
+    snapshot_json: &str,
+) -> Result<Vec<i32>, String> {
+    Ok(gpu_candidate_inputs_i32s(
+        &gpu_candidate_inputs_from_gpu_snapshot_json(snapshot_json)?,
+    ))
+}
+
 pub fn gpu_candidate_inputs_json_from_snapshot_json(snapshot_json: &str) -> Result<String, String> {
     Ok(gpu_candidate_inputs_json(
         &gpu_candidate_inputs_from_snapshot_json(snapshot_json)?,
@@ -2654,7 +2673,7 @@ pub fn gpu_search_failure_summary_json(snapshot_json: &str) -> Result<String, St
         .map(|timeline| timeline.boards.len())
         .sum::<usize>()
         .max(1);
-    let inputs = gpu_candidate_inputs_from_snapshot_json(snapshot_json)?;
+    let inputs = gpu_candidate_inputs_from_gpu_snapshot_json(snapshot_json)?;
     let root = encode_frontier_root_from_gpu_snapshot_json(snapshot_json, board_count)?;
     let pending = root
         .words

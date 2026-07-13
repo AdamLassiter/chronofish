@@ -37,6 +37,7 @@ use chronofish_engine::gpu::search::{
     gpu_candidate_index_json,
     gpu_candidate_indexes_json,
     gpu_candidate_input_meta_json_from_i32s,
+    gpu_candidate_inputs_from_gpu_snapshot_json,
     gpu_candidate_inputs_from_snapshot_json,
     gpu_candidate_inputs_from_timelines,
     gpu_candidate_inputs_i32s_from_snapshot_json,
@@ -2816,6 +2817,38 @@ fn gpu_candidate_inputs_from_snapshot_json_matches_web_candidate_input_contract(
     let error = gpu_candidate_inputs_from_snapshot_json("{\"turn\":\"white\",\"timelines\":null}")
         .expect_err("invalid snapshot should fail");
     assert!(error.contains("Snapshot timelines must be an array"));
+}
+
+#[test]
+fn gpu_candidate_inputs_from_compact_snapshot_accepts_flat_squares() {
+    let mut squares = vec![0; 64];
+    squares[0] = 6;
+    squares[63] = 1;
+    let snapshot = serde_json::json!({
+        "format": "chronofish-gpu-v1",
+        "turn": "white",
+        "nextTimelineId": 1,
+        "nextBlackTimelineId": -1,
+        "timelines": [{
+            "id": 0,
+            "row": 0,
+            "owner": "white",
+            "boards": [{
+                "time": 0,
+                "sideToMove": "white",
+                "castling": 0,
+                "enPassant": null,
+                "squares": squares
+            }]
+        }]
+    })
+    .to_string();
+
+    let inputs = gpu_candidate_inputs_from_gpu_snapshot_json(&snapshot)
+        .expect("compact snapshot candidate inputs");
+    assert_eq!(inputs.board_count, 1);
+    assert_eq!(inputs.source_count, 2);
+    assert_eq!(inputs.target_count, 64);
 }
 
 #[test]

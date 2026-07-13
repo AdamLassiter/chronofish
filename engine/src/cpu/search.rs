@@ -3,7 +3,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
-use crate::{cpu::EvalWeights, wasm_api::parse_game_snapshot, Game, Position};
+use crate::{
+    cpu::{AiSearchResult, EvalWeights, SearchContext, SearchOptions},
+    wasm_api::parse_game_snapshot,
+    Game,
+    Position,
+};
 
 pub const DEFAULT_CPU_SEARCH_DEPTH: i32 = 2;
 pub const DEFAULT_CPU_SEARCH_NODES: i32 = 1_024;
@@ -77,7 +82,7 @@ struct CpuBrowserMovePosition {
     y: i32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuReferenceScoreDelta {
     pub score: i32,
@@ -107,6 +112,7 @@ pub struct CpuWorkerSearchConfig {
     pub min_depth: Option<i32>,
     pub nodes: i32,
     pub time_ms: i32,
+    pub search_strategy: CpuSearchStrategy,
 }
 
 #[derive(serde::Deserialize)]
@@ -116,6 +122,8 @@ struct CpuWorkerSearchConfigRequest {
     min_depth: Option<f64>,
     nodes: Option<f64>,
     time_ms: Option<f64>,
+    #[serde(default)]
+    search_strategy: CpuSearchStrategy,
 }
 
 #[derive(serde::Deserialize)]
@@ -218,6 +226,15 @@ pub struct CpuSearchRequest {
     pub min_depth: Option<i32>,
     pub nodes: i32,
     pub time_ms: i32,
+    pub search_strategy: CpuSearchStrategy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CpuSearchStrategy {
+    AlphaBeta,
+    #[default]
+    Beam,
 }
 
 impl Default for CpuSearchRequest {
@@ -229,6 +246,7 @@ impl Default for CpuSearchRequest {
             min_depth: Some(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
             nodes: DEFAULT_CPU_SEARCH_NODES,
             time_ms: DEFAULT_CPU_SEARCH_TIME_MS,
+            search_strategy: CpuSearchStrategy::Beam,
         }
     }
 }
@@ -248,22 +266,85 @@ pub fn search(request: CpuSearchRequest) -> Result<CpuSearchResponse, String> {
         Some(snapshot) => parse_game_snapshot(snapshot)?,
         None => Game::new(),
     };
-    let depth = request.depth.max(1);
-    let nodes = request.nodes.max(1);
-    let time_ms = request.time_ms.max(1);
-    let result_json = match request.min_depth {
-        Some(min_depth) => {
-            game.ai_turn_timed_min_depth_json(depth, min_depth.max(1), nodes, time_ms)
-        }
-        None => game.ai_turn_timed_json(depth, nodes, time_ms),
-    };
+    let result_json = search_game_json(
+        &game,
+        request.depth,
+        request.min_depth,
+        request.nodes,
+        request.time_ms,
+        request.search_strategy,
+    );
     Ok(CpuSearchResponse {
         result_json,
         cpu_search: "heuristic",
     })
 }
 
+pub(crate) fn search_game_json(
+    game: &Game,
+    depth: i32,
+    min_depth: Option<i32>,
+    nodes: i32,
+    time_ms: i32,
+    search_strategy: CpuSearchStrategy,
+) -> String {
+    let depth = depth.max(1);
+    let nodes = nodes.max(1);
+    let time_ms = time_ms.max(1);
+    match search_strategy {
+        CpuSearchStrategy::AlphaBeta => match min_depth {
+            Some(min_depth) => {
+                game.ai_turn_timed_min_depth_json(depth, min_depth.max(1), nodes, time_ms)
+            }
+            None => game.ai_turn_timed_json(depth, nodes, time_ms),
+        },
+        CpuSearchStrategy::Beam => beam_search_result(game, nodes).to_json(),
+    }
+}
+
+fn beam_search_result(game: &Game, nodes: i32) -> AiSearchResult {
+    let nodes = nodes.max(1) as usize;
+    let weights = EvalWeights::active_tuned();
+    let mut context = SearchContext::new(weights, game.turn, nodes, None);
+    context.options = SearchOptions::minimal();
+    let limit = context.root_plan_limit();
+    let selected = game
+        .legal_turn_plans_with_context(&mut context, limit)
+        .into_iter()
+        .filter_map(|plan| {
+            game.apply_turn_plan_for_search(&plan).map(|child| {
+                let score = child.evaluate_heuristic_for_nodes(game.turn, &weights, nodes)
+                    + plan.score_hint;
+                (plan, score)
+            })
+        })
+        .max_by(|(left_plan, left_score), (right_plan, right_score)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| Game::turn_plan_cmp(right_plan, left_plan))
+        });
+    match selected {
+        Some((plan, score)) => AiSearchResult {
+            principal_variation: vec![plan.moves.clone()],
+            moves: plan.moves,
+            score,
+            depth: 1,
+            nodes: context.nodes,
+            status: "beam",
+            terminal_royal_capture: false,
+        },
+        None => game.best_ai_turn(1, nodes as i32, None),
+    }
+}
+
 pub fn cpu_worker_search_config_json(request_json: &str) -> Result<String, String> {
+    serde_json::to_string(&cpu_worker_search_config(request_json)?)
+        .map_err(|error| format!("CPU worker search config response failed to encode: {error}"))
+}
+
+pub(crate) fn cpu_worker_search_config(
+    request_json: &str,
+) -> Result<CpuWorkerSearchConfig, String> {
     let request = serde_json::from_str::<CpuWorkerSearchConfigRequest>(request_json)
         .map_err(|error| format!("CPU worker search config request is invalid: {error}"))?;
     let depth = cpu_worker_positive_i32(request.depth, 1, false);
@@ -275,9 +356,9 @@ pub fn cpu_worker_search_config_json(request_json: &str) -> Result<String, Strin
         min_depth,
         nodes: cpu_worker_positive_i32(request.nodes, 64, false),
         time_ms: cpu_worker_positive_i32(request.time_ms, 10_000, true),
+        search_strategy: request.search_strategy,
     };
-    serde_json::to_string(&config)
-        .map_err(|error| format!("CPU worker search config response failed to encode: {error}"))
+    Ok(config)
 }
 
 pub fn cpu_worker_search_result_json(request_json: &str) -> Result<String, String> {

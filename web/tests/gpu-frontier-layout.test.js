@@ -409,7 +409,7 @@ test("GPU snapshot wire codes have engine-owned counterparts", async () => {
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_gpu_search_color_code_json/);
   assert.match(wasmApi, /gpu_candidate_inputs_json_from_game/);
   assert.match(wasmApi, /gpu_candidate_inputs_i32s_from_game/);
-  assert.match(wasmApi, /gpu_candidate_inputs_i32s_from_snapshot_json/);
+  assert.match(wasmApi, /gpu_candidate_inputs_i32s_from_gpu_snapshot_json/);
   assert.match(engineSearch, /pub fn gpu_candidate_input_meta_json_from_i32s/);
   assert.match(engineTypes, /chronofish_gpu_candidate_inputs_json\(\): number/);
   assert.match(engineTypes, /chronofish_gpu_candidate_inputs_bytes\(\): number/);
@@ -1110,7 +1110,7 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.match(worker, /timeMs: searchConfig\.timeMs/);
   assert.doesNotMatch(worker, /const shallowConfig = \{ \.\.\.config, nodes: Math\.max\(1, Math\.min\(512, config\.nodes\)\) \}/);
   assert.doesNotMatch(worker, /timeMs: 3000/);
-  assert.match(engineTraining, /pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 16/);
+  assert.match(engineTraining, /pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 8/);
   assert.match(engineTraining, /pub const MAX_PLAYOUT_PLIES: usize = 10/);
   assert.match(engineTraining, /pub const GPU_WARMUP_MAX_TIME_MS: u64 = 5_000/);
   assert.match(engineTraining, /pub const GPU_POSITION_GENERATION_TIME_MS: u64 = 3_000/);

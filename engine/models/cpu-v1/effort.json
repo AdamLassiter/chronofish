@@ -9,7 +9,8 @@
     "depth": 4,
     "minDepth": 2,
     "nodes": 20000,
-    "timeMs": 10000
+    "timeMs": 10000,
+    "searchStrategy": "beam"
   },
   "balanced": {
     "label": "Bot: Balanced",
@@ -21,7 +22,8 @@
     "depth": 6,
     "minDepth": 4,
     "nodes": 80000,
-    "timeMs": 50000
+    "timeMs": 50000,
+    "searchStrategy": "beam"
   },
   "expert": {
     "label": "Bot: Expert",
@@ -33,6 +35,7 @@
     "depth": 8,
     "minDepth": 6,
     "nodes": 200000,
-    "timeMs": 250000
+    "timeMs": 250000,
+    "searchStrategy": "beam"
   }
 }

@@ -127,6 +127,14 @@
             aria-describedby="custom-cpu-time-help">
           <span id="custom-cpu-time-help" class="field-help">Nominal wall-clock budget per turn in milliseconds. Minimum depth can overrun this if needed.</span>
         </label>
+        <label>
+          Search strategy
+          <select id="custom-cpu-search-strategy" aria-describedby="custom-cpu-search-strategy-help">
+            <option value="beam" selected>Beam</option>
+            <option value="alpha-beta">Alpha-beta</option>
+          </select>
+          <span id="custom-cpu-search-strategy-help" class="field-help">Beam quickly ranks promising complete turns. Alpha-beta searches deeper tactical replies.</span>
+        </label>
         <div class="custom-cpu-actions">
           <button class="custom-cpu-button custom-cpu-button-primary" id="save-custom-cpu" type="button">Save settings</button>
           <button class="custom-cpu-button custom-cpu-button-secondary" id="reset-custom-cpu" type="button">Reset defaults</button>
@@ -197,7 +205,7 @@
         <div class="training-tab-panel" id="training-gpu-panel" data-training-panel="gpu">
           <label>
             Mode
-            <select id="training-mode" multiple size="6"
+            <select id="training-mode" multiple size="1"
               title="Select one or more GPU model label modes. Multiple modes split the label budget across sources."
               aria-describedby="training-mode-help">
               <option value="vsGpu" selected title="Samples positions, runs GPU search, and trains from the selected move and search score.">vs GPU search</option>
@@ -318,7 +326,7 @@
         <div class="training-tab-panel" id="training-cpu-panel" data-training-panel="cpu" hidden>
           <label>
             Mode
-            <select id="training-cpu-mode" multiple size="3"
+            <select id="training-cpu-mode" multiple size="1"
               title="Select one or more CPU heuristic scoring modes."
               aria-describedby="training-cpu-mode-help">
               <option value="vsGpu" title="Score CPU heuristic mutations against GPU search labels.">vs GPU search</option>

@@ -19,6 +19,7 @@ interface CpuWorkerSearchConfig {
   minDepth?: number | null;
   nodes: number;
   timeMs: number;
+  searchStrategy: "alpha-beta" | "beam";
 }
 
 export interface CpuSearchRequest {
@@ -27,6 +28,7 @@ export interface CpuSearchRequest {
   minDepth?: number | undefined;
   nodes: number;
   timeMs: number;
+  searchStrategy?: "alpha-beta" | "beam" | undefined;
   parametersJson?: string | undefined;
 }
 
@@ -48,15 +50,16 @@ export class CpuSearchBinding {
     }
     this.loadSnapshot(engine, request.game);
     const config = this.searchConfig(engine, request);
-    const output = config.minDepth == null
-      ? engine.chronofish_ai_turn_timed_json(config.depth, config.nodes, config.timeMs)
-      : engine.chronofish_ai_turn_timed_min_depth_json(
-        config.depth,
-        config.minDepth,
-        config.nodes,
-        config.timeMs
-      );
-    return this.searchResult(engine, JSON.parse(readWasmString(engine, output)) as CpuAiResult);
+    const { ptr, len } = writeWasmString(engine, JSON.stringify(config));
+    try {
+      const output = engine.chronofish_cpu_search_json(ptr, len);
+      if (!output) {
+        throw new Error(readWasmString(engine, engine.chronofish_last_message()));
+      }
+      return this.searchResult(engine, JSON.parse(readWasmString(engine, output)) as CpuAiResult);
+    } finally {
+      engine.chronofish_dealloc(ptr, len);
+    }
   }
 
   async applyTurn(game: GameSnapshot, moves?: Move[]): Promise<CpuApplyTurnResult> {

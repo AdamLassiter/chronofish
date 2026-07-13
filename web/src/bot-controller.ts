@@ -18,6 +18,7 @@ interface BotEffort {
   minDepth?: number;
   nodes?: number;
   timeMs?: number;
+  searchStrategy?: "alpha-beta" | "beam";
 }
 
 interface BotSearchConfig {
@@ -73,6 +74,7 @@ interface PendingSearch {
   workerCount: number;
   nodes: number;
   timeMs: number;
+  searchStrategy?: "alpha-beta" | "beam";
   depthExpected: number;
   depthReceived: number;
   depthResults: PendingResult[];
@@ -357,6 +359,7 @@ export function createBotController({
       workerCount,
       nodes: searchConfig.nodes,
       timeMs: searchConfig.timeMs,
+      ...(backend === "cpu" && effort.searchStrategy ? { searchStrategy: effort.searchStrategy } : {}),
       depthExpected: 0,
       depthReceived: 0,
       depthResults: [],
@@ -368,7 +371,10 @@ export function createBotController({
       incompleteDepthAttempt: false
     };
     clearBotTimeout();
-    bot.timeoutId = setTimeout(() => handleBotTimeout(id, botColor, timeMs), timeMs);
+    bot.timeoutId = setTimeout(
+      () => handleBotTimeout(id, botColor, searchConfig.timeMs),
+      searchConfig.timeMs
+    );
     bot.countdownId = setInterval(() => updateBotCountdownMessage(id), 250);
     launchNextBotDepth(id);
     updateBotCountdownMessage(id);
@@ -406,6 +412,7 @@ export function createBotController({
           nodes: pending.nodes,
           timeMs: workerTimeMs,
           minDepth: Math.min(nextDepth, pending.minDepth),
+          ...(pending.backend === "cpu" && pending.searchStrategy ? { searchStrategy: pending.searchStrategy } : {}),
           gpuMode: botGpuMode(),
           partitionIndex,
           partitionCount: pending.workerCount

@@ -236,6 +236,13 @@ async function collectTrainingSamples(
   if (activeModel?.outputWeights?.length && !distill && config.trainingSubject === "gpu") {
     return collectDistilledSamples(game, config, activeModel, progress);
   }
+  const failures = collected
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => errorMessage(result.reason))
+    .filter((message, index, messages) => message && messages.indexOf(message) === index);
+  if (failures.length > 0) {
+    throw new Error(`Training label collection failed: ${failures.join("; ")}`);
+  }
   throw new Error("No training labels were collected.");
 }
 
@@ -575,14 +582,15 @@ async function precomputeCpuReferenceScores(
           }
         }
         if (trainingModeEnabled(config, "vsGpu")) {
+          const gpuReferenceTimeMs = cpuGpuReferenceTimeMs(config);
           const gpuResult = await requestWorker(gpuWorker, {
             type: "search",
             game,
             depth: config.depth,
             nodes: config.nodes,
-            timeMs: workerSearchTimeMs(config),
-            gpuMode: "full"
-          }, workerRequestTimeout(config));
+            timeMs: gpuReferenceTimeMs,
+            gpuMode: "hybrid"
+          }, workerRequestTimeout({ nodes: config.nodes, timeMs: gpuReferenceTimeMs }));
           const gpuReference = cpuReferenceScoreFromResult(gpuResult.result);
           reference.gpuScore = gpuReference.score;
           if (gpuReference.moves) {
@@ -598,6 +606,13 @@ async function precomputeCpuReferenceScores(
       gpuWorker.terminate();
     }
   }
+}
+
+function cpuGpuReferenceTimeMs(config: NormalizedTrainingConfig): number {
+  // High CPU training evaluates a small number of expensive GPU references.
+  // Give the full/hybrid fallback enough time to initialize and finish rather
+  // than deriving a short budget solely from the GPU node count.
+  return Math.max(config.cpuTrainingTimeMs, 90_000);
 }
 
 async function scoreCpuCandidate(
@@ -1030,7 +1045,7 @@ async function collectSearchSamples(game: GameSnapshot, config: NormalizedTraini
         depth: config.depth,
         nodes: config.nodes,
         timeMs: workerSearchTimeMs(config),
-        gpuMode: "full",
+        gpuMode: "hybrid",
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("search", index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ 0x51a7_0001))
       }, workerRequestTimeout(config));
@@ -1157,7 +1172,7 @@ async function collectGpuSearchLabels(
         depth: config.depth,
         nodes: config.nodes,
         timeMs: workerSearchTimeMs(config),
-        gpuMode: "full",
+        gpuMode: "hybrid",
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed(String(labelKind), index, searchSeed(position.sample, config.runSeed ^ workerIndex ^ seedSalt))
       }, workerRequestTimeout(config));
@@ -1218,7 +1233,7 @@ async function collectCpuGpuDuelRollout(
         depth: useCpu ? config.cpuDepth : config.depth,
         nodes: useCpu ? config.cpuNodes : config.nodes,
         timeMs: workerSearchTimeMs({ nodes: useCpu ? config.cpuNodes : config.nodes }),
-        gpuMode: "full",
+        gpuMode: "hybrid",
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("duel", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0xd0e1_0001))
       }, workerRequestTimeout({ nodes: useCpu ? config.cpuNodes : config.nodes }));
@@ -1336,7 +1351,7 @@ async function collectOutcomeRollout(
         depth: config.depth,
         nodes: config.nodes,
         timeMs: workerSearchTimeMs(config),
-        gpuMode: "full",
+        gpuMode: "hybrid",
         temperature: config.explorationTemperature,
         randomSeed: sampleSeed("outcome", ply, searchSeed(encoded, config.runSeed ^ workerIndex ^ 0x0c70_0001))
       }, workerRequestTimeout(config));
@@ -1415,7 +1430,7 @@ async function warmupSelfPlayPosition(ai: Worker, game: GameSnapshot, config: No
         depth: warmupConfig.depth,
         nodes: warmupConfig.nodes,
         timeMs: warmupConfig.timeMs,
-        gpuMode: "full",
+        gpuMode: "hybrid",
         partitionIndex: workerIndex,
         partitionCount: config.selfPlayWorkers ?? 1,
         temperature: warmupConfig.explorationTemperature,
@@ -1556,7 +1571,6 @@ async function collectGpuPositions(
 
   async function runPositionWorker(workerIndex: number): Promise<void> {
     const ai = new Worker("./ai-worker.js", { type: "module" });
-    const encoder = new Worker("./training-label-worker.js", { type: "module" });
     const local: Array<{ index: number; game: GameSnapshot }> = [];
     try {
       while (nextJob < target) {
@@ -1567,12 +1581,9 @@ async function collectGpuPositions(
         generated += 1;
         progress({ collected: generated, sampleCount: target, labelWorkers: workerCount, labelKind, labelPhase: "positions" });
       }
-      let samples: TrainingSample[] = [];
-      try {
-        samples = await encodePositions(encoder, local.map((entry) => entry.game));
-      } catch {
-        samples = [];
-      }
+      const samples = await trainingBinding.trainingSamples<TrainingSample[]>(
+        local.map((entry) => entry.game)
+      );
       for (let index = 0; index < local.length; index += 1) {
         const entry = local[index];
         if (!entry) {
@@ -1592,7 +1603,6 @@ async function collectGpuPositions(
       }
     } finally {
       ai.terminate();
-      encoder.terminate();
     }
   }
 }
@@ -1609,7 +1619,7 @@ async function generatePositionGame(ai: Worker, game: GameSnapshot, config: Norm
         depth: searchConfig.depth,
         nodes: searchConfig.nodes,
         timeMs: searchConfig.timeMs,
-        gpuMode: "full",
+        gpuMode: "hybrid",
         temperature: searchConfig.explorationTemperature,
         randomSeed: sampleSeed("position", rolloutPlyOffset(ply, index), config.runSeed ^ workerIndex ^ 0x9051_0001)
       }, workerRequestTimeout(searchConfig));
@@ -2191,7 +2201,7 @@ async function validateLossLogs(
             depth: config.depth,
             nodes: config.nodes,
             timeMs: workerSearchTimeMs(config),
-            gpuMode: "full",
+            gpuMode: "hybrid",
             temperature: 0,
             randomSeed: sampleSeed("loss-log", validation.checked, config.runSeed ^ 0x1055_1000)
           }, workerRequestTimeout(config));

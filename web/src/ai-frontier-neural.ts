@@ -73,6 +73,7 @@ export class FrontierNeuralEvaluator {
   #workspace: NeuralWorkspace | null = null;
   #currentPolicyFeatures: { buffer: GPUBuffer; capacity: number; count: number } | null = null;
   #nextPolicyFeatures: { buffer: GPUBuffer; capacity: number; count: number } | null = null;
+  #retiredPolicyFeatures: GPUBuffer[] = [];
   #cacheStats = { hits: 0, misses: 0, stores: 0 };
   #temporaries: GPUBuffer[] = [];
 
@@ -251,7 +252,9 @@ export class FrontierNeuralEvaluator {
   }
 
   advancePolicyFeatures(): void {
-    this.#currentPolicyFeatures?.buffer.destroy();
+    if (this.#currentPolicyFeatures) {
+      this.#retiredPolicyFeatures.push(this.#currentPolicyFeatures.buffer);
+    }
     this.#currentPolicyFeatures = this.#nextPolicyFeatures;
     this.#nextPolicyFeatures = null;
   }
@@ -276,6 +279,8 @@ export class FrontierNeuralEvaluator {
   releaseTemporaries(): void {
     this.#temporaries.forEach((buffer) => buffer.destroy());
     this.#temporaries = [];
+    this.#retiredPolicyFeatures.forEach((buffer) => buffer.destroy());
+    this.#retiredPolicyFeatures = [];
   }
 
   private async model(): Promise<ModelBuffers | null> {
@@ -402,8 +407,10 @@ export class FrontierNeuralEvaluator {
   private destroyPolicyFeatures(): void {
     this.#currentPolicyFeatures?.buffer.destroy();
     this.#nextPolicyFeatures?.buffer.destroy();
+    this.#retiredPolicyFeatures.forEach((buffer) => buffer.destroy());
     this.#currentPolicyFeatures = null;
     this.#nextPolicyFeatures = null;
+    this.#retiredPolicyFeatures = [];
   }
 }
 
@@ -547,7 +554,7 @@ function gpuBuffer(device: GPUDevice, byteLength: number, extraUsage = 0, engine
 
 function initializedBuffer(device: GPUDevice, values: ArrayBufferView, engine?: ChronofishEngine): GPUBuffer {
   const buffer = gpuBuffer(device, values.byteLength, 0, engine);
-  device.queue.writeBuffer(buffer, 0, values);
+  device.queue.writeBuffer(buffer, 0, alignedUploadBytes(values, engine));
   return buffer;
 }
 
@@ -583,8 +590,18 @@ ${FRONTIER_POLICY_SHADER
 
 function uniformBytes(device: GPUDevice, bytes: Uint8Array, engine?: ChronofishEngine): GPUBuffer {
   const buffer = device.createBuffer({ size: align4(bytes.byteLength, engine), usage: usage.COPY_DST | usage.UNIFORM });
-  device.queue.writeBuffer(buffer, 0, bytes);
+  device.queue.writeBuffer(buffer, 0, alignedUploadBytes(bytes, engine));
   return buffer;
+}
+
+function alignedUploadBytes(values: ArrayBufferView, engine?: ChronofishEngine): Uint8Array {
+  const bytes = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
+  if (bytes.byteLength % 4 === 0) {
+    return bytes;
+  }
+  const padded = new Uint8Array(align4(bytes.byteLength, engine));
+  padded.set(bytes);
+  return padded;
 }
 
 function u32Bytes(values: number[]): Uint8Array {

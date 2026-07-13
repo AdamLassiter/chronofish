@@ -1,3 +1,117 @@
+use clap::{Args, Parser};
+
+/// Options shared by native CPU and GPU training commands.
+#[derive(Args, Clone, Debug, Default)]
+pub(crate) struct CommonCliArgs {
+    /// Search node budget.
+    #[arg(long)]
+    pub(crate) nodes: Option<usize>,
+    /// Per-search time budget in milliseconds.
+    #[arg(long = "training-time-ms", visible_alias = "turn-time-ms")]
+    pub(crate) training_time_ms: Option<u64>,
+    /// Write generated samples or the trained model to this path.
+    #[arg(long)]
+    pub(crate) out: Option<String>,
+}
+
+/// GPU-only native search, sample collection, and model-training options.
+#[derive(Args, Clone, Debug, Default)]
+pub(crate) struct GpuCliArgs {
+    #[command(flatten)]
+    pub(crate) common: CommonCliArgs,
+    /// Print the native WGPU adapter and backend information.
+    #[arg(long)]
+    pub(crate) gpu_backend_info: bool,
+    /// Compile all engine GPU shaders and report the result.
+    #[arg(long)]
+    pub(crate) gpu_compile_shaders: bool,
+    /// Compile the GPU training kernels and report the result.
+    #[arg(long)]
+    pub(crate) gpu_compile_kernels: bool,
+    /// Dispatch a minimal GPU search to validate the native search path.
+    #[arg(long)]
+    pub(crate) gpu_dispatch_smoke: bool,
+    /// Dispatch a minimal GPU feature-projection workload.
+    #[arg(long)]
+    pub(crate) gpu_training_dispatch_smoke: bool,
+    /// List the GPU shader kernels used by search and training.
+    #[arg(long)]
+    pub(crate) gpu_shader_info: bool,
+    /// CFNN model path used for inference or as the training starting point.
+    #[arg(long = "gpu-model", visible_alias = "gpu-value-model")]
+    pub(crate) gpu_value_model_path: Option<String>,
+    /// Print a model summary; omit the value to use the default model path.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(crate) gpu_model_info: Option<String>,
+    /// Evaluate the model with an all-zero feature vector; omit the value for the default model.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(crate) gpu_model_probe_zero: Option<String>,
+    /// Project features from a training-sample JSON file on the GPU.
+    #[arg(long)]
+    pub(crate) gpu_project_samples: Option<String>,
+    /// Predict values for a training-sample JSON file on the GPU.
+    #[arg(long)]
+    pub(crate) gpu_predict_samples: Option<String>,
+    /// Distill a training-sample JSON file using the selected model.
+    #[arg(long)]
+    pub(crate) gpu_distill_samples: Option<String>,
+    /// Existing replay-buffer training-sample JSON file.
+    #[arg(long)]
+    pub(crate) gpu_replay_buffer: Option<String>,
+    /// Training-sample JSON file to append to the replay buffer.
+    #[arg(long, visible_alias = "gpu-append-replay-samples")]
+    pub(crate) gpu_replay_append: Option<String>,
+    /// Maximum samples retained when appending a replay buffer.
+    #[arg(long)]
+    pub(crate) gpu_replay_max: Option<usize>,
+    /// Search the initial position or the optional snapshot JSON file on the GPU.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(crate) gpu_search: Option<String>,
+    /// Maximum GPU search depth.
+    #[arg(long)]
+    pub(crate) gpu_search_depth: Option<i32>,
+    /// Minimum GPU search depth completed before the time limit is honored.
+    #[arg(long)]
+    pub(crate) gpu_search_min_depth: Option<i32>,
+    /// Collect GPU-search labels from the initial position or an optional snapshot JSON file.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(crate) gpu_sample_search: Option<String>,
+    /// Number of labeled positions to collect.
+    #[arg(long = "gpu-sample-count", visible_alias = "sample-count")]
+    pub(crate) gpu_sample_count: Option<usize>,
+    /// Label source: `search`, `cpu`, `duel`, or `distilled`.
+    #[arg(long = "gpu-sample-mode", visible_alias = "sample-mode", value_parser = parse_search_label_mode)]
+    pub(crate) gpu_sample_mode: Option<crate::gpu::training::SearchLabelMode>,
+    /// Maximum self-play plies used while collecting labels.
+    #[arg(long = "gpu-sample-plies", visible_alias = "sample-plies")]
+    pub(crate) gpu_sample_max_plies: Option<usize>,
+    /// Collect GPU-search labels and train from the initial position or an optional snapshot JSON file.
+    #[arg(long, num_args = 0..=1, default_missing_value = "")]
+    pub(crate) gpu_train_search: Option<String>,
+    /// Train the model from an existing training-sample JSON file.
+    #[arg(long)]
+    pub(crate) gpu_train_samples: Option<String>,
+    /// Train from projected samples using native GPU feature projection.
+    #[arg(long)]
+    pub(crate) gpu_train_projected_samples: Option<String>,
+    /// Learning rate for value and policy optimization.
+    #[arg(long)]
+    pub(crate) gpu_learning_rate: Option<f32>,
+    /// Number of value-training epochs.
+    #[arg(long)]
+    pub(crate) gpu_epochs: Option<usize>,
+    /// L2 weight-decay coefficient.
+    #[arg(long)]
+    pub(crate) gpu_weight_decay: Option<f32>,
+    /// Momentum coefficient for value and policy optimization.
+    #[arg(long)]
+    pub(crate) gpu_momentum: Option<f32>,
+}
+
+fn parse_search_label_mode(value: &str) -> Result<crate::gpu::training::SearchLabelMode, String> {
+    crate::gpu::training::SearchLabelMode::parse(value)
+}
+
 #[derive(Clone)]
 pub(crate) struct GpuCliConfig {
     pub(crate) nodes: usize,
@@ -75,115 +189,79 @@ impl Default for GpuCliConfig {
 }
 
 impl GpuCliConfig {
-    pub(crate) fn with_run_options(
-        &self,
-        nodes: usize,
-        training_time_ms: u64,
-        out: Option<String>,
-    ) -> Self {
-        let mut config = self.clone();
-        config.nodes = nodes;
-        config.training_time_ms = training_time_ms;
-        config.out = out;
-        config
-    }
-
-    pub(crate) fn consume_option(&mut self, option: &str, value: Option<&str>) -> Option<usize> {
-        let optional_path = || value.filter(|next| !next.starts_with("--"));
-        let consumed_optional = || if optional_path().is_some() { 2 } else { 1 };
-        let parse_usize = || value.and_then(|raw| raw.parse::<usize>().ok());
-        let parse_i32 = || value.and_then(|raw| raw.parse::<i32>().ok());
-        let parse_f32 = || value.and_then(|raw| raw.parse::<f32>().ok());
-        match option {
-            "--gpu-backend-info" => self.gpu_backend_info = true,
-            "--gpu-compile-shaders" => self.gpu_compile_shaders = true,
-            "--gpu-compile-kernels" => self.gpu_compile_kernels = true,
-            "--gpu-dispatch-smoke" => self.gpu_dispatch_smoke = true,
-            "--gpu-training-dispatch-smoke" => self.gpu_training_dispatch_smoke = true,
-            "--gpu-shader-info" => self.gpu_shader_info = true,
-            "--gpu-model-info" => {
-                self.gpu_model_info = Some(
-                    optional_path()
-                        .unwrap_or(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
-                        .to_string(),
-                );
-                return Some(consumed_optional());
-            }
-            "--gpu-model-probe-zero" => {
-                self.gpu_model_probe_zero = Some(
-                    optional_path()
-                        .unwrap_or(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
-                        .to_string(),
-                );
-                return Some(consumed_optional());
-            }
-            "--gpu-model" | "--gpu-value-model" => {
-                if let Some(value) = value {
-                    self.gpu_value_model_path = value.to_string();
-                }
-            }
-            "--gpu-project-samples" => self.gpu_project_samples = value.map(ToOwned::to_owned),
-            "--gpu-predict-samples" => self.gpu_predict_samples = value.map(ToOwned::to_owned),
-            "--gpu-distill-samples" => self.gpu_distill_samples = value.map(ToOwned::to_owned),
-            "--gpu-replay-buffer" => self.gpu_replay_buffer = value.map(ToOwned::to_owned),
-            "--gpu-replay-append" | "--gpu-append-replay-samples" => {
-                self.gpu_replay_append = value.map(ToOwned::to_owned)
-            }
-            "--gpu-replay-max" => {
-                self.gpu_replay_max = parse_usize().unwrap_or(self.gpu_replay_max)
-            }
-            "--gpu-search" => {
-                self.gpu_search_snapshot = Some(optional_path().unwrap_or("").to_string());
-                return Some(consumed_optional());
-            }
-            "--gpu-search-depth" => self.gpu_search_depth = parse_i32(),
-            "--gpu-search-min-depth" => self.gpu_search_min_depth = parse_i32(),
-            "--gpu-train-samples" => self.gpu_train_samples = value.map(ToOwned::to_owned),
-            "--gpu-train-projected-samples" => {
-                self.gpu_train_projected_samples = value.map(ToOwned::to_owned)
-            }
-            "--gpu-learning-rate" => {
-                self.gpu_learning_rate = parse_f32().unwrap_or(self.gpu_learning_rate)
-            }
-            "--gpu-epochs" => self.gpu_epochs = parse_usize().unwrap_or(self.gpu_epochs),
-            "--gpu-weight-decay" => {
-                self.gpu_weight_decay = parse_f32().unwrap_or(self.gpu_weight_decay)
-            }
-            "--gpu-momentum" => self.gpu_momentum = parse_f32().unwrap_or(self.gpu_momentum),
-            "--gpu-train-search" => {
-                self.gpu_train_search_snapshot = Some(optional_path().unwrap_or("").to_string());
-                return Some(consumed_optional());
-            }
-            "--gpu-sample-search" => {
-                self.gpu_sample_search_snapshot = Some(optional_path().unwrap_or("").to_string());
-                return Some(consumed_optional());
-            }
-            "--gpu-sample-count" | "--sample-count" => {
-                self.gpu_sample_count = parse_usize().unwrap_or(self.gpu_sample_count)
-            }
-            "--gpu-sample-mode" | "--sample-mode" => {
-                if let Some(value) = value {
-                    self.gpu_sample_mode = crate::gpu::training::SearchLabelMode::parse(value)
-                        .unwrap_or_else(|message| panic!("{message}"));
-                }
-            }
-            "--gpu-sample-plies" | "--sample-plies" => {
-                self.gpu_sample_max_plies = parse_usize().unwrap_or(self.gpu_sample_max_plies)
-            }
-            _ => return None,
+    pub(crate) fn from_args(args: GpuCliArgs) -> Self {
+        let mut config = Self::default();
+        if let Some(value) = args.common.nodes {
+            config.nodes = value;
         }
-        Some(
-            if option.starts_with("--gpu-")
-                || matches!(
-                    option,
-                    "--sample-count" | "--sample-mode" | "--sample-plies"
-                )
-            {
-                2
+        if let Some(value) = args.common.training_time_ms {
+            config.training_time_ms = value;
+        }
+        if let Some(value) = args.common.out {
+            config.out = Some(value);
+        }
+        config.gpu_backend_info = args.gpu_backend_info;
+        config.gpu_compile_shaders = args.gpu_compile_shaders;
+        config.gpu_compile_kernels = args.gpu_compile_kernels;
+        config.gpu_dispatch_smoke = args.gpu_dispatch_smoke;
+        config.gpu_training_dispatch_smoke = args.gpu_training_dispatch_smoke;
+        config.gpu_shader_info = args.gpu_shader_info;
+        if let Some(value) = args.gpu_value_model_path {
+            config.gpu_value_model_path = value;
+        }
+        let default_model = crate::gpu::training::DEFAULT_VALUE_MODEL_PATH.to_string();
+        config.gpu_model_info = args.gpu_model_info.map(|value| {
+            if value.is_empty() {
+                default_model.clone()
             } else {
-                1
-            },
-        )
+                value
+            }
+        });
+        config.gpu_model_probe_zero = args.gpu_model_probe_zero.map(|value| {
+            if value.is_empty() {
+                default_model
+            } else {
+                value
+            }
+        });
+        config.gpu_project_samples = args.gpu_project_samples;
+        config.gpu_predict_samples = args.gpu_predict_samples;
+        config.gpu_distill_samples = args.gpu_distill_samples;
+        config.gpu_replay_buffer = args.gpu_replay_buffer;
+        config.gpu_replay_append = args.gpu_replay_append;
+        if let Some(value) = args.gpu_replay_max {
+            config.gpu_replay_max = value;
+        }
+        config.gpu_search_snapshot = args.gpu_search;
+        config.gpu_search_depth = args.gpu_search_depth;
+        config.gpu_search_min_depth = args.gpu_search_min_depth;
+        config.gpu_sample_search_snapshot = args.gpu_sample_search;
+        if let Some(value) = args.gpu_sample_count {
+            config.gpu_sample_count = value;
+        }
+        if let Some(value) = args.gpu_sample_mode {
+            config.gpu_sample_mode = value;
+        }
+        if let Some(value) = args.gpu_sample_max_plies {
+            config.gpu_sample_max_plies = value;
+        }
+        config.gpu_train_search_snapshot = args.gpu_train_search;
+        config.gpu_train_samples = args.gpu_train_samples;
+        config.gpu_train_projected_samples = args.gpu_train_projected_samples;
+        if let Some(value) = args.gpu_learning_rate {
+            config.gpu_learning_rate = value;
+        }
+        if let Some(value) = args.gpu_epochs {
+            config.gpu_epochs = value;
+        }
+        if let Some(value) = args.gpu_weight_decay {
+            config.gpu_weight_decay = value;
+        }
+        if let Some(value) = args.gpu_momentum {
+            config.gpu_momentum = value;
+        }
+        config.normalize();
+        config
     }
 
     pub(crate) fn normalize(&mut self) {
@@ -191,38 +269,34 @@ impl GpuCliConfig {
     }
 }
 
-pub fn run_gpu_cli() {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let mut config = GpuCliConfig::default();
-    let mut index = 0;
-    while index < args.len() {
-        let option = args[index].as_str();
-        let value = args.get(index + 1).map(String::as_str);
-        if let Some(consumed) = config.consume_option(option, value) {
-            index += consumed;
-            continue;
-        }
-        match option {
-            "--nodes" => {
-                config.nodes = value
-                    .and_then(|raw| raw.parse().ok())
-                    .unwrap_or(config.nodes);
-                index += 2;
-            }
-            "--training-time-ms" | "--turn-time-ms" => {
-                config.training_time_ms = value
-                    .and_then(|raw| raw.parse().ok())
-                    .unwrap_or(config.training_time_ms);
-                index += 2;
-            }
-            "--out" => {
-                config.out = value.map(ToOwned::to_owned);
-                index += 2;
-            }
-            _ => index += 1,
-        }
+#[derive(Parser)]
+#[command(
+    name = "train-gpu",
+    about = "Run native GPU search, sampling, and value/policy training"
+)]
+struct GpuCli {
+    #[command(flatten)]
+    args: GpuCliArgs,
+}
+
+impl GpuCliConfig {
+    #[cfg(test)]
+    pub(crate) fn from_env(args: Vec<String>) -> Self {
+        Self::from_args(
+            GpuCli::try_parse_from(std::iter::once("train-gpu".to_string()).chain(args))
+                .unwrap_or_else(|error| error.exit())
+                .args,
+        )
     }
-    config.normalize();
+}
+
+pub fn run_gpu_cli() {
+    let config = GpuCliConfig::from_args(
+        GpuCli::parse_from(
+            std::iter::once("train-gpu".to_string()).chain(std::env::args().skip(1)),
+        )
+        .args,
+    );
     if !run(&config) {
         eprintln!("No GPU command selected. Try --gpu-search, --gpu-sample-search, or --gpu-train-samples.");
     }
