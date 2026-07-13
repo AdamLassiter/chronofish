@@ -6,7 +6,8 @@ use crate::cpu::EvalWeights;
 #[derive(Parser)]
 #[command(
     name = "train-cpu",
-    about = "Run native CPU heuristic training and CPU search"
+    about = "Run native CPU heuristic training and CPU search",
+    after_help = "Commands: train (cyclic training), search [SNAPSHOT], score [PARAMETERS]. Existing flat flags remain supported."
 )]
 struct CpuCliArgs {
     /// Search budgets and output options shared with native GPU training.
@@ -45,9 +46,9 @@ struct CpuCliArgs {
     /// Deterministic random seed for candidate generation and matches.
     #[arg(long)]
     seed: Option<u64>,
-    /// Optional wall-clock safety limit for the entire training run, in seconds.
-    #[arg(long = "max-seconds", visible_aliases = ["time-seconds", "time-budget"])]
-    max_seconds: Option<u64>,
+    /// Number of heuristic parameters evaluated concurrently in a frozen-baseline batch.
+    #[arg(long)]
+    parameter_jobs: Option<usize>,
     /// Score the heuristic weights stored in the given JSON file.
     #[arg(long)]
     score: Option<String>,
@@ -135,15 +136,36 @@ struct CpuCliArgs {
 }
 
 pub fn run_training_cli() {
-    let config = CpuCliConfig::from_args(CpuCliArgs::parse());
+    let raw = std::env::args().skip(1).collect::<Vec<_>>();
+    let config = CpuCliConfig::from_args(CpuCliArgs::parse_from(
+        std::iter::once("train-cpu".to_string()).chain(normalize_cpu_command(raw, true)),
+    ));
+    crate::training_runtime::set_global_ui_mode(config.ui);
 
+    let interactive = config.ui.resolve() == crate::training_runtime::UiMode::Tui
+        && !config.score_default
+        && config.score.is_none()
+        && config.cpu_search_snapshot.is_none();
+    if interactive {
+        if let Some(output) =
+            crate::training_runtime::run_interactive(move || run_training_with_config(config))
+                .unwrap_or_else(|message| panic!("interactive CPU training failed: {message}"))
+        {
+            println!("{output}");
+        }
+    } else if let Some(output) = run_training_with_config(config) {
+        println!("{output}");
+    }
+}
+
+fn run_training_with_config(config: CpuCliConfig) -> Option<String> {
     if config.train_cycle {
         // The top-level ./train script loops this mode until interrupted.
         match config.training_strategy {
             CpuTrainingStrategy::Sweep => run_sweep_training_cycle(&config),
             CpuTrainingStrategy::Genetic => run_training_cycle(&config),
         }
-        return;
+        return None;
     }
 
     if config.score_default {
@@ -151,7 +173,7 @@ pub fn run_training_cli() {
             "{}",
             fitness(EvalWeights::default_tuned(), &config).summary()
         );
-        return;
+        return None;
     }
 
     if config.cpu_search_snapshot.is_some() {
@@ -159,14 +181,14 @@ pub fn run_training_cli() {
         let response =
             crate::cpu::search::search(request).unwrap_or_else(|message| panic!("{message}"));
         println!("{}", response.result_json);
-        return;
+        return None;
     }
 
     if let Some(path) = &config.score {
         let json = std::fs::read_to_string(path).expect("failed to read score weights");
         let weights = EvalWeights::from_json(&json).expect("failed to parse score weights");
         println!("{}", fitness(weights, &config).summary());
-        return;
+        return None;
     }
 
     let weights = match config.training_strategy {
@@ -175,9 +197,34 @@ pub fn run_training_cli() {
     };
     let json = weights.to_json();
     if let Some(path) = &config.out {
-        std::fs::write(path, &json).expect("failed to write training output");
+        crate::training_runtime::atomic_replace(std::path::Path::new(path), json.as_bytes())
+            .expect("failed to atomically write training output");
     }
-    println!("{json}");
+    Some(json)
+}
+
+fn normalize_cpu_command(mut args: Vec<String>, default_cycle: bool) -> Vec<String> {
+    match args.first().map(String::as_str) {
+        Some("train") => {
+            args.remove(0);
+            args.insert(0, "--train-cycle".into());
+        }
+        Some("search") => {
+            args.remove(0);
+            args.insert(0, "--cpu-search".into());
+        }
+        Some("score") => {
+            args.remove(0);
+            if args.first().is_some_and(|arg| !arg.starts_with('-')) {
+                args.insert(0, "--score".into());
+            } else {
+                args.insert(0, "--score-default".into());
+            }
+        }
+        None if default_cycle => args.push("--train-cycle".into()),
+        _ => {}
+    }
+    args
 }
 
 impl CpuCliConfig {
@@ -193,8 +240,16 @@ impl CpuCliConfig {
             training_time_ms: args.common.training_time_ms.unwrap_or(training.time_ms),
             nodes: args.common.nodes.unwrap_or(training.nodes),
             seed,
-            max_seconds: args.max_seconds,
+            max_seconds: args.common.max_seconds,
             out: args.common.out,
+            ui: args.common.ui,
+            candidate_out: args
+                .common
+                .candidate_out
+                .unwrap_or_else(|| "engine/models/cpu-v1/parameters.candidate.json".to_string()),
+            improvement_log: args.common.improvement_log.unwrap_or_else(|| {
+                "engine/models/cpu-v1/parameters.improvements.jsonl".to_string()
+            }),
             score: args.score,
             score_default: args.score_default,
             gpu: crate::gpu::cli::GpuCliConfig::default(),
@@ -269,6 +324,17 @@ impl CpuCliConfig {
             sweep_range_low: 1.0 / 3.0,
             sweep_range_high: 5.0 / 3.0,
             sweep_shrink: args.sweep_shrink.unwrap_or(0.5),
+            parameter_jobs: args.parameter_jobs.unwrap_or_else(|| {
+                let selected = args
+                    .parameter_groups
+                    .as_deref()
+                    .and_then(|groups| SweepParameterGroup::parse_list(groups).ok())
+                    .map(|groups| sweep_weight_parameters(&groups).len())
+                    .unwrap_or_else(|| {
+                        sweep_weight_parameters(&[SweepParameterGroup::ClassicBasic]).len()
+                    });
+                selected.min((host_parallelism() / 2).max(1)).max(1)
+            }),
         };
         if let Some(range) = args.sweep_range {
             (config.sweep_range_low, config.sweep_range_high) =
@@ -280,6 +346,7 @@ impl CpuCliConfig {
 
     #[cfg(test)]
     pub(crate) fn from_env(args: Vec<String>) -> Self {
+        let args = normalize_cpu_command(args, false);
         if args
             .iter()
             .any(|arg| arg.starts_with("--gpu-") || arg.starts_with("--sample-"))
@@ -323,6 +390,7 @@ impl CpuCliConfig {
             self.sweep_range_high = 5.0 / 3.0;
         }
         self.sweep_shrink = self.sweep_shrink.clamp(0.01, 0.99);
+        self.parameter_jobs = self.parameter_jobs.max(1);
         if !compare_seeds_overridden {
             self.compare_seeds = default_compare_seeds(self.seed);
         }
@@ -688,4 +756,29 @@ fn parse_sweep_range(value: &str) -> Result<(f64, f64), String> {
         return Err("sweep range must satisfy 0 < LOW < HIGH".to_string());
     }
     Ok((low, high))
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    #[test]
+    fn subcommands_map_to_compatible_flat_options() {
+        assert_eq!(
+            normalize_cpu_command(vec!["train".into()], false),
+            vec!["--train-cycle"]
+        );
+        assert_eq!(
+            normalize_cpu_command(vec!["search".into(), "board.json".into()], false),
+            vec!["--cpu-search", "board.json"]
+        );
+        assert_eq!(
+            normalize_cpu_command(vec!["score".into(), "weights.json".into()], false),
+            vec!["--score", "weights.json"]
+        );
+        assert_eq!(
+            normalize_cpu_command(vec!["score".into()], false),
+            vec!["--score-default"]
+        );
+    }
 }

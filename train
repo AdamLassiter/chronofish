@@ -3,7 +3,7 @@ set -eu
 
 if [ "${1:-}" = "cpu" ]; then
   shift
-  exec cargo run --manifest-path engine/Cargo.toml --bin train -- --train-cycle "$@"
+  exec ./train-cpu "$@"
 fi
 
 if [ "${1:-}" = "gpu" ]; then
@@ -13,8 +13,8 @@ fi
 
 echo "Frontend WebGPU training is served by the dev server with training endpoints enabled."
 echo "Open the app and use the Neural training modal."
-echo "For native heuristic CPU training, run: ./train-cpu --max-seconds 3600"
-echo "For native GPU search or training, run: ./train-gpu --gpu-search [snapshot.json]"
+echo "For native heuristic CPU training, run: ./train-cpu train --max-seconds 3600"
+echo "For native GPU training, run: ./train-gpu train --source search [snapshot.json]"
 
 npm --prefix web ci
 npm --prefix web run build

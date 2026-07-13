@@ -3,6 +3,9 @@ pub mod gpu;
 pub mod model;
 pub(crate) use model::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod training_runtime;
+
 pub(crate) mod wasm_api;
 
 mod game;

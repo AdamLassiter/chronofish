@@ -13,10 +13,6 @@ use crate::cpu::{
 pub(crate) struct TrainingSearchOutcome {
     pub(crate) plan: TurnPlan,
     pub(crate) depth: i32,
-    pub(crate) elapsed_ms: u128,
-    pub(crate) nodes: usize,
-    pub(crate) fallback_used: bool,
-    pub(crate) capped: bool,
     pub(crate) obligations: usize,
     pub(crate) playable_boards: usize,
 }
@@ -56,7 +52,6 @@ fn alpha_beta_training_turn_search(
     plies_played: usize,
 ) -> Option<TrainingSearchOutcome> {
     let deadline = training_turn_deadline(config, deadline);
-    let started = SearchInstant::now();
     let mut context = SearchContext::new(weights, game.turn, config.nodes, deadline);
     context.options = SearchOptions::training();
     let profile = apply_training_search_profile(game, &mut context, plies_played);
@@ -77,19 +72,13 @@ fn alpha_beta_training_turn_search(
     };
 
     let (mut best, mut best_depth) = run_alpha_beta_training_search(game, &mut context);
-    let mut fallback_used = false;
     if best.is_none() {
         best = fallback;
         best_depth = 0;
-        fallback_used = best.is_some();
     }
     best.map(|plan| TrainingSearchOutcome {
         plan,
         depth: best_depth,
-        elapsed_ms: SearchInstant::now().duration_since(started).as_millis(),
-        nodes: context.nodes,
-        fallback_used,
-        capped,
         obligations: profile.obligations,
         playable_boards: profile.playable_boards,
     })
@@ -200,7 +189,6 @@ fn beam_training_turn_search(
     deadline: Option<SearchInstant>,
     plies_played: usize,
 ) -> Option<TrainingSearchOutcome> {
-    let started = SearchInstant::now();
     let mut context = SearchContext::new(
         weights,
         game.turn,
@@ -230,10 +218,6 @@ fn beam_training_turn_search(
         .map(|(plan, _)| TrainingSearchOutcome {
             plan,
             depth: 1,
-            elapsed_ms: SearchInstant::now().duration_since(started).as_millis(),
-            nodes: context.nodes,
-            fallback_used: false,
-            capped: context.root_plan_cap.is_some() || context.child_plan_cap.is_some(),
             obligations: profile.obligations,
             playable_boards: profile.playable_boards,
         })

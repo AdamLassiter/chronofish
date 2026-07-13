@@ -24,7 +24,8 @@ neural-rocm = ["dep:burn", "burn/rocm"]
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon = "1.10"
-pretty-log = { path = "../pretty-log" }
+ratatui = "0.29"
+crossterm = "0.28"
 
 [dev-dependencies]
 naga = { version = "29", features = ["wgsl-in"] }

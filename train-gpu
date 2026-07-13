@@ -2,10 +2,10 @@
 set -eu
 
 echo "Training local GPU value and policy model."
-echo "Pass --gpu-train-search or --gpu-train-samples to collect or load training data."
+echo "Use 'train --source search|samples|projected' to select the training pipeline input."
 if [ "$#" -eq 0 ]; then
   exec cargo run --release --manifest-path engine/Cargo.toml --features neural-wgpu --bin gpu -- \
-    --gpu-train-search --gpu-sample-count 128 \
+    train --source search --gpu-sample-count 128 \
     --gpu-model engine/models/gpu-v1/value-model.cfnn \
     --out engine/models/gpu-v1/value-model.cfnn
 fi

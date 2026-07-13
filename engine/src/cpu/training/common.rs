@@ -1,60 +1,70 @@
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-    time::Instant,
-};
+use crate::training_runtime::{self, JobProgress, JobState, LogLevel, TrainingEvent};
 
-// Native-only training harness for EvalWeights. It plays full matches, compares
-// candidate weights against committed defaults, and can promote a statistically
-// significant improvement.
+pub(crate) fn training_log(level: LogLevel, scope: impl Into<String>, message: impl Into<String>) {
+    training_runtime::log(level, scope, message);
+}
+
 pub(crate) fn training_banner(config: &CpuCliConfig) {
-    pretty_log::banner(
-        "CPU Training",
-        format!("parameters=cpu-v1 seed={}", config.seed),
-    );
-    pretty_log::label_value(
-        "max seconds",
-        config
-            .max_seconds
-            .map_or_else(|| "none".to_string(), |seconds| seconds.to_string()),
-    );
-    pretty_log::label_value("strategy", config.training_strategy.as_str());
-    pretty_log::label_value("population", config.population);
-    pretty_log::label_value("finalists", config.finalist_count);
-    pretty_log::label_value(
-        "sweep groups",
-        config
-            .sweep_parameter_groups
-            .iter()
-            .map(|group| group.as_str())
-            .collect::<Vec<_>>()
-            .join(","),
-    );
-    pretty_log::label_value("sweep points", config.sweep_points);
-    pretty_log::label_value(
-        "sweep passes",
-        config
-            .sweep_passes
-            .map_or_else(|| "unlimited".to_string(), |passes| passes.to_string()),
-    );
-    pretty_log::label_value(
-        "sweep range",
+    training_log(
+        LogLevel::Info,
+        "cpu",
         format!(
-            "{:.3}:{:.3} shrink={:.3}",
-            config.sweep_range_low, config.sweep_range_high, config.sweep_shrink
+            "starting {:?} training seed={} parameters={} jobs={} turn_ms={} nodes={} max_seconds={}",
+            config.training_strategy,
+            config.seed,
+            super::parameters::sweep_weight_parameters(&config.sweep_parameter_groups).len(),
+            config.parameter_jobs,
+            config.training_time_ms,
+            config.nodes,
+            config
+                .max_seconds
+                .map_or_else(|| "unlimited".to_string(), |value| value.to_string())
         ),
     );
-    pretty_log::label_value("pair batch", config.pair_batch);
-    pretty_log::label_value("turn time ms", config.training_time_ms);
-    pretty_log::label_value("nodes", config.nodes);
-    pretty_log::label_value("search", config.search_strategy.as_str());
-    pretty_log::label_value("opponent variants", config.opponent_variants);
-    pretty_log::label_value("rounds per variant", config.rounds_per_variant);
-    pretty_log::label_value("hall of fame entries", config.hall_of_fame_entries);
-    pretty_log::label_value("min pairs", config.min_pairs);
-    pretty_log::label_value("max pairs", config.max_pairs);
-    pretty_log::label_value("max match plies", config.max_match_plies);
-    pretty_log::label_value("max match ms", max_match_time_ms(config));
+}
+
+pub(crate) fn training_progress(
+    stage: &str,
+    current: usize,
+    total: usize,
+    detail: impl Into<String>,
+) {
+    training_task_progress(stage, current, total, detail);
+}
+
+pub(crate) fn training_task_progress(
+    key: &str,
+    current: usize,
+    total: usize,
+    detail: impl Into<String>,
+) {
+    if crate::training_runtime::global_ui_mode() == crate::training_runtime::UiMode::Plain
+        && key.starts_with("cpu-match-")
+    {
+        return;
+    }
+    training_runtime::render_structured_event(&TrainingEvent::Progress {
+        job_id: key.to_string(),
+        progress: JobProgress {
+            current: current as u64,
+            total: total.max(1) as u64,
+            detail: detail.into(),
+            ..Default::default()
+        },
+    });
+}
+
+pub(crate) fn finish_training_task(key: &str) {
+    if crate::training_runtime::global_ui_mode() == crate::training_runtime::UiMode::Plain
+        && key.starts_with("cpu-match-")
+    {
+        return;
+    }
+    training_runtime::render_structured_event(&TrainingEvent::State {
+        job_id: key.to_string(),
+        state: JobState::Completed,
+        error: None,
+    });
 }
 
 pub(crate) const MAX_TRAINING_SEARCH_DEPTH: i32 = 64;
@@ -82,141 +92,6 @@ pub(crate) struct TrainingParameters {
     pub(crate) max_generations_without_candidate: usize,
 }
 
-pub(crate) fn training_progress(
-    stage: &str,
-    current: usize,
-    total: usize,
-    detail: impl AsRef<str>,
-) {
-    training_task_progress(stage, stage, current, total, detail);
-}
-
-pub(crate) fn training_task_progress(
-    key: &str,
-    label: &str,
-    current: usize,
-    total: usize,
-    detail: impl AsRef<str>,
-) {
-    let Ok(mut tasks) = training_progress_tasks().lock() else {
-        return;
-    };
-    let now = Instant::now();
-    let task = tasks
-        .entry(key.to_string())
-        .or_insert_with(|| TrainingProgressTask {
-            label: label.to_string(),
-            start: now,
-            updated: now,
-            start_current: current,
-            current,
-            total,
-            detail: String::new(),
-        });
-    task.label = label.to_string();
-    task.updated = now;
-    task.current = current.min(total.max(current));
-    task.total = total.max(current).max(1);
-    task.detail = detail.as_ref().to_string();
-
-    tasks.retain(|_, task| {
-        let age = now.saturating_duration_since(task.updated);
-        if task.current >= task.total {
-            age.as_secs_f32() < 2.0
-        } else {
-            age.as_secs_f32() < 20.0
-        }
-    });
-
-    let mut rows: Vec<TrainingProgressRenderRow> = tasks
-        .values()
-        .map(|task| {
-            let elapsed = now
-                .saturating_duration_since(task.start)
-                .as_secs_f64()
-                .max(0.001);
-            let completed = task.current.saturating_sub(task.start_current);
-            TrainingProgressRenderRow {
-                label: task.label.clone(),
-                current: task.current,
-                total: task.total,
-                rate: completed as f64 / elapsed,
-                detail: task.detail.clone(),
-                updated: task.updated,
-            }
-        })
-        .collect();
-    rows.sort_by_key(|row| row.updated);
-    rows.truncate(8);
-
-    let pretty_rows: Vec<pretty_log::ProgressRow<'_>> = rows
-        .iter()
-        .map(|row| pretty_log::ProgressRow {
-            label: &row.label,
-            current: row.current,
-            total: row.total,
-            rate: row.rate,
-            detail: &row.detail,
-        })
-        .collect();
-    pretty_log::progress(&pretty_rows);
-}
-
-pub(crate) fn finish_training_task(key: &str) {
-    let Ok(mut tasks) = training_progress_tasks().lock() else {
-        return;
-    };
-    tasks.remove(key);
-    let rows: Vec<TrainingProgressRenderRow> = tasks
-        .values()
-        .map(|task| TrainingProgressRenderRow {
-            label: task.label.clone(),
-            current: task.current,
-            total: task.total,
-            rate: 0.0,
-            detail: task.detail.clone(),
-            updated: task.updated,
-        })
-        .collect();
-    let pretty_rows: Vec<pretty_log::ProgressRow<'_>> = rows
-        .iter()
-        .take(8)
-        .map(|row| pretty_log::ProgressRow {
-            label: &row.label,
-            current: row.current,
-            total: row.total,
-            rate: row.rate,
-            detail: &row.detail,
-        })
-        .collect();
-    pretty_log::progress(&pretty_rows);
-}
-
-#[derive(Clone)]
-struct TrainingProgressTask {
-    label: String,
-    start: Instant,
-    updated: Instant,
-    start_current: usize,
-    current: usize,
-    total: usize,
-    detail: String,
-}
-
-struct TrainingProgressRenderRow {
-    label: String,
-    current: usize,
-    total: usize,
-    rate: f64,
-    detail: String,
-    updated: Instant,
-}
-
-fn training_progress_tasks() -> &'static Mutex<HashMap<String, TrainingProgressTask>> {
-    static TASKS: OnceLock<Mutex<HashMap<String, TrainingProgressTask>>> = OnceLock::new();
-    TASKS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 #[derive(Clone)]
 pub(crate) struct CpuCliConfig {
     pub(crate) generations: usize,
@@ -226,6 +101,9 @@ pub(crate) struct CpuCliConfig {
     pub(crate) seed: u64,
     pub(crate) max_seconds: Option<u64>,
     pub(crate) out: Option<String>,
+    pub(crate) ui: crate::training_runtime::UiMode,
+    pub(crate) candidate_out: String,
+    pub(crate) improvement_log: String,
     pub(crate) score: Option<String>,
     pub(crate) score_default: bool,
     #[allow(dead_code)]
@@ -261,6 +139,7 @@ pub(crate) struct CpuCliConfig {
     pub(crate) sweep_range_low: f64,
     pub(crate) sweep_range_high: f64,
     pub(crate) sweep_shrink: f64,
+    pub(crate) parameter_jobs: usize,
 }
 
 pub(crate) fn max_match_time_ms(config: &CpuCliConfig) -> u64 {
@@ -282,13 +161,6 @@ pub(crate) enum CpuTrainingStrategy {
 }
 
 impl CpuTrainingStrategy {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Sweep => "sweep",
-            Self::Genetic => "genetic",
-        }
-    }
-
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "sweep" | "coordinate" | "coordinate-sweep" => Ok(Self::Sweep),
@@ -307,15 +179,6 @@ pub(crate) enum SweepParameterGroup {
 }
 
 impl SweepParameterGroup {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::ClassicBasic => "classic-basic",
-            Self::AlternateBasic => "alternate-basic",
-            Self::Intermediate => "intermediate",
-            Self::Advanced => "advanced",
-        }
-    }
-
     pub(crate) fn parse_list(value: &str) -> Result<Vec<Self>, String> {
         let mut groups = Vec::new();
         for raw in value.split([',', ' ']) {
@@ -361,13 +224,6 @@ pub(crate) enum TrainingSearchStrategy {
 }
 
 impl TrainingSearchStrategy {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::AlphaBeta => "alpha-beta",
-            Self::Beam => "beam",
-        }
-    }
-
     pub(crate) fn parse(value: &str) -> Result<Self, String> {
         match value {
             "alpha-beta" | "alphabeta" | "alpha" => Ok(Self::AlphaBeta),

@@ -3878,8 +3878,8 @@ fn gpu_board_squares_from_json(board: &GpuBoardJson) -> Result<Vec<i32>, String>
                 }
             }
             serde_json::Value::Object(values) => {
-                for index in 0..64 {
-                    output[index] = values
+                for (index, square) in output.iter_mut().enumerate() {
+                    *square = values
                         .get(&index.to_string())
                         .and_then(serde_json::Value::as_i64)
                         .unwrap_or(0) as i32;

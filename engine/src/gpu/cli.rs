@@ -12,6 +12,22 @@ pub(crate) struct CommonCliArgs {
     /// Write generated samples or the trained model to this path.
     #[arg(long)]
     pub(crate) out: Option<String>,
+    /// Progress renderer. `auto` uses the TUI only when stdin and stdout are terminals.
+    #[arg(long, default_value = "auto", value_parser = parse_ui_mode)]
+    pub(crate) ui: crate::training_runtime::UiMode,
+    /// Wall-clock limit for the complete training run. Paused time is included.
+    #[arg(long = "max-seconds", visible_aliases = ["time-seconds", "time-budget"])]
+    pub(crate) max_seconds: Option<u64>,
+    /// Durable artifact written whenever a new best candidate is discovered.
+    #[arg(long)]
+    pub(crate) candidate_out: Option<String>,
+    /// Append-only JSONL audit journal for candidate and promotion events.
+    #[arg(long)]
+    pub(crate) improvement_log: Option<String>,
+}
+
+fn parse_ui_mode(value: &str) -> Result<crate::training_runtime::UiMode, String> {
+    crate::training_runtime::UiMode::parse(value)
 }
 
 /// GPU-only native search, sample collection, and model-training options.
@@ -106,6 +122,9 @@ pub(crate) struct GpuCliArgs {
     /// Momentum coefficient for value and policy optimization.
     #[arg(long)]
     pub(crate) momentum: Option<f32>,
+    /// Fraction of stable position groups reserved for deterministic holdout validation.
+    #[arg(long, default_value_t = 0.1)]
+    pub(crate) validation_split: f32,
 }
 
 fn parse_search_label_mode(value: &str) -> Result<crate::gpu::training::SearchLabelMode, String> {
@@ -117,6 +136,11 @@ pub(crate) struct GpuCliConfig {
     pub(crate) nodes: usize,
     pub(crate) training_time_ms: u64,
     pub(crate) out: Option<String>,
+    pub(crate) ui: crate::training_runtime::UiMode,
+    pub(crate) max_seconds: Option<u64>,
+    pub(crate) candidate_out: String,
+    pub(crate) improvement_log: String,
+    pub(crate) validation_split: f32,
     pub(crate) backend_info: bool,
     pub(crate) compile_shaders: bool,
     pub(crate) compile_kernels: bool,
@@ -155,6 +179,11 @@ impl Default for GpuCliConfig {
             nodes: crate::gpu::search::DEFAULT_GPU_SEARCH_NODES as usize,
             training_time_ms: crate::gpu::search::DEFAULT_GPU_SEARCH_TIME_MS as u64,
             out: None,
+            ui: crate::training_runtime::UiMode::Auto,
+            max_seconds: None,
+            candidate_out: "engine/models/gpu-v1/value-model.candidate.cfnn".to_string(),
+            improvement_log: "engine/models/gpu-v1/value-model.improvements.jsonl".to_string(),
+            validation_split: 0.1,
             backend_info: false,
             compile_shaders: false,
             compile_kernels: false,
@@ -199,6 +228,14 @@ impl GpuCliConfig {
         }
         if let Some(value) = args.common.out {
             config.out = Some(value);
+        }
+        config.ui = args.common.ui;
+        config.max_seconds = args.common.max_seconds;
+        if let Some(value) = args.common.candidate_out {
+            config.candidate_out = value;
+        }
+        if let Some(value) = args.common.improvement_log {
+            config.improvement_log = value;
         }
         config.backend_info = args.backend_info;
         config.compile_shaders = args.compile_shaders;
@@ -260,6 +297,7 @@ impl GpuCliConfig {
         if let Some(value) = args.momentum {
             config.momentum = value;
         }
+        config.validation_split = args.validation_split.clamp(0.0, 0.9);
         config.normalize();
         config
     }
@@ -272,7 +310,8 @@ impl GpuCliConfig {
 #[derive(Parser)]
 #[command(
     name = "train-gpu",
-    about = "Run native GPU search, sampling, and value/policy training"
+    about = "Run native GPU search, sampling, and value/policy training",
+    after_help = "Training command: train --source search|samples|projected [INPUT]. Existing flat flags remain supported."
 )]
 struct GpuCli {
     #[command(flatten)]
@@ -283,23 +322,72 @@ impl GpuCliConfig {
     #[cfg(test)]
     pub(crate) fn from_env(args: Vec<String>) -> Self {
         Self::from_args(
-            GpuCli::try_parse_from(std::iter::once("train-gpu".to_string()).chain(args))
-                .unwrap_or_else(|error| error.exit())
-                .args,
+            GpuCli::try_parse_from(
+                std::iter::once("train-gpu".to_string()).chain(normalize_gpu_command(args)),
+            )
+            .unwrap_or_else(|error| error.exit())
+            .args,
         )
     }
 }
 
 pub fn run_gpu_cli() {
+    let args = normalize_gpu_command(std::env::args().skip(1).collect());
     let config = GpuCliConfig::from_args(
-        GpuCli::parse_from(
-            std::iter::once("train-gpu".to_string()).chain(std::env::args().skip(1)),
-        )
-        .args,
+        GpuCli::parse_from(std::iter::once("train-gpu".to_string()).chain(args)).args,
     );
-    if !run(&config) {
+    crate::training_runtime::set_global_ui_mode(config.ui);
+    let training = config.train_search_snapshot.is_some()
+        || config.train_samples.is_some()
+        || config.train_projected_samples.is_some();
+    let handled = if training && config.ui.resolve() == crate::training_runtime::UiMode::Tui {
+        crate::training_runtime::run_interactive(move || run(&config))
+            .unwrap_or_else(|message| panic!("interactive GPU training failed: {message}"))
+    } else {
+        run(&config)
+    };
+    if !handled {
         eprintln!("No GPU command selected. Try --gpu-search, --gpu-sample-search, or --gpu-train-samples.");
     }
+}
+
+fn normalize_gpu_command(mut args: Vec<String>) -> Vec<String> {
+    if args.first().is_some_and(|arg| arg == "train") {
+        args.remove(0);
+        let source_index = args.iter().position(|arg| arg == "--source");
+        let source = source_index
+            .and_then(|index| args.get(index + 1).cloned())
+            .unwrap_or_else(|| "search".into());
+        if let Some(index) = source_index {
+            args.drain(index..=(index + 1).min(args.len() - 1));
+        }
+        let flag = match source.as_str() {
+            "search" => "--train-search",
+            "samples" => "--train-samples",
+            "projected" => "--train-projected-samples",
+            other => panic!(
+                "unknown GPU training source `{other}`; expected search, samples, or projected"
+            ),
+        };
+        args.insert(0, flag.into());
+    }
+    for arg in &mut args {
+        let normalized = match arg.as_str() {
+            "--gpu-search" => "--snapshot".to_string(),
+            "--gpu-search-depth" => "--search-depth".to_string(),
+            "--gpu-search-min-depth" => "--search-min-depth".to_string(),
+            "--gpu-sample-search" => "--sample-search".to_string(),
+            "--gpu-train-search" => "--train-search".to_string(),
+            "--gpu-train-samples" => "--train-samples".to_string(),
+            "--gpu-train-projected-samples" => "--train-projected-samples".to_string(),
+            value if value.starts_with("--gpu-") && value != "--gpu-model" => {
+                format!("--{}", &value[6..])
+            }
+            value => value.to_string(),
+        };
+        *arg = normalized;
+    }
+    args
 }
 
 /// Runs a GPU-focused native CLI command and reports whether one was selected.
@@ -369,26 +457,36 @@ pub(crate) fn run(config: &GpuCliConfig) -> bool {
                 .unwrap_or_else(|message| panic!("{message}"));
         let (value_report, policy_report, wrote) =
             train_gpu_value_model_from_samples(&response.samples, config);
-        println!(
-            "gpu_train_search samples={} requested={} generated={} labeled={} value_epochs={} value_initial_loss={} value_final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
+        crate::training_runtime::log(
+            crate::training_runtime::LogLevel::Success,
+            "gpu/train",
+            format!(
+            "search samples={} requested={} generated={} labeled={} value_epochs={} value_initial_loss={} value_final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
             response.samples.len(), response.requested, response.generated_positions,
             response.labeled_positions, value_report.epochs, value_report.initial_loss,
             value_report.final_loss, policy_report.samples, policy_report.steps,
             policy_report.initial_loss, policy_report.final_loss, wrote
-        );
+        ));
     } else if let Some(path) = &config.train_samples {
         let samples = crate::gpu::training::load_training_samples_json(path)
             .unwrap_or_else(|message| panic!("{message}"));
         let (value_report, policy_report, wrote) =
             train_gpu_value_model_from_samples(&samples, config);
-        println!(
-            "gpu_train_value_head samples={} epochs={} initial_loss={} final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
+        crate::training_runtime::log(
+            crate::training_runtime::LogLevel::Success,
+            "gpu/train",
+            format!(
+            "samples={} epochs={} initial_loss={} final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
             value_report.samples, value_report.epochs, value_report.initial_loss,
             value_report.final_loss, policy_report.samples, policy_report.steps,
             policy_report.initial_loss, policy_report.final_loss, wrote
-        );
+        ));
     } else if let Some(path) = &config.train_projected_samples {
-        println!("{}", native_gpu_train_projected_samples(path, config));
+        crate::training_runtime::log(
+            crate::training_runtime::LogLevel::Success,
+            "gpu/train",
+            native_gpu_train_projected_samples(path, config),
+        );
     } else {
         return false;
     }
@@ -612,26 +710,12 @@ fn native_gpu_predict_samples(_path: &str, _config: &GpuCliConfig) -> String {
 fn native_gpu_train_projected_samples(path: &str, config: &GpuCliConfig) -> String {
     let samples = crate::gpu::training::load_training_samples_json(path)
         .unwrap_or_else(|message| panic!("{message}"));
-    let model = load_gpu_value_model(config);
-    let projected = crate::gpu::native::project_features_batch(
-        crate::gpu::native::NativeProjectFeaturesBatchRequest {
-            projection_size: model.projection_size as usize,
-            seed: model.projection_seed,
-            output_offset: 0,
-            features: samples
-                .iter()
-                .map(|sample| sample.features.clone())
-                .collect(),
-        },
-    )
-    .unwrap_or_else(|message| panic!("{message}"));
-    let (value_report, policy_report, _) =
-        train_native_gpu_value_model_from_projected(&samples, &projected, model, config);
+    let (value_report, policy_report, wrote) = train_gpu_value_model_from_samples(&samples, config);
     format!(
-        "gpu_train_projected_samples samples={} projected_values={} value_epochs={} value_initial_loss={} value_final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
-        value_report.samples, projected.len(), value_report.epochs, value_report.initial_loss,
+        "gpu_train_projected_samples samples={} value_epochs={} value_initial_loss={} value_final_loss={} policy_samples={} policy_steps={} policy_initial_loss={} policy_final_loss={} wrote={}",
+        value_report.samples, value_report.epochs, value_report.initial_loss,
         value_report.final_loss, policy_report.samples, policy_report.steps,
-        policy_report.initial_loss, policy_report.final_loss, config.out.as_deref().unwrap_or("")
+        policy_report.initial_loss, policy_report.final_loss, wrote
     )
 }
 
@@ -797,8 +881,250 @@ fn load_gpu_value_model(config: &GpuCliConfig) -> crate::gpu::training::CompactV
         .unwrap_or_else(|message| panic!("{message}"))
 }
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "neural-wgpu"))]
 fn train_gpu_value_model_from_samples(
+    samples: &[crate::gpu::training::TrainingSample],
+    config: &GpuCliConfig,
+) -> (
+    crate::gpu::training::ValueHeadTrainingReport,
+    crate::gpu::training::PolicyHeadTrainingReport,
+    String,
+) {
+    let started = std::time::Instant::now();
+    crate::training_runtime::log(
+        crate::training_runtime::LogLevel::Info,
+        "gpu/train",
+        format!(
+            "starting samples={} epochs={} validation_split={} max_seconds={}",
+            samples.len(),
+            config.epochs,
+            config.validation_split,
+            config
+                .max_seconds
+                .map_or_else(|| "unlimited".to_string(), |value| value.to_string())
+        ),
+    );
+    for (stage, dependency) in crate::gpu::training::native_training_stage_graph(
+        crate::gpu::training::NativeTrainingSource::Samples,
+    ) {
+        let id = format!("gpu-{}", format!("{stage:?}").to_ascii_lowercase());
+        crate::training_runtime::render_structured_event(
+            &crate::training_runtime::TrainingEvent::Added {
+                job: crate::training_runtime::JobSnapshot::new(
+                    crate::training_runtime::JobMetadata {
+                        id,
+                        label: format!("{stage:?}"),
+                        kind: "gpu-stage".into(),
+                        seed: config.nodes as u64,
+                        dependencies: dependency
+                            .map(|value| {
+                                format!("gpu-{}", format!("{value:?}").to_ascii_lowercase())
+                            })
+                            .into_iter()
+                            .collect(),
+                        persistence_path: Some(config.candidate_out.clone().into()),
+                        detail: std::collections::BTreeMap::new(),
+                    },
+                ),
+            },
+        );
+    }
+    gpu_stage_state(
+        "projection",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
+    let samples = crate::gpu::training::dedupe_training_samples(samples);
+    let split = crate::gpu::training::split_validation_samples(&samples, config.validation_split);
+    let training_samples = split
+        .train_indices
+        .iter()
+        .map(|&index| samples[index].clone())
+        .collect::<Vec<_>>();
+    let validation_samples = split
+        .validation_indices
+        .iter()
+        .map(|&index| samples[index].clone())
+        .collect::<Vec<_>>();
+    crate::training_runtime::log(
+        crate::training_runtime::LogLevel::Info,
+        "gpu/train",
+        format!(
+            "deduplicated={} train={} validation={} split_seed={}",
+            samples.len(),
+            training_samples.len(),
+            validation_samples.len(),
+            split.seed
+        ),
+    );
+    let baseline = load_gpu_value_model(config);
+    if config.out.as_deref() == Some(config.candidate_out.as_str()) {
+        panic!("--candidate-out must differ from --out so an unvalidated model cannot replace the active model");
+    }
+    let mut candidate_config = config.clone();
+    candidate_config.out = Some(config.candidate_out.clone());
+    let (value_report, policy_report, _) =
+        train_gpu_value_model_from_samples_unvalidated(&training_samples, &candidate_config);
+    gpu_stage_state(
+        "projection",
+        crate::training_runtime::JobState::Completed,
+        None,
+    );
+    gpu_stage_state(
+        "valuehead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
+    gpu_stage_state(
+        "valuehead",
+        crate::training_runtime::JobState::Completed,
+        None,
+    );
+    gpu_stage_state(
+        "policyhead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
+    gpu_stage_state(
+        "policyhead",
+        crate::training_runtime::JobState::Completed,
+        None,
+    );
+    gpu_stage_state(
+        "validation",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
+    let candidate = crate::gpu::training::load_compact_value_model(&config.candidate_out)
+        .unwrap_or_else(|message| panic!("failed to reload GPU candidate: {message}"));
+    let baseline_loss = validation_value_loss(&baseline, &validation_samples);
+    let candidate_loss = validation_value_loss(&candidate, &validation_samples);
+    let run_id = crate::training_runtime::stable_run_id(split.seed as u64);
+    let artifact = std::path::PathBuf::from(&config.candidate_out);
+    let mut record = crate::training_runtime::ImprovementRecord::now(
+        &run_id,
+        "gpu-validation",
+        split.seed as u64,
+        baseline_loss as f64,
+        candidate_loss as f64,
+        format!(
+            "deterministic position-group holdout train={} validation={}",
+            training_samples.len(),
+            validation_samples.len()
+        ),
+        artifact.clone(),
+    );
+    let persistence =
+        crate::training_runtime::PersistenceWorker::start(config.improvement_log.clone().into());
+    persistence
+        .sender()
+        .send(crate::training_runtime::PersistenceRequest::Candidate {
+            path: artifact,
+            bytes: crate::gpu::training::encode_compact_value_model(&candidate),
+            record: record.clone(),
+        })
+        .unwrap_or_else(|error| panic!("GPU persistence worker stopped: {error}"));
+    let cancelled = matches!(
+        crate::training_runtime::cooperative_checkpoint(),
+        crate::training_runtime::Checkpoint::Cancelled
+    );
+    let timed_out = config
+        .max_seconds
+        .is_some_and(|seconds| started.elapsed().as_secs() >= seconds);
+    let improved = !validation_samples.is_empty()
+        && candidate_loss.is_finite()
+        && baseline_loss.is_finite()
+        && candidate_loss < baseline_loss;
+    crate::training_runtime::log(
+        if improved {
+            crate::training_runtime::LogLevel::Success
+        } else {
+            crate::training_runtime::LogLevel::Warn
+        },
+        "gpu/validation",
+        format!(
+            "baseline_loss={baseline_loss} candidate_loss={candidate_loss} improved={improved}"
+        ),
+    );
+    if improved && !timed_out && !cancelled {
+        if let Some(out) = &config.out {
+            crate::training_runtime::atomic_replace(
+                std::path::Path::new(out),
+                &crate::gpu::training::encode_compact_value_model(&candidate),
+            )
+            .unwrap_or_else(|message| panic!("GPU promotion failed: {message}"));
+            record.outcome = "promoted".into();
+            record.artifact_path = out.into();
+            persistence
+                .sender()
+                .send(crate::training_runtime::PersistenceRequest::Journal { record })
+                .unwrap_or_else(|error| panic!("GPU persistence worker stopped: {error}"));
+        }
+    } else {
+        record.outcome = if cancelled {
+            "cancelled".into()
+        } else if timed_out {
+            "timed-out".into()
+        } else {
+            "validation-rejected".into()
+        };
+        persistence
+            .sender()
+            .send(crate::training_runtime::PersistenceRequest::Journal { record })
+            .unwrap_or_else(|error| panic!("GPU persistence worker stopped: {error}"));
+    }
+    gpu_stage_state(
+        "validation",
+        if cancelled {
+            crate::training_runtime::JobState::Cancelled
+        } else if timed_out {
+            crate::training_runtime::JobState::TimedOut
+        } else if improved {
+            crate::training_runtime::JobState::Completed
+        } else {
+            crate::training_runtime::JobState::Failed
+        },
+        (!improved && !timed_out && !cancelled)
+            .then(|| "candidate did not improve deterministic holdout loss".to_string()),
+    );
+    persistence
+        .shutdown()
+        .unwrap_or_else(|message| panic!("GPU candidate persistence failed: {message}"));
+    (value_report, policy_report, config.candidate_out.clone())
+}
+
+fn gpu_stage_state(stage: &str, state: crate::training_runtime::JobState, error: Option<String>) {
+    crate::training_runtime::render_structured_event(
+        &crate::training_runtime::TrainingEvent::State {
+            job_id: format!("gpu-{stage}"),
+            state,
+            error,
+        },
+    );
+}
+
+fn validation_value_loss(
+    model: &crate::gpu::training::CompactValueModel,
+    samples: &[crate::gpu::training::TrainingSample],
+) -> f32 {
+    if samples.is_empty() {
+        return f32::NAN;
+    }
+    samples
+        .iter()
+        .map(|sample| {
+            let error = model.predict_value(&sample.features) - sample.label;
+            error * error * sample.label_weight.max(0.0)
+        })
+        .sum::<f32>()
+        / samples
+            .iter()
+            .map(|sample| sample.label_weight.max(0.0))
+            .sum::<f32>()
+            .max(f32::EPSILON)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "neural-wgpu"))]
+fn train_gpu_value_model_from_samples_unvalidated(
     samples: &[crate::gpu::training::TrainingSample],
     config: &GpuCliConfig,
 ) -> (
@@ -829,7 +1155,7 @@ fn train_gpu_value_model_from_samples(
 }
 
 #[cfg(not(feature = "neural-wgpu"))]
-fn train_gpu_value_model_from_samples(
+fn train_gpu_value_model_from_samples_unvalidated(
     samples: &[crate::gpu::training::TrainingSample],
     config: &GpuCliConfig,
 ) -> (
@@ -923,5 +1249,27 @@ mod tests {
         assert_eq!(training.epochs, 96);
         assert_eq!(training.weight_decay, 0.0005);
         assert_eq!(training.momentum, 0.85);
+    }
+
+    #[test]
+    fn gpu_train_subcommands_and_flat_aliases_select_the_same_sources() {
+        let samples = GpuCliConfig::from_env(vec![
+            "train".into(),
+            "--source".into(),
+            "samples".into(),
+            "samples.json".into(),
+        ]);
+        assert_eq!(samples.train_samples.as_deref(), Some("samples.json"));
+        let projected = GpuCliConfig::from_env(vec![
+            "--gpu-train-projected-samples".into(),
+            "projected.json".into(),
+        ]);
+        assert_eq!(
+            projected.train_projected_samples.as_deref(),
+            Some("projected.json")
+        );
+        let search =
+            GpuCliConfig::from_env(vec!["train".into(), "--source".into(), "search".into()]);
+        assert_eq!(search.train_search_snapshot.as_deref(), Some(""));
     }
 }

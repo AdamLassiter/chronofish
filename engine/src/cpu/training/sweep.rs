@@ -3,20 +3,30 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rayon::prelude::*;
 
 use super::*;
-use crate::cpu::{EvalWeights, SearchInstant};
+use crate::{
+    cpu::{EvalWeights, SearchInstant},
+    training_runtime::{stable_run_id, ImprovementRecord, PersistenceRequest, PersistenceWorker},
+};
 
 pub(crate) fn run_sweep_training_cycle(config: &CpuCliConfig) {
     if ai_source_is_dirty(&config.ai_src) {
-        pretty_log::fail(format!(
-            "{} has uncommitted changes; commit or stash before running training",
-            config.ai_src
-        ));
+        training_log(
+            crate::training_runtime::LogLevel::Error,
+            "cpu",
+            format!(
+                "{} has uncommitted changes; commit or stash them before training",
+                config.ai_src
+            ),
+        );
         std::process::exit(1);
     }
 
     training_banner(config);
-    pretty_log::phase("Sweeping CPU evaluation parameters with paired candidate matches");
-
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/sweep",
+        "evaluating parameter batches against frozen baselines",
+    );
     let deadline = training_deadline(config);
     let candidate = train_weights_sweep_until(config, deadline);
     compare_and_maybe_promote(candidate, config, deadline);
@@ -32,7 +42,11 @@ pub(crate) fn train_weights_sweep_until(
 ) -> EvalWeights {
     let parameters = sweep_weight_parameters(&config.sweep_parameter_groups);
     if parameters.is_empty() {
-        pretty_log::warn("sweep selected no trainable parameters");
+        training_log(
+            crate::training_runtime::LogLevel::Warn,
+            "cpu/sweep",
+            "no trainable parameters were selected",
+        );
         return EvalWeights::default_tuned();
     }
 
@@ -40,85 +54,157 @@ pub(crate) fn train_weights_sweep_until(
     let mut range_low = config.sweep_range_low;
     let mut range_high = config.sweep_range_high;
     let mut pass = 0usize;
+    let run_id = stable_run_id(config.seed);
+    let persistence = PersistenceWorker::start(config.improvement_log.clone().into());
+    let persistence_sender = persistence.sender();
 
     while !training_expired(deadline) && config.sweep_passes.is_none_or(|limit| pass < limit) {
         let pass_start = current;
-        let mut changed = 0usize;
-        pretty_log::section(format!("Sweep Pass {}", pass + 1));
-
-        for (parameter_index, parameter) in parameters.iter().copied().enumerate() {
-            if training_expired(deadline) {
-                break;
-            }
-            let values = sweep_values(
-                parameter,
-                parameter.value(current),
-                config.sweep_points,
-                range_low,
-                range_high,
-            );
-            if values.len() < 2 {
-                continue;
-            }
-
-            let candidates: Vec<SweepCandidate> = values
-                .into_iter()
-                .map(|value| SweepCandidate {
-                    value,
-                    weights: parameter.with_value(current, value),
-                })
-                .collect();
-            let winner = score_sweep_candidates(
-                current,
-                parameter,
-                &candidates,
-                pass,
-                parameter_index,
-                config,
-                deadline,
-            );
-
-            if winner.value != parameter.value(current) {
-                changed += 1;
-            }
-            current = winner.weights;
-            training_task_progress(
-                "sweep-pass",
-                "sweep pass",
-                parameter_index + 1,
-                parameters.len(),
-                format!(
-                    "{}={} score={} remaining={}",
-                    parameter.name,
-                    winner.value,
-                    winner.score,
-                    remaining_seconds(deadline)
-                ),
-            );
-        }
-
-        pass += 1;
-        training_task_progress(
-            "sweep-pass",
-            "sweep pass",
-            parameters.len(),
-            parameters.len(),
+        training_log(
+            crate::training_runtime::LogLevel::Info,
+            "cpu/sweep",
             format!(
-                "pass {} changed={} remaining={}",
-                pass,
-                changed,
+                "starting pass {} range={range_low:.3}:{range_high:.3} remaining={}",
+                pass + 1,
                 remaining_seconds(deadline)
             ),
         );
-        finish_training_task("sweep-pass");
+
+        for batch_start in (0..parameters.len()).step_by(config.parameter_jobs) {
+            if training_expired(deadline) {
+                break;
+            }
+            let batch_end = (batch_start + config.parameter_jobs).min(parameters.len());
+            let baseline = current;
+            let winners: Vec<(usize, WeightParameter, SweepScore)> = parameters
+                [batch_start..batch_end]
+                .par_iter()
+                .copied()
+                .enumerate()
+                .map(|(offset, parameter)| {
+                    let parameter_index = batch_start + offset;
+                    let values = sweep_values(
+                        parameter,
+                        parameter.value(baseline),
+                        config.sweep_points,
+                        range_low,
+                        range_high,
+                    );
+                    let candidates = values
+                        .into_iter()
+                        .map(|value| SweepCandidate {
+                            value,
+                            weights: parameter.with_value(baseline, value),
+                        })
+                        .collect::<Vec<_>>();
+                    let winner = if candidates.len() < 2 {
+                        SweepScore {
+                            value: parameter.value(baseline),
+                            weights: baseline,
+                            score: 0,
+                            blunders: usize::MAX,
+                            movement: 0,
+                        }
+                    } else {
+                        score_sweep_candidates(
+                            baseline,
+                            parameter,
+                            &candidates,
+                            pass,
+                            parameter_index,
+                            config,
+                            deadline,
+                        )
+                    };
+                    (parameter_index, parameter, winner)
+                })
+                .collect();
+
+            // Rayon preserves indexed order, but sort explicitly so persistence and
+            // merge order remain stable if the implementation changes later.
+            let mut winners = winners;
+            winners.sort_by_key(|(parameter_index, _, _)| *parameter_index);
+            for (parameter_index, parameter, winner) in winners {
+                let original = parameter.value(baseline);
+                if winner.value != original && !training_expired(deadline) {
+                    current = parameter.with_value(current, winner.value);
+                    let path = std::path::PathBuf::from(&config.candidate_out);
+                    let record = ImprovementRecord::now(
+                        &run_id,
+                        format!("cpu-pass-{pass}-{}", parameter.name),
+                        config.seed,
+                        0.0,
+                        winner.score as f64,
+                        format!(
+                            "{} changed from {} to {}",
+                            parameter.name, original, winner.value
+                        ),
+                        path.clone(),
+                    );
+                    persistence_sender
+                        .send(PersistenceRequest::Candidate {
+                            path,
+                            bytes: current.to_json().into_bytes(),
+                            record,
+                        })
+                        .unwrap_or_else(|error| {
+                            panic!("CPU candidate persistence worker stopped: {error}")
+                        });
+                    training_log(
+                        crate::training_runtime::LogLevel::Success,
+                        "cpu/sweep",
+                        format!(
+                            "{} improved {} -> {} score={} candidate={}",
+                            parameter.name,
+                            original,
+                            winner.value,
+                            winner.score,
+                            config.candidate_out
+                        ),
+                    );
+                } else {
+                    training_log(
+                        crate::training_runtime::LogLevel::Debug,
+                        "cpu/sweep",
+                        format!(
+                            "{} kept {} score={}",
+                            parameter.name, original, winner.score
+                        ),
+                    );
+                }
+                training_task_progress(
+                    "cpu-sweep",
+                    parameter_index + 1,
+                    parameters.len(),
+                    format!(
+                        "pass={} parameter={} best={} score={} remaining={}",
+                        pass + 1,
+                        parameter.name,
+                        winner.value,
+                        winner.score,
+                        remaining_seconds(deadline)
+                    ),
+                );
+            }
+        }
+
+        pass += 1;
         if current == pass_start {
-            pretty_log::warn("sweep stopped: pass produced no parameter changes");
+            training_log(
+                crate::training_runtime::LogLevel::Info,
+                "cpu/sweep",
+                format!("stopping after pass {pass}: no parameter changed"),
+            );
             break;
         }
         range_low = shrink_low(range_low, config.sweep_shrink);
         range_high = shrink_high(range_high, config.sweep_shrink);
     }
 
+    persistence
+        .shutdown()
+        .unwrap_or_else(|message| panic!("CPU candidate persistence failed: {message}"));
+    finish_training_task("cpu-sweep");
     current
 }
 
@@ -131,6 +217,7 @@ struct SweepCandidate {
 #[derive(Clone, Copy)]
 pub(crate) struct SweepScore {
     pub(crate) value: i32,
+    #[allow(dead_code)]
     pub(crate) weights: EvalWeights,
     pub(crate) score: i32,
     pub(crate) blunders: usize,
@@ -149,7 +236,6 @@ fn score_sweep_candidates(
     let original = parameter.value(baseline);
     let seeds = sweep_seeds(config, pass, parameter_index);
     let completed = AtomicUsize::new(0);
-    let total = candidates.len();
     let scores: Vec<SweepScore> = candidates
         .par_iter()
         .map(|candidate| {
@@ -172,11 +258,17 @@ fn score_sweep_candidates(
                 blunders += report.candidate.blunders;
             }
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            training_progress(
-                &format!("sweep {}", parameter.name),
+            training_task_progress(
+                &format!("cpu-parameter-{}", parameter.name),
                 done,
-                total,
-                format!("remaining={}", remaining_seconds(deadline)),
+                candidates.len(),
+                format!(
+                    "pass={} value={} score={} remaining={}",
+                    pass + 1,
+                    candidate.value,
+                    score,
+                    remaining_seconds(deadline)
+                ),
             );
             SweepScore {
                 value: candidate.value,
@@ -188,6 +280,7 @@ fn score_sweep_candidates(
         })
         .collect();
 
+    finish_training_task(&format!("cpu-parameter-{}", parameter.name));
     select_sweep_winner(&scores).unwrap_or(SweepScore {
         value: original,
         weights: baseline,

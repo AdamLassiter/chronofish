@@ -29,7 +29,6 @@ chronofish/
     src/training/          Native CPU heuristic training harness
     models/cpu-v1/         CPU effort, evaluation, training, and hall-of-fame data
     models/gpu-v1/         Compact browser value model and backups
-  pretty-log/              Terminal output helper used by native training
   server/                  Rust static file and multiplayer room server
   web/                     Browser frontend npm project
     src/                   TypeScript UI, workers, and Rust/WASM/WGPU bindings
@@ -260,16 +259,20 @@ training without starting Chromium. `./train-gpu` enables the engine's
 ./train-gpu --gpu-search --gpu-search-depth 2 --nodes 4096
 ./train-gpu --gpu-search fixtures/position.json --gpu-model engine/models/gpu-v1/value-model.cfnn
 
-# Generate search labels, then train and write a replacement model.
+# Generate search labels, then train and validate a candidate model.
 ./train-gpu --gpu-sample-search fixtures/position.json --gpu-sample-count 128 --out /tmp/chronofish-samples.json
-./train-gpu --gpu-train-samples /tmp/chronofish-samples.json --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+./train-gpu train --source samples /tmp/chronofish-samples.json --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
 
 # Collect labels and train in one command.
-./train-gpu --gpu-train-search fixtures/position.json --gpu-sample-count 128 --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
+./train-gpu train --source search fixtures/position.json --gpu-sample-count 128 --gpu-model engine/models/gpu-v1/value-model.cfnn --out /tmp/value-model.cfnn
 ```
 
 Tune native value and policy optimization with `--gpu-learning-rate`,
-`--gpu-epochs`, `--gpu-weight-decay`, and `--gpu-momentum`.
+`--gpu-epochs`, `--gpu-weight-decay`, and `--gpu-momentum`. A deterministic
+position-group holdout reserves 10% of samples by default; change it with
+`--validation-split`. New best snapshots are written atomically to
+`engine/models/gpu-v1/value-model.candidate.cfnn` and journaled before the
+validated model can replace `--out`.
 
 The native WGPU adapter must be available for GPU projection and training. Use
 `./train-gpu --gpu-backend-info`, `--gpu-compile-shaders`,
@@ -309,10 +312,10 @@ npm --prefix web run model:initialize
 Run native heuristic tuning with:
 
 ```sh
-./train-cpu --max-seconds 3600
+./train-cpu train --max-seconds 3600
 ```
 
-The CPU trainer is native-only and lives under `engine/src/training/`. By
+The CPU trainer is native-only and lives under `engine/src/cpu/training/`. By
 default it runs a coordinate sweep over selected evaluation parameters, scores
 linear candidate values in paired self-play matches, commits each local winner
 to the in-memory pass result, shrinks the range, and repeats. The accumulated
@@ -328,8 +331,10 @@ for non-zero values, and `--sweep-shrink F` narrows the range after each pass.
 Royal objective weights stay fixed. The previous sparse-mutation genetic
 trainer remains available with `--strategy genetic`.
 
-Candidate scoring and seed comparisons use Rayon parallel iterators, so training
-uses available CPU cores without launching extra trainer processes. Fitness uses
+Candidate scoring and seed comparisons use Rayon parallel iterators. Parameters
+are evaluated in frozen-baseline batches and merged in their declared order;
+`--parameter-jobs N` controls the number of parameter rows evaluated at once.
+Fitness uses
 paired candidate/baseline matches from identical seeded starts, mixes in tactical
 mate-training positions, tracks win-rate confidence and Elo-style estimates, and
 keeps recent promoted weights in a JSONL hall of fame. `./train-cpu` is evidence
@@ -345,6 +350,18 @@ fame at `engine/models/cpu-v1/hall_of_fame.jsonl`, runs verification, and commit
 the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
+Both native trainers accept `--ui auto|tui|plain|json`, `--max-seconds`,
+`--candidate-out`, and `--improvement-log`. Auto mode selects the interactive
+terminal only when both input and output are terminals. The job view supports
+mouse hover/wheel and keyboard navigation; Space pauses, `c` cancels, `r`
+restarts a stopped job, and `q` or Ctrl-C shuts down gracefully. Paused time is
+included in the global deadline. CPU candidates default to
+`parameters.candidate.json` plus `parameters.improvements.jsonl`; active model
+promotion still uses the existing comparison, verification, and hall-of-fame
+path. `./train-cpu search [snapshot.json]` and
+`./train-cpu score [parameters.json]` are the preferred utility forms; the old
+flat flags remain accepted.
+
 Native training uses `engine/models/cpu-v1/training.json`. Its defaults match
 the former `fast` effort training values and do not change with the runtime bot effort. The
 legacy `--config` and `--effort` arguments are accepted but no longer alter
@@ -353,7 +370,7 @@ training parameters.
 For a short smoke run:
 
 ```sh
-cargo run -q --manifest-path engine/Cargo.toml --bin train -- \
+cargo run -q --manifest-path engine/Cargo.toml --bin cpu -- train \
   --sweep-passes 1 --sweep-points 3 --training-time-ms 100 --nodes 20 \
   --min-pairs 2 --max-pairs 4 --max-seconds 20 --verify true
 ```

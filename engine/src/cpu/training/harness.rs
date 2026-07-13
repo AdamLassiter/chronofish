@@ -9,20 +9,24 @@ pub(crate) fn run_training_cycle(config: &CpuCliConfig) {
     // Promotion rewrites the parameter include file, so refuse to continue when
     // it already has local edits that should not be mixed with generated tuning.
     if ai_source_is_dirty(&config.ai_src) {
-        pretty_log::fail(format!(
-            "{} has uncommitted changes; commit or stash before running training",
-            config.ai_src
-        ));
+        training_log(
+            crate::training_runtime::LogLevel::Error,
+            "cpu",
+            format!(
+                "{} has uncommitted changes; commit or stash them before training",
+                config.ai_src
+            ),
+        );
         std::process::exit(1);
     }
 
     training_banner(config);
-    pretty_log::phase(
-        "Fitness uses full-match evaluation margins; comparisons use candidate minus baseline per seed",
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/genetic",
+        "fitness uses paired full-match candidate-minus-baseline scoring",
     );
-
     let deadline = training_deadline(config);
-    pretty_log::section("Evolution");
     let candidate = train_weights_until(config, deadline);
     compare_and_maybe_promote(candidate, config, deadline);
 }
@@ -35,9 +39,6 @@ pub(crate) fn train_weights_until(
     config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> EvalWeights {
-    pretty_log::phase(
-        "Scoring candidates across full matches against default and mutated opponents",
-    );
     let mut rng = Lcg::new(config.seed);
     let committed = EvalWeights::default_tuned();
     let mut population = vec![committed];
@@ -63,7 +64,6 @@ pub(crate) fn train_weights_until(
         let search_nodes = config.nodes * node_boost;
         let scoring_config = config.with_search(search_nodes, config.training_time_ms);
         let screening_config = scoring_config.screening_search();
-        let finished_candidates = AtomicUsize::new(0);
         let unique_population = unique_weights(&population);
         let screening_key = baseline_fitness_key(&screening_config);
         let screening_opponent_limit = screening_config.screening_opponent_variants;
@@ -94,7 +94,7 @@ pub(crate) fn train_weights_until(
                 .is_none()
             })
             .collect();
-        let screening_job_count = screening_jobs.len();
+        let screening_done = AtomicUsize::new(0);
         let screened_misses: Vec<(FitnessReport, EvalWeights)> = screening_jobs
             .par_iter()
             .copied()
@@ -110,11 +110,10 @@ pub(crate) fn train_weights_until(
                     deadline,
                     screening_opponent_limit,
                 );
-                let done = finished_candidates.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
-                    &format!("generation {generation} screening"),
-                    done,
-                    screening_job_count,
+                    &format!("cpu-generation-{generation}-screening"),
+                    screening_done.fetch_add(1, Ordering::Relaxed) + 1,
+                    screening_jobs.len(),
                     format!(
                         "turn_ms={} nodes={} remaining={}",
                         screening_config.training_time_ms,
@@ -180,8 +179,7 @@ pub(crate) fn train_weights_until(
                         .is_some()
             })
             .count();
-        let finalist_finished = AtomicUsize::new(0);
-        let scoring_job_count = scoring_jobs.len();
+        let finalists_done = AtomicUsize::new(0);
         let scored_jobs: Vec<(FitnessReport, EvalWeights)> = scoring_jobs
             .par_iter()
             .copied()
@@ -196,15 +194,12 @@ pub(crate) fn train_weights_until(
                     format!("generation {generation} finalist {}", index + 1)
                 };
                 let report = fitness_until_named(weights, &label, &scoring_config, deadline);
-                let done = finalist_finished.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
-                    &format!("generation {generation} finalists"),
-                    done,
-                    scoring_job_count,
+                    &format!("cpu-generation-{generation}-finalists"),
+                    finalists_done.fetch_add(1, Ordering::Relaxed) + 1,
+                    scoring_jobs.len(),
                     format!(
-                        "turn_ms={} nodes={} remaining={}",
-                        scoring_config.training_time_ms,
-                        search_nodes,
+                        "nodes={search_nodes} remaining={}",
                         remaining_seconds(deadline)
                     ),
                 );
@@ -282,6 +277,24 @@ pub(crate) fn train_weights_until(
             finalist_cache_hits,
             generation_match_stats,
         );
+        training_log(
+            crate::training_runtime::LogLevel::Info,
+            "cpu/genetic",
+            format!(
+                "generation={} best={} baseline={} delta={} candidates={} screening_cache_hits={} finalist_cache_hits={} matches={} remaining={}",
+                generation + 1,
+                best,
+                baseline_report.score,
+                best - baseline_report.score,
+                scored.len(),
+                screening_cache_hits,
+                finalist_cache_hits,
+                generation_match_stats.played,
+                remaining_seconds(deadline)
+            ),
+        );
+        finish_training_task(&format!("cpu-generation-{generation}-screening"));
+        finish_training_task(&format!("cpu-generation-{generation}-finalists"));
 
         if quality.wins == 0 {
             mutation_scale = (mutation_scale * 0.75).max(0.25);
@@ -319,18 +332,16 @@ pub(crate) fn train_weights_until(
                 .mutate_with_scale(&mut rng, mutation_scale);
             push_unique_weight(&mut next, candidate);
         }
-        if next.len() < target_population {
-            pretty_log::warn(format!(
-                "generation {generation}: produced {} distinct candidates after {attempts} attempts (target {target_population})",
-                next.len()
-            ));
-        }
         population = next;
         if generations_without_candidate >= config.max_generations_without_candidate {
-            pretty_log::warn(format!(
-                "training stopped: {} generations without a candidate beating baseline",
-                generations_without_candidate
-            ));
+            training_log(
+                crate::training_runtime::LogLevel::Warn,
+                "cpu/genetic",
+                format!(
+                    "stopping after {} generations without an improving candidate",
+                    generations_without_candidate
+                ),
+            );
             break;
         }
     }

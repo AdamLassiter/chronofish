@@ -258,6 +258,48 @@ pub const CPU_PREDICTION_MAX_BATCH: usize = 4;
 pub const MIN_HIDDEN_TRAINING_POSITIONS: usize = 256;
 pub const CPU_HEAD_TRAINING_MAX_POSITIONS: usize = 32;
 pub const OPTIMIZER_MOMENTUM: f32 = 0.9;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTrainingSource {
+    Search,
+    Samples,
+    Projected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeTrainingStage {
+    Sampling,
+    Projection,
+    ValueHead,
+    PolicyHead,
+    Validation,
+}
+
+pub fn native_training_stage_graph(
+    source: NativeTrainingSource,
+) -> Vec<(NativeTrainingStage, Option<NativeTrainingStage>)> {
+    use NativeTrainingStage::*;
+    match source {
+        NativeTrainingSource::Search => vec![
+            (Sampling, None),
+            (Projection, Some(Sampling)),
+            (ValueHead, Some(Projection)),
+            (PolicyHead, Some(ValueHead)),
+            (Validation, Some(PolicyHead)),
+        ],
+        NativeTrainingSource::Samples => vec![
+            (Projection, None),
+            (ValueHead, Some(Projection)),
+            (PolicyHead, Some(ValueHead)),
+            (Validation, Some(PolicyHead)),
+        ],
+        NativeTrainingSource::Projected => vec![
+            (ValueHead, None),
+            (PolicyHead, Some(ValueHead)),
+            (Validation, Some(PolicyHead)),
+        ],
+    }
+}
 pub const DEFAULT_BATCH_SIZE: usize = 1024;
 pub const DEFAULT_VALIDATION_SPLIT: f32 = 0.1;
 pub const DEFAULT_PATIENCE: usize = 12;
@@ -279,7 +321,7 @@ pub const MAX_PLAYOUT_PLIES: usize = 10;
 // Each sampler owns a browser worker and its WebGPU device.  Keeping this
 // bounded avoids worker-loader/device failures on Firefox and lower-capability
 // adapters while still providing useful parallel label collection.
-pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 8;
+pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 16;
 pub const GPU_WARMUP_MAX_TIME_MS: u64 = 5_000;
 pub const GPU_POSITION_GENERATION_TIME_MS: u64 = 3_000;
 pub const LABEL_REQUEST_MIN_TIMEOUT_MS: u64 = 30_000;

@@ -8,17 +8,22 @@ pub(crate) fn training_deadline(config: &CpuCliConfig) -> Option<SearchInstant> 
 }
 
 pub(crate) fn training_expired(deadline: Option<SearchInstant>) -> bool {
-    deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
+    matches!(
+        crate::training_runtime::cooperative_checkpoint(),
+        crate::training_runtime::Checkpoint::Cancelled
+    ) || deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
 }
 
 pub(crate) fn remaining_seconds(deadline: Option<SearchInstant>) -> String {
     deadline.map_or_else(
-        || "unbounded".to_string(),
+        || "unlimited".to_string(),
         |deadline| {
-            let seconds = deadline
-                .saturating_duration_since(SearchInstant::now())
-                .as_secs();
-            format!("{seconds}s")
+            let now = SearchInstant::now();
+            if now >= deadline {
+                "0".to_string()
+            } else {
+                deadline.duration_since(now).as_secs().to_string()
+            }
         },
     )
 }

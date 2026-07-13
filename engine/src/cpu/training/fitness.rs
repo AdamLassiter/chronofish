@@ -130,10 +130,8 @@ pub(crate) fn paired_report(
 ) -> PairReport {
     let start = seeded_start_position(seed, config, deadline);
     let black_start = start.clone();
-    let candidate_white_label =
-        format!("{candidate_label} vs {opponent_label} seed={seed} candidate=white");
-    let candidate_black_label =
-        format!("{candidate_label} vs {opponent_label} seed={seed} candidate=black");
+    let white_match = format!("cpu-match-{seed}-white");
+    let black_match = format!("cpu-match-{seed}-black");
     let (candidate_white, candidate_black) = rayon::join(
         || {
             play_match_until(
@@ -143,7 +141,7 @@ pub(crate) fn paired_report(
                 Color::White,
                 candidate_label,
                 opponent_label,
-                &candidate_white_label,
+                &white_match,
                 config,
                 deadline,
             )
@@ -156,7 +154,7 @@ pub(crate) fn paired_report(
                 Color::Black,
                 candidate_label,
                 opponent_label,
-                &candidate_black_label,
+                &black_match,
                 config,
                 deadline,
             )

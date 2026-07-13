@@ -1138,6 +1138,9 @@ fn training_mutation_is_seeded() {
         seed: 7,
         max_seconds: Some(1),
         out: None,
+        ui: crate::training_runtime::UiMode::Plain,
+        candidate_out: "/tmp/chronofish-test-parameters.candidate.json".to_string(),
+        improvement_log: "/tmp/chronofish-test-parameters.improvements.jsonl".to_string(),
         score: None,
         score_default: false,
         gpu: crate::gpu::cli::GpuCliConfig::default(),
@@ -1172,6 +1175,7 @@ fn training_mutation_is_seeded() {
         sweep_range_low: 1.0 / 3.0,
         sweep_range_high: 5.0 / 3.0,
         sweep_shrink: 0.5,
+        parameter_jobs: 1,
     };
 
     assert_eq!(

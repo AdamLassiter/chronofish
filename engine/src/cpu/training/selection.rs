@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use rayon::prelude::*;
 
 use super::*;
@@ -31,9 +29,6 @@ pub(crate) fn select_league_winner(
             .take(config.league_hall_of_fame_entries),
     );
     opponents.extend(contenders.iter().copied());
-    let total_pairs = contenders.len().saturating_mul(opponents.len()).max(1);
-    let league_progress = AtomicUsize::new(0);
-
     let mut results: Vec<(usize, EvalWeights, ComparisonStats)> = contenders
         .par_iter()
         .copied()
@@ -60,13 +55,6 @@ pub(crate) fn select_league_winner(
                         &format!("league opponent {}", opponent_index + 1),
                         config,
                         deadline,
-                    );
-                    let done = league_progress.fetch_add(1, Ordering::Relaxed) + 1;
-                    training_progress(
-                        "league",
-                        done,
-                        total_pairs,
-                        format!("remaining={}", remaining_seconds(deadline)),
                     );
                     Some(report)
                 })

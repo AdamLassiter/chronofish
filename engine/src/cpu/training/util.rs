@@ -7,6 +7,7 @@ pub(crate) fn host_parallelism() -> usize {
         .unwrap_or(8)
 }
 
+#[allow(dead_code)]
 pub(crate) fn parse_arg<T: std::str::FromStr>(value: Option<String>, fallback: T) -> T {
     value.and_then(|raw| raw.parse().ok()).unwrap_or(fallback)
 }
@@ -58,10 +59,11 @@ pub(crate) fn load_training_parameters() -> TrainingParameters {
 
 pub(crate) fn promote_weights(weights: EvalWeights, ai_src: &str) {
     let json = serde_json::to_string_pretty(&weights).expect("EvalWeights should serialize");
-    if let Some(parent) = std::path::Path::new(ai_src).parent() {
-        std::fs::create_dir_all(parent).expect("failed to create AI parameters directory");
-    }
-    std::fs::write(ai_src, format!("{json}\n")).expect("failed to write AI parameters");
+    crate::training_runtime::atomic_replace(
+        std::path::Path::new(ai_src),
+        format!("{json}\n").as_bytes(),
+    )
+    .expect("failed to atomically write AI parameters");
 }
 
 pub(crate) fn load_hall_of_fame(path: &str, limit: usize) -> Vec<EvalWeights> {
@@ -86,7 +88,11 @@ pub(crate) fn append_hall_of_fame(path: &str, weights: EvalWeights) {
     use std::io::Write;
     options
         .open(path)
-        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .and_then(|mut file| {
+            file.write_all(line.as_bytes())?;
+            file.flush()?;
+            file.sync_data()
+        })
         .expect("failed to append hall-of-fame weights");
 }
 
@@ -102,21 +108,54 @@ pub(crate) fn ai_source_is_dirty(ai_src: &str) -> bool {
 }
 
 pub(crate) fn run_command(command: &str, args: &[&str]) {
-    let status = std::process::Command::new(command)
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/command",
+        format!("running {command} {}", args.join(" ")),
+    );
+    let output = std::process::Command::new(command)
         .args(args)
-        .status()
+        .output()
         .unwrap_or_else(|error| panic!("failed to run {command}: {error}"));
-    if !status.success() {
-        panic!("{command} failed with status {status}");
+    log_command_output(command, &output);
+    if !output.status.success() {
+        panic!("{command} failed with status {}", output.status);
     }
 }
 
 pub(crate) fn run_shell(command: &str) {
-    let status = std::process::Command::new("sh")
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/command",
+        format!("running verification: {command}"),
+    );
+    let output = std::process::Command::new("sh")
         .args(["-c", command])
-        .status()
+        .output()
         .unwrap_or_else(|error| panic!("failed to run verification command: {error}"));
-    if !status.success() {
-        panic!("verification failed with status {status}");
+    log_command_output("verify", &output);
+    if !output.status.success() {
+        panic!("verification failed with status {}", output.status);
+    }
+}
+
+fn log_command_output(scope: &str, output: &std::process::Output) {
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        training_log(
+            crate::training_runtime::LogLevel::Debug,
+            format!("cpu/command/{scope}"),
+            line,
+        );
+    }
+    for line in String::from_utf8_lossy(&output.stderr).lines() {
+        training_log(
+            if output.status.success() {
+                crate::training_runtime::LogLevel::Debug
+            } else {
+                crate::training_runtime::LogLevel::Error
+            },
+            format!("cpu/command/{scope}"),
+            line,
+        );
     }
 }

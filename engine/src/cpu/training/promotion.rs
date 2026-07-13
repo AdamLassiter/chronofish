@@ -11,22 +11,36 @@ pub(crate) fn compare_and_maybe_promote(
     deadline: Option<SearchInstant>,
 ) {
     if candidate == EvalWeights::default_tuned() {
-        pretty_log::warn("candidate inconclusive: selected weights match committed baseline");
+        training_log(
+            crate::training_runtime::LogLevel::Warn,
+            "cpu/validation",
+            "candidate matches the committed baseline; nothing to validate",
+        );
         return;
     }
-    let candidate_json = candidate.to_json();
     let mut comparison_stats = ComparisonStats::default();
     let mut deltas = Vec::new();
     let mut comparison_match_stats = MatchStats::default();
     let hall_of_fame = load_hall_of_fame(&config.hall_of_fame, config.hall_of_fame_entries);
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/validation",
+        format!(
+            "starting paired validation min_pairs={} max_pairs={} remaining={}",
+            config.min_pairs,
+            config.max_pairs,
+            remaining_seconds(deadline)
+        ),
+    );
 
-    pretty_log::section("Candidate");
-    pretty_log::label_value("weights", candidate_json);
-    pretty_log::section("Comparison");
     let mut rng = Lcg::new(config.seed ^ 0xadc8_3b19_7f4a_7c15);
     loop {
         if training_expired(deadline) {
-            pretty_log::warn("comparison stopped: max seconds exhausted");
+            training_log(
+                crate::training_runtime::LogLevel::Warn,
+                "cpu/validation",
+                "validation stopped because the global deadline or cancellation was reached",
+            );
             break;
         }
         let remaining_pairs = config.max_pairs.saturating_sub(comparison_stats.played);
@@ -38,17 +52,15 @@ pub(crate) fn compare_and_maybe_promote(
             break;
         }
         let completed = AtomicUsize::new(0);
-        let total = seeds.len();
         let reports: Vec<(u64, PairReport)> = seeds
             .par_iter()
             .copied()
             .map(|seed| {
                 let report = paired_baseline_report(candidate, seed, config, deadline);
-                let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 training_progress(
-                    "comparison",
-                    done,
-                    total,
+                    "cpu-validation",
+                    comparison_stats.played + completed.fetch_add(1, Ordering::Relaxed) + 1,
+                    config.max_pairs,
                     format!("remaining={}", remaining_seconds(deadline)),
                 );
                 (seed, report)
@@ -64,15 +76,12 @@ pub(crate) fn compare_and_maybe_promote(
         let significance = significance(&deltas);
         match statistical_decision(comparison_stats, &deltas, significance, config) {
             StatisticalDecision::Promote => {
-                pretty_log::success("sequential comparison accepted");
                 break;
             }
             StatisticalDecision::Reject => {
-                pretty_log::warn("sequential comparison rejected");
                 break;
             }
             StatisticalDecision::Inconclusive => {
-                pretty_log::warn("sequential comparison inconclusive");
                 break;
             }
             StatisticalDecision::Continue => {}
@@ -80,14 +89,26 @@ pub(crate) fn compare_and_maybe_promote(
     }
 
     let significance = significance(&deltas);
-    print_threshold_progress(
-        comparison_stats,
-        comparison_match_stats,
-        significance,
-        config,
+    training_log(
+        crate::training_runtime::LogLevel::Info,
+        "cpu/validation",
+        format!(
+            "pairs={} wins={} losses={} draws={} delta={} lower95={:.2} matches={}",
+            comparison_stats.played,
+            comparison_stats.wins,
+            comparison_stats.losses,
+            comparison_stats.draws,
+            comparison_stats.total_delta,
+            significance.lower_95,
+            comparison_match_stats.summary()
+        ),
     );
     if should_promote(comparison_stats, significance, config) {
-        pretty_log::phase("Promoting candidate");
+        training_log(
+            crate::training_runtime::LogLevel::Info,
+            "cpu/validation",
+            "candidate accepted; running verification and promotion",
+        );
         promote_weights(candidate, &config.ai_src);
         append_hall_of_fame(&config.hall_of_fame, candidate);
         run_command("cargo", &["fmt"]);
@@ -97,14 +118,61 @@ pub(crate) fn compare_and_maybe_promote(
             run_command("git", &["add", &config.hall_of_fame]);
         }
         run_command("git", &["commit", "-m", "Tune AI evaluation parameters"]);
-        pretty_log::success("promoted candidate and committed updated parameters");
+        journal_cpu_validation(candidate, comparison_stats, "promoted", config);
+        training_log(
+            crate::training_runtime::LogLevel::Success,
+            "cpu/validation",
+            format!("promoted candidate to {}", config.ai_src),
+        );
     } else {
-        match statistical_decision(comparison_stats, &deltas, significance, config) {
-            StatisticalDecision::Reject => pretty_log::warn("candidate rejected"),
-            StatisticalDecision::Inconclusive | StatisticalDecision::Continue => {
-                pretty_log::warn("candidate inconclusive")
-            }
-            StatisticalDecision::Promote => pretty_log::warn("candidate rejected"),
-        }
+        let outcome = if crate::training_runtime::cooperative_cancelled() {
+            "cancelled"
+        } else if training_expired(deadline) {
+            "timed-out"
+        } else {
+            "validation-rejected"
+        };
+        journal_cpu_validation(candidate, comparison_stats, outcome, config);
+        training_log(
+            if outcome == "cancelled" || outcome == "timed-out" {
+                crate::training_runtime::LogLevel::Warn
+            } else {
+                crate::training_runtime::LogLevel::Info
+            },
+            "cpu/validation",
+            format!("candidate outcome={outcome}"),
+        );
     }
+    finish_training_task("cpu-validation");
+}
+
+fn journal_cpu_validation(
+    _candidate: EvalWeights,
+    comparison: ComparisonStats,
+    outcome: &str,
+    config: &CpuCliConfig,
+) {
+    let path = std::path::PathBuf::from(&config.candidate_out);
+    let mut record = crate::training_runtime::ImprovementRecord::now(
+        crate::training_runtime::stable_run_id(config.seed),
+        "cpu-validation",
+        config.seed,
+        0.0,
+        comparison.total_delta as f64,
+        format!(
+            "paired validation pairs={} wins={} losses={} draws={}",
+            comparison.played, comparison.wins, comparison.losses, comparison.draws
+        ),
+        path,
+    );
+    record.outcome = outcome.to_string();
+    let worker =
+        crate::training_runtime::PersistenceWorker::start(config.improvement_log.clone().into());
+    worker
+        .sender()
+        .send(crate::training_runtime::PersistenceRequest::Journal { record })
+        .unwrap_or_else(|error| panic!("CPU validation journal worker stopped: {error}"));
+    worker
+        .shutdown()
+        .unwrap_or_else(|message| panic!("CPU validation journal failed: {message}"));
 }

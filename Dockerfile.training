@@ -22,10 +22,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY logo.svg logo.svg
 COPY engine/Cargo.toml engine/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
-COPY pretty-log/Cargo.toml pretty-log/Cargo.toml
 COPY engine/src engine/src
 COPY server/src server/src
-COPY pretty-log/src pretty-log/src
 
 RUN cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
 RUN cargo build --release -p chronofish-server --features frontend-training

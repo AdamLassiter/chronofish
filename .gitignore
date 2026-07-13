@@ -13,6 +13,9 @@
 # Ignore backup models
 *.bak.cfnn
 *.bak.json
+*.candidate.cfnn
+*.candidate.json
+*.improvements.jsonl
 
 # Ignore log files
 /logs

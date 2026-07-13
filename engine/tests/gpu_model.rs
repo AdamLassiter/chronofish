@@ -2818,3 +2818,29 @@ fn piece_json(x: usize, y: usize, color: &str, piece_type: &str) -> serde_json::
         "type": piece_type,
     })
 }
+#[test]
+fn native_training_stage_graphs_follow_source_dependencies() {
+    use chronofish_engine::gpu::training::{
+        native_training_stage_graph,
+        NativeTrainingSource,
+        NativeTrainingStage,
+    };
+    let search = native_training_stage_graph(NativeTrainingSource::Search);
+    assert_eq!(search.first(), Some(&(NativeTrainingStage::Sampling, None)));
+    assert_eq!(
+        search.last(),
+        Some(&(
+            NativeTrainingStage::Validation,
+            Some(NativeTrainingStage::PolicyHead)
+        ))
+    );
+    let samples = native_training_stage_graph(NativeTrainingSource::Samples);
+    assert!(!samples
+        .iter()
+        .any(|(stage, _)| *stage == NativeTrainingStage::Sampling));
+    let projected = native_training_stage_graph(NativeTrainingSource::Projected);
+    assert_eq!(
+        projected.first(),
+        Some(&(NativeTrainingStage::ValueHead, None))
+    );
+}

@@ -1,5 +1,5 @@
 [workspace]
-members = ["engine", "server", "pretty-log"]
+members = ["engine", "server"]
 resolver = "2"
 
 [profile.release]
