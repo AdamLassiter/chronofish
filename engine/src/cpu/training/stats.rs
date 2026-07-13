@@ -4,7 +4,7 @@ pub(crate) fn print_threshold_progress(
     comparison_stats: ComparisonStats,
     match_stats: MatchStats,
     significance: Significance,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
 ) {
     let wins_needed = config.min_wins.saturating_sub(comparison_stats.wins);
     let delta_needed = config
@@ -133,7 +133,7 @@ pub(crate) fn statistical_decision(
     stats: ComparisonStats,
     deltas: &[i32],
     significance: Significance,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
 ) -> StatisticalDecision {
     if stats.played >= config.min_pairs
         && stats.total_delta > 0
@@ -151,7 +151,7 @@ pub(crate) fn statistical_decision(
     StatisticalDecision::Continue
 }
 
-pub(crate) fn draw_stagnant(deltas: &[i32], config: &TrainerConfig) -> bool {
+pub(crate) fn draw_stagnant(deltas: &[i32], config: &CpuCliConfig) -> bool {
     if deltas.len() < config.draw_window {
         return false;
     }
@@ -302,7 +302,7 @@ pub(crate) fn significance(values: &[i32]) -> Significance {
 pub(crate) fn should_promote(
     comparison_stats: ComparisonStats,
     significance: Significance,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
 ) -> bool {
     statistical_decision(comparison_stats, &[], significance, config)
         == StatisticalDecision::Promote

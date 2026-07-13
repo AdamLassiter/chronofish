@@ -7,7 +7,7 @@ use crate::cpu::{EvalWeights, SearchInstant};
 
 pub(crate) fn compare_and_maybe_promote(
     candidate: EvalWeights,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) {
     if candidate == EvalWeights::default_tuned() {

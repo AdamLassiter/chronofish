@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use super::*;
 use crate::cpu::{EvalWeights, SearchInstant};
 
-pub(crate) fn run_training_cycle(config: &TrainerConfig) {
+pub(crate) fn run_training_cycle(config: &CpuCliConfig) {
     // Promotion rewrites the parameter include file, so refuse to continue when
     // it already has local edits that should not be mixed with generated tuning.
     if ai_source_is_dirty(&config.ai_src) {
@@ -27,12 +27,12 @@ pub(crate) fn run_training_cycle(config: &TrainerConfig) {
     compare_and_maybe_promote(candidate, config, deadline);
 }
 
-pub(crate) fn train_weights(config: &TrainerConfig) -> EvalWeights {
+pub(crate) fn train_weights(config: &CpuCliConfig) -> EvalWeights {
     train_weights_until(config, training_deadline(config))
 }
 
 pub(crate) fn train_weights_until(
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> EvalWeights {
     pretty_log::phase(

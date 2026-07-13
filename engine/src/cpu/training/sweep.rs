@@ -5,7 +5,7 @@ use rayon::prelude::*;
 use super::*;
 use crate::cpu::{EvalWeights, SearchInstant};
 
-pub(crate) fn run_sweep_training_cycle(config: &TrainerConfig) {
+pub(crate) fn run_sweep_training_cycle(config: &CpuCliConfig) {
     if ai_source_is_dirty(&config.ai_src) {
         pretty_log::fail(format!(
             "{} has uncommitted changes; commit or stash before running training",
@@ -22,12 +22,12 @@ pub(crate) fn run_sweep_training_cycle(config: &TrainerConfig) {
     compare_and_maybe_promote(candidate, config, deadline);
 }
 
-pub(crate) fn train_weights_sweep(config: &TrainerConfig) -> EvalWeights {
+pub(crate) fn train_weights_sweep(config: &CpuCliConfig) -> EvalWeights {
     train_weights_sweep_until(config, training_deadline(config))
 }
 
 pub(crate) fn train_weights_sweep_until(
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> EvalWeights {
     let parameters = sweep_weight_parameters(&config.sweep_parameter_groups);
@@ -143,7 +143,7 @@ fn score_sweep_candidates(
     candidates: &[SweepCandidate],
     pass: usize,
     parameter_index: usize,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> SweepScore {
     let original = parameter.value(baseline);
@@ -206,7 +206,7 @@ pub(crate) fn select_sweep_winner(scores: &[SweepScore]) -> Option<SweepScore> {
     })
 }
 
-fn sweep_seeds(config: &TrainerConfig, pass: usize, parameter_index: usize) -> Vec<u64> {
+fn sweep_seeds(config: &CpuCliConfig, pass: usize, parameter_index: usize) -> Vec<u64> {
     let mut rng = Lcg::new(
         config.seed
             ^ ((pass as u64) << 32)

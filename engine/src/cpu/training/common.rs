@@ -7,7 +7,7 @@ use std::{
 // Native-only training harness for EvalWeights. It plays full matches, compares
 // candidate weights against committed defaults, and can promote a statistically
 // significant improvement.
-pub(crate) fn training_banner(config: &TrainerConfig) {
+pub(crate) fn training_banner(config: &CpuCliConfig) {
     pretty_log::banner(
         "CPU Training",
         format!("parameters=cpu-v1 seed={}", config.seed),
@@ -218,7 +218,7 @@ fn training_progress_tasks() -> &'static Mutex<HashMap<String, TrainingProgressT
 }
 
 #[derive(Clone)]
-pub(crate) struct TrainerConfig {
+pub(crate) struct CpuCliConfig {
     pub(crate) generations: usize,
     pub(crate) population: usize,
     pub(crate) training_time_ms: u64,
@@ -263,7 +263,7 @@ pub(crate) struct TrainerConfig {
     pub(crate) sweep_shrink: f64,
 }
 
-pub(crate) fn max_match_time_ms(config: &TrainerConfig) -> u64 {
+pub(crate) fn max_match_time_ms(config: &CpuCliConfig) -> u64 {
     if config.max_match_time_ms > 0 {
         return config.max_match_time_ms;
     }

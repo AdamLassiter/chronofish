@@ -9,7 +9,7 @@ pub(crate) fn play_match_until(
     _candidate_label: &str,
     _opponent_label: &str,
     match_label: &str,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> MatchReport {
     // Full-match scoring keeps the objective aligned with real game outcomes
@@ -384,7 +384,7 @@ fn earliest_deadline(
     }
 }
 
-fn slow_training_turn_threshold_ms(config: &TrainerConfig) -> u128 {
+fn slow_training_turn_threshold_ms(config: &CpuCliConfig) -> u128 {
     10_000.min((config.training_time_ms.max(1) as u128).max(1))
 }
 

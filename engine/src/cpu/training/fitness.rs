@@ -3,7 +3,7 @@ use rayon::prelude::*;
 use super::*;
 use crate::cpu::{EvalWeights, SearchInstant};
 
-pub(crate) fn fitness(weights: EvalWeights, config: &TrainerConfig) -> FitnessReport {
+pub(crate) fn fitness(weights: EvalWeights, config: &CpuCliConfig) -> FitnessReport {
     fitness_until_named(
         weights,
         "score candidate",
@@ -15,7 +15,7 @@ pub(crate) fn fitness(weights: EvalWeights, config: &TrainerConfig) -> FitnessRe
 pub(crate) fn fitness_until_named(
     weights: EvalWeights,
     candidate_label: &str,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> FitnessReport {
     fitness_until_with_opponent_limit(
@@ -30,7 +30,7 @@ pub(crate) fn fitness_until_named(
 pub(crate) fn fitness_until_with_opponent_limit(
     weights: EvalWeights,
     candidate_label: &str,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
     opponent_limit: usize,
 ) -> FitnessReport {
@@ -105,7 +105,7 @@ pub(crate) fn fitness_until_with_opponent_limit(
 pub(crate) fn paired_baseline_report(
     candidate: EvalWeights,
     seed: u64,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> PairReport {
     paired_report(
@@ -125,7 +125,7 @@ pub(crate) fn paired_report(
     seed: u64,
     candidate_label: &str,
     opponent_label: &str,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> PairReport {
     let start = seeded_start_position(seed, config, deadline);

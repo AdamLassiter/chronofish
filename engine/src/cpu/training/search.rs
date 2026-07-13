@@ -25,7 +25,7 @@ pub(crate) struct TrainingSearchOutcome {
 pub(crate) fn training_turn_plan(
     game: &Game,
     weights: EvalWeights,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> Option<TurnPlan> {
     training_turn_search(game, weights, config, deadline, 0).map(|outcome| outcome.plan)
@@ -34,7 +34,7 @@ pub(crate) fn training_turn_plan(
 pub(crate) fn training_turn_search(
     game: &Game,
     weights: EvalWeights,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
     plies_played: usize,
 ) -> Option<TrainingSearchOutcome> {
@@ -51,7 +51,7 @@ pub(crate) fn training_turn_search(
 fn alpha_beta_training_turn_search(
     game: &Game,
     weights: EvalWeights,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
     plies_played: usize,
 ) -> Option<TrainingSearchOutcome> {
@@ -146,7 +146,7 @@ fn run_alpha_beta_training_search(
 }
 
 fn training_turn_deadline(
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> Option<SearchInstant> {
     let turn_deadline = (config.training_time_ms > 0)
@@ -196,7 +196,7 @@ pub(crate) fn apply_training_search_profile(
 fn beam_training_turn_search(
     game: &Game,
     weights: EvalWeights,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
     plies_played: usize,
 ) -> Option<TrainingSearchOutcome> {

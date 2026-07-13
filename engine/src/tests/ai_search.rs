@@ -4,9 +4,9 @@ use crate::cpu::{
     training::{
         default_hall_of_fame_path,
         train_weights,
+        CpuCliConfig,
         CpuTrainingStrategy,
         SweepParameterGroup,
-        TrainerConfig,
         TrainingSearchStrategy,
     },
     *,
@@ -1130,7 +1130,7 @@ fn evaluation_rewards_royal_shelter() {
 
 #[test]
 fn training_mutation_is_seeded() {
-    let config = TrainerConfig {
+    let config = CpuCliConfig {
         generations: 1,
         population: 4,
         training_time_ms: 10,

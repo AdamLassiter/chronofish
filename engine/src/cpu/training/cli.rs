@@ -135,7 +135,7 @@ struct CpuCliArgs {
 }
 
 pub fn run_training_cli() {
-    let config = TrainerConfig::from_args(CpuCliArgs::parse());
+    let config = CpuCliConfig::from_args(CpuCliArgs::parse());
 
     if config.train_cycle {
         // The top-level ./train script loops this mode until interrupted.
@@ -180,7 +180,7 @@ pub fn run_training_cli() {
     println!("{json}");
 }
 
-impl TrainerConfig {
+impl CpuCliConfig {
     fn from_args(args: CpuCliArgs) -> Self {
         let training = load_training_parameters();
         let seed = args.seed.unwrap_or_else(random_seed);
@@ -653,7 +653,7 @@ impl TrainerConfig {
     }
 }
 
-fn cpu_search_request(config: &TrainerConfig) -> crate::cpu::search::CpuSearchRequest {
+fn cpu_search_request(config: &CpuCliConfig) -> crate::cpu::search::CpuSearchRequest {
     let snapshot_json = config.cpu_search_snapshot.as_ref().and_then(|path| {
         if path.is_empty() {
             None

@@ -9,7 +9,7 @@ pub(crate) fn select_league_winner(
     scored: &[(FitnessReport, EvalWeights)],
     committed: EvalWeights,
     hall_of_fame: &[EvalWeights],
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> Option<EvalWeights> {
     let contenders: Vec<EvalWeights> = scored

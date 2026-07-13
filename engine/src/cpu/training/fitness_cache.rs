@@ -29,7 +29,7 @@ pub(crate) struct BaselineFitnessKey {
     search_strategy: TrainingSearchStrategy,
 }
 
-pub(crate) fn baseline_fitness_key(config: &TrainerConfig) -> BaselineFitnessKey {
+pub(crate) fn baseline_fitness_key(config: &CpuCliConfig) -> BaselineFitnessKey {
     BaselineFitnessKey {
         seed: config.seed,
         nodes: config.nodes,

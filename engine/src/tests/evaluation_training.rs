@@ -1,8 +1,8 @@
 use super::*;
 use crate::cpu::{training::*, *};
 
-fn trainer_test_config() -> TrainerConfig {
-    TrainerConfig {
+fn trainer_test_config() -> CpuCliConfig {
+    CpuCliConfig {
         generations: 1,
         population: 4,
         training_time_ms: 10,
@@ -73,7 +73,7 @@ fn cpu_weight_mutations_are_usually_sparse_and_preserve_royals() {
 
 #[test]
 fn trainer_loads_global_parameters_and_allows_cli_overrides() {
-    let config = TrainerConfig::from_env(vec![
+    let config = CpuCliConfig::from_env(vec![
         "--effort".to_string(),
         "expert".to_string(),
         "--rounds-per-variant".to_string(),
@@ -106,7 +106,7 @@ fn trainer_loads_global_parameters_and_allows_cli_overrides() {
 
 #[test]
 fn trainer_parses_sweep_and_genetic_strategy_options() {
-    let sweep = TrainerConfig::from_env(vec![
+    let sweep = CpuCliConfig::from_env(vec![
         "--parameter-groups".to_string(),
         "classic-basic,advanced".to_string(),
         "--sweep-points".to_string(),
@@ -133,12 +133,12 @@ fn trainer_parses_sweep_and_genetic_strategy_options() {
     assert_eq!(sweep.sweep_range_high, 1.5);
     assert_eq!(sweep.sweep_shrink, 0.25);
 
-    let genetic = TrainerConfig::from_env(vec!["--strategy".to_string(), "genetic".to_string()]);
+    let genetic = CpuCliConfig::from_env(vec!["--strategy".to_string(), "genetic".to_string()]);
     assert_eq!(genetic.training_strategy, CpuTrainingStrategy::Genetic);
 
     assert!(SweepParameterGroup::parse_list("basic").is_err());
 
-    let split_basic_groups = TrainerConfig::from_env(vec![
+    let split_basic_groups = CpuCliConfig::from_env(vec![
         "--parameter-groups".to_string(),
         "classic-basic,alternate-basic".to_string(),
     ]);
@@ -372,80 +372,80 @@ fn compact_value_model_training_layout_bytes_initializes_defaults() {
 
 #[test]
 fn trainer_parses_gpu_model_info_mode() {
-    let default_info = TrainerConfig::from_env(vec!["--gpu-model-info".to_string()]);
+    let default_info = CpuCliConfig::from_env(vec!["--gpu-model-info".to_string()]);
     assert_eq!(
-        default_info.gpu.gpu_model_info.as_deref(),
+        default_info.gpu.model_info.as_deref(),
         Some(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
     );
 
-    let backend_info = TrainerConfig::from_env(vec!["--gpu-backend-info".to_string()]);
-    assert!(backend_info.gpu.gpu_backend_info);
+    let backend_info = CpuCliConfig::from_env(vec!["--gpu-backend-info".to_string()]);
+    assert!(backend_info.gpu.backend_info);
 
-    let compile_shaders = TrainerConfig::from_env(vec!["--gpu-compile-shaders".to_string()]);
-    assert!(compile_shaders.gpu.gpu_compile_shaders);
+    let compile_shaders = CpuCliConfig::from_env(vec!["--gpu-compile-shaders".to_string()]);
+    assert!(compile_shaders.gpu.compile_shaders);
 
-    let compile_kernels = TrainerConfig::from_env(vec!["--gpu-compile-kernels".to_string()]);
-    assert!(compile_kernels.gpu.gpu_compile_kernels);
+    let compile_kernels = CpuCliConfig::from_env(vec!["--gpu-compile-kernels".to_string()]);
+    assert!(compile_kernels.gpu.compile_kernels);
 
-    let dispatch_smoke = TrainerConfig::from_env(vec!["--gpu-dispatch-smoke".to_string()]);
-    assert!(dispatch_smoke.gpu.gpu_dispatch_smoke);
+    let dispatch_smoke = CpuCliConfig::from_env(vec!["--gpu-dispatch-smoke".to_string()]);
+    assert!(dispatch_smoke.gpu.dispatch_smoke);
 
     let training_dispatch_smoke =
-        TrainerConfig::from_env(vec!["--gpu-training-dispatch-smoke".to_string()]);
-    assert!(training_dispatch_smoke.gpu.gpu_training_dispatch_smoke);
+        CpuCliConfig::from_env(vec!["--gpu-training-dispatch-smoke".to_string()]);
+    assert!(training_dispatch_smoke.gpu.training_dispatch_smoke);
 
-    let shader_info = TrainerConfig::from_env(vec!["--gpu-shader-info".to_string()]);
-    assert!(shader_info.gpu.gpu_shader_info);
+    let shader_info = CpuCliConfig::from_env(vec!["--gpu-shader-info".to_string()]);
+    assert!(shader_info.gpu.shader_info);
 
-    let custom_model = TrainerConfig::from_env(vec![
+    let custom_model = CpuCliConfig::from_env(vec![
         "--gpu-model".to_string(),
         "custom-value.cfnn".to_string(),
     ]);
-    assert_eq!(custom_model.gpu.gpu_value_model_path, "custom-value.cfnn");
+    assert_eq!(custom_model.gpu.value_model_path, "custom-value.cfnn");
 
-    let custom_info = TrainerConfig::from_env(vec![
+    let custom_info = CpuCliConfig::from_env(vec![
         "--gpu-model-info".to_string(),
         "custom-model.cfnn".to_string(),
     ]);
     assert_eq!(
-        custom_info.gpu.gpu_model_info.as_deref(),
+        custom_info.gpu.model_info.as_deref(),
         Some("custom-model.cfnn")
     );
 
-    let probe_zero = TrainerConfig::from_env(vec!["--gpu-model-probe-zero".to_string()]);
+    let probe_zero = CpuCliConfig::from_env(vec!["--gpu-model-probe-zero".to_string()]);
     assert_eq!(
-        probe_zero.gpu.gpu_model_probe_zero.as_deref(),
+        probe_zero.gpu.model_probe_zero.as_deref(),
         Some(crate::gpu::training::DEFAULT_VALUE_MODEL_PATH)
     );
 
-    let gpu_project_samples = TrainerConfig::from_env(vec![
+    let gpu_project_samples = CpuCliConfig::from_env(vec![
         "--gpu-project-samples".to_string(),
         "samples.json".to_string(),
     ]);
     assert_eq!(
-        gpu_project_samples.gpu.gpu_project_samples.as_deref(),
+        gpu_project_samples.gpu.project_samples.as_deref(),
         Some("samples.json")
     );
 
-    let gpu_predict_samples = TrainerConfig::from_env(vec![
+    let gpu_predict_samples = CpuCliConfig::from_env(vec![
         "--gpu-predict-samples".to_string(),
         "samples.json".to_string(),
     ]);
     assert_eq!(
-        gpu_predict_samples.gpu.gpu_predict_samples.as_deref(),
+        gpu_predict_samples.gpu.predict_samples.as_deref(),
         Some("samples.json")
     );
 
-    let gpu_distill_samples = TrainerConfig::from_env(vec![
+    let gpu_distill_samples = CpuCliConfig::from_env(vec![
         "--gpu-distill-samples".to_string(),
         "samples.json".to_string(),
     ]);
     assert_eq!(
-        gpu_distill_samples.gpu.gpu_distill_samples.as_deref(),
+        gpu_distill_samples.gpu.distill_samples.as_deref(),
         Some("samples.json")
     );
 
-    let gpu_replay_append = TrainerConfig::from_env(vec![
+    let gpu_replay_append = CpuCliConfig::from_env(vec![
         "--gpu-replay-buffer".to_string(),
         "buffer.json".to_string(),
         "--gpu-replay-append".to_string(),
@@ -454,99 +454,90 @@ fn trainer_parses_gpu_model_info_mode() {
         "17".to_string(),
     ]);
     assert_eq!(
-        gpu_replay_append.gpu.gpu_replay_buffer.as_deref(),
+        gpu_replay_append.gpu.replay_buffer.as_deref(),
         Some("buffer.json")
     );
     assert_eq!(
-        gpu_replay_append.gpu.gpu_replay_append.as_deref(),
+        gpu_replay_append.gpu.replay_append.as_deref(),
         Some("samples.json")
     );
-    assert_eq!(gpu_replay_append.gpu.gpu_replay_max, 17);
+    assert_eq!(gpu_replay_append.gpu.replay_max, 17);
 
-    let gpu_search = TrainerConfig::from_env(vec!["--gpu-search".to_string()]);
-    assert_eq!(gpu_search.gpu.gpu_search_snapshot.as_deref(), Some(""));
+    let gpu_search = CpuCliConfig::from_env(vec!["--gpu-search".to_string()]);
+    assert_eq!(gpu_search.gpu.search_snapshot.as_deref(), Some(""));
 
-    let gpu_search_file = TrainerConfig::from_env(vec![
+    let gpu_search_file = CpuCliConfig::from_env(vec![
         "--gpu-search".to_string(),
         "snapshot.json".to_string(),
     ]);
     assert_eq!(
-        gpu_search_file.gpu.gpu_search_snapshot.as_deref(),
+        gpu_search_file.gpu.search_snapshot.as_deref(),
         Some("snapshot.json")
     );
 
-    let gpu_search_depth = TrainerConfig::from_env(vec![
+    let gpu_search_depth = CpuCliConfig::from_env(vec![
         "--gpu-search".to_string(),
         "--gpu-search-depth".to_string(),
         "1".to_string(),
         "--gpu-search-min-depth".to_string(),
         "1".to_string(),
     ]);
-    assert_eq!(
-        gpu_search_depth.gpu.gpu_search_snapshot.as_deref(),
-        Some("")
-    );
-    assert_eq!(gpu_search_depth.gpu.gpu_search_depth, Some(1));
-    assert_eq!(gpu_search_depth.gpu.gpu_search_min_depth, Some(1));
+    assert_eq!(gpu_search_depth.gpu.search_snapshot.as_deref(), Some(""));
+    assert_eq!(gpu_search_depth.gpu.search_depth, Some(1));
+    assert_eq!(gpu_search_depth.gpu.search_min_depth, Some(1));
 
-    let gpu_train_samples = TrainerConfig::from_env(vec![
+    let gpu_train_samples = CpuCliConfig::from_env(vec![
         "--gpu-train-samples".to_string(),
         "samples.json".to_string(),
     ]);
     assert_eq!(
-        gpu_train_samples.gpu.gpu_train_samples.as_deref(),
+        gpu_train_samples.gpu.train_samples.as_deref(),
         Some("samples.json")
     );
 
-    let gpu_train_projected_samples = TrainerConfig::from_env(vec![
+    let gpu_train_projected_samples = CpuCliConfig::from_env(vec![
         "--gpu-train-projected-samples".to_string(),
         "samples.json".to_string(),
     ]);
     assert_eq!(
         gpu_train_projected_samples
             .gpu
-            .gpu_train_projected_samples
+            .train_projected_samples
             .as_deref(),
         Some("samples.json")
     );
 
-    let gpu_train_search = TrainerConfig::from_env(vec!["--gpu-train-search".to_string()]);
+    let gpu_train_search = CpuCliConfig::from_env(vec!["--gpu-train-search".to_string()]);
     assert_eq!(
-        gpu_train_search.gpu.gpu_train_search_snapshot.as_deref(),
+        gpu_train_search.gpu.train_search_snapshot.as_deref(),
         Some("")
     );
 
-    let gpu_train_search_file = TrainerConfig::from_env(vec![
+    let gpu_train_search_file = CpuCliConfig::from_env(vec![
         "--gpu-train-search".to_string(),
         "snapshot.json".to_string(),
     ]);
     assert_eq!(
-        gpu_train_search_file
-            .gpu
-            .gpu_train_search_snapshot
-            .as_deref(),
+        gpu_train_search_file.gpu.train_search_snapshot.as_deref(),
         Some("snapshot.json")
     );
 
-    let gpu_sample_search = TrainerConfig::from_env(vec!["--gpu-sample-search".to_string()]);
+    let gpu_sample_search = CpuCliConfig::from_env(vec!["--gpu-sample-search".to_string()]);
     assert_eq!(
-        gpu_sample_search.gpu.gpu_sample_search_snapshot.as_deref(),
+        gpu_sample_search.gpu.sample_search_snapshot.as_deref(),
         Some("")
     );
 
-    let gpu_sample_search_file = TrainerConfig::from_env(vec![
+    let gpu_sample_search_file = CpuCliConfig::from_env(vec![
         "--gpu-sample-search".to_string(),
         "snapshot.json".to_string(),
     ]);
     assert_eq!(
-        gpu_sample_search_file
-            .gpu
-            .gpu_sample_search_snapshot
-            .as_deref(),
+        gpu_sample_search_file.gpu.sample_search_snapshot.as_deref(),
         Some("snapshot.json")
     );
 
-    let gpu_sample_batch = TrainerConfig::from_env(vec![
+    let gpu_sample_batch = CpuCliConfig::from_env(vec![
         "--gpu-sample-search".to_string(),
         "--gpu-sample-count".to_string(),
         "7".to_string(),
@@ -555,14 +546,14 @@ fn trainer_parses_gpu_model_info_mode() {
         "--gpu-sample-plies".to_string(),
         "3".to_string(),
     ]);
-    assert_eq!(gpu_sample_batch.gpu.gpu_sample_count, 7);
+    assert_eq!(gpu_sample_batch.gpu.sample_count, 7);
     assert_eq!(
-        gpu_sample_batch.gpu.gpu_sample_mode,
+        gpu_sample_batch.gpu.sample_mode,
         crate::gpu::training::SearchLabelMode::Cpu
     );
-    assert_eq!(gpu_sample_batch.gpu.gpu_sample_max_plies, 3);
+    assert_eq!(gpu_sample_batch.gpu.sample_max_plies, 3);
     assert_eq!(
-        gpu_sample_search.gpu.gpu_sample_mode,
+        gpu_sample_search.gpu.sample_mode,
         crate::gpu::training::SearchLabelMode::Search
     );
     assert_eq!(
@@ -574,10 +565,10 @@ fn trainer_parses_gpu_model_info_mode() {
         crate::gpu::training::SearchLabelMode::Distilled
     );
 
-    let cpu_search = TrainerConfig::from_env(vec!["--cpu-search".to_string()]);
+    let cpu_search = CpuCliConfig::from_env(vec!["--cpu-search".to_string()]);
     assert_eq!(cpu_search.cpu_search_snapshot.as_deref(), Some(""));
 
-    let cpu_search_file = TrainerConfig::from_env(vec![
+    let cpu_search_file = CpuCliConfig::from_env(vec![
         "--cpu-search".to_string(),
         "snapshot.json".to_string(),
     ]);

@@ -3,7 +3,7 @@ use crate::cpu::{EvalWeights, SearchContext, SearchInstant};
 
 pub(crate) fn seeded_start_position(
     seed: u64,
-    config: &TrainerConfig,
+    config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> Game {
     if seed.is_multiple_of(5) {
