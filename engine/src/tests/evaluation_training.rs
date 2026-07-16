@@ -6,6 +6,10 @@ fn trainer_test_config() -> CpuCliConfig {
         generations: 1,
         population: 4,
         training_time_ms: 10,
+        search_depth: crate::cpu::training::MAX_TRAINING_SEARCH_DEPTH,
+        search_min_depth: 1,
+        search_depth_explicit: false,
+        search_min_depth_explicit: false,
         nodes: 5,
         seed: 7,
         max_seconds: Some(1),
@@ -106,6 +110,22 @@ fn trainer_loads_global_parameters_and_allows_cli_overrides() {
     );
     assert_eq!(config.sweep_points, 5);
     assert_eq!(config.sweep_passes, Some(2));
+}
+
+#[test]
+fn trainer_exposes_iterative_search_depth_bounds() {
+    let config = CpuCliConfig::from_env(vec![
+        "train".into(),
+        "--search-depth".into(),
+        "7".into(),
+        "--search-min-depth".into(),
+        "3".into(),
+    ]);
+    assert_eq!(config.search_depth, 7);
+    assert_eq!(config.search_min_depth, 3);
+
+    let compatibility = CpuCliConfig::from_env(vec!["--depth".into(), "5".into()]);
+    assert_eq!(compatibility.search_depth, 5);
 }
 
 #[test]
@@ -773,6 +793,7 @@ fn training_json_contains_the_global_training_config() {
     assert_eq!(training.rounds_per_variant, 1);
     assert_eq!(training.min_pairs, 2);
     assert_eq!(training.max_pairs, 8);
+    assert_eq!(training.max_match_time_ms, 180_000);
 }
 
 #[test]
@@ -899,6 +920,7 @@ fn full_match_scoring_stops_at_match_ply_cap() {
         "candidate",
         "baseline",
         "ply cap smoke",
+        "cpu-test",
         &config,
         None,
     );
@@ -922,6 +944,7 @@ fn full_match_scoring_stops_at_match_time_cap() {
         "candidate",
         "baseline",
         "time cap smoke",
+        "cpu-test",
         &config,
         None,
     );

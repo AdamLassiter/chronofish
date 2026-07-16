@@ -127,9 +127,6 @@ struct CpuCliArgs {
     /// Legacy runtime effort name; retained for compatibility.
     #[arg(long, hide = true)]
     effort: Option<String>,
-    /// Legacy search-depth override; retained for compatibility.
-    #[arg(long, hide = true)]
-    depth: Option<i32>,
     /// Legacy ply-limit override; retained for compatibility.
     #[arg(long, hide = true)]
     plies: Option<usize>,
@@ -141,6 +138,11 @@ pub fn run_training_cli() {
         std::iter::once("train-cpu".to_string()).chain(normalize_cpu_command(raw, true)),
     ));
     crate::training_runtime::set_global_ui_mode(config.ui);
+    if let Some(seconds) = config.max_seconds {
+        crate::training_runtime::set_cooperative_deadline(Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(seconds.max(1)),
+        ));
+    }
 
     let interactive = config.ui.resolve() == crate::training_runtime::UiMode::Tui
         && !config.score_default
@@ -232,12 +234,21 @@ impl CpuCliConfig {
         let training = load_training_parameters();
         let seed = args.seed.unwrap_or_else(random_seed);
         let compare_seeds_overridden = args.compare_seeds.is_some();
+        let search_depth_explicit = args.common.search_depth.is_some();
+        let search_min_depth_explicit = args.common.search_min_depth.is_some();
         let mut config = Self {
             generations: args.generations.unwrap_or(usize::MAX),
             population: args
                 .population
                 .unwrap_or_else(|| training.candidates.unwrap_or_else(auto_population)),
             training_time_ms: args.common.training_time_ms.unwrap_or(training.time_ms),
+            search_depth: args
+                .common
+                .search_depth
+                .unwrap_or(MAX_TRAINING_SEARCH_DEPTH),
+            search_min_depth: args.common.search_min_depth.unwrap_or(1),
+            search_depth_explicit,
+            search_min_depth_explicit,
             nodes: args.common.nodes.unwrap_or(training.nodes),
             seed,
             max_seconds: args.common.max_seconds,
@@ -367,6 +378,8 @@ impl CpuCliConfig {
     fn normalize(&mut self, compare_seeds_overridden: bool) {
         self.population = self.population.max(4);
         self.training_time_ms = self.training_time_ms.max(1);
+        self.search_depth = self.search_depth.max(1);
+        self.search_min_depth = self.search_min_depth.clamp(1, self.search_depth);
         self.nodes = self.nodes.max(1);
         self.pair_batch = self.pair_batch.max(1);
         self.opponent_variants = self.opponent_variants.max(1);
@@ -734,8 +747,16 @@ fn cpu_search_request(config: &CpuCliConfig) -> crate::cpu::search::CpuSearchReq
     crate::cpu::search::CpuSearchRequest {
         snapshot_json,
         parameters_json: std::fs::read_to_string(&config.ai_src).ok(),
-        depth: crate::cpu::search::DEFAULT_CPU_SEARCH_DEPTH,
-        min_depth: Some(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
+        depth: if config.search_depth_explicit {
+            config.search_depth
+        } else {
+            crate::cpu::search::DEFAULT_CPU_SEARCH_DEPTH
+        },
+        min_depth: Some(if config.search_min_depth_explicit {
+            config.search_min_depth
+        } else {
+            crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH
+        }),
         nodes: config.nodes.max(1).min(i32::MAX as usize) as i32,
         time_ms: config.training_time_ms.max(1).min(i32::MAX as u64) as i32,
         search_strategy: crate::cpu::search::CpuSearchStrategy::Beam,

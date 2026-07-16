@@ -9,6 +9,15 @@ pub(crate) struct CommonCliArgs {
     /// Per-search time budget in milliseconds.
     #[arg(long = "training-time-ms", visible_alias = "turn-time-ms")]
     pub(crate) training_time_ms: Option<u64>,
+    /// Maximum iterative-deepening depth used by search and training labels.
+    #[arg(
+        long = "search-depth",
+        visible_aliases = ["training-search-depth", "depth"]
+    )]
+    pub(crate) search_depth: Option<i32>,
+    /// Minimum completed depth accepted from a training search.
+    #[arg(long = "search-min-depth", visible_alias = "training-search-min-depth")]
+    pub(crate) search_min_depth: Option<i32>,
     /// Write generated samples or the trained model to this path.
     #[arg(long)]
     pub(crate) out: Option<String>,
@@ -83,12 +92,6 @@ pub(crate) struct GpuCliArgs {
     /// Search the initial position or the optional snapshot JSON file on the GPU.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub(crate) snapshot: Option<String>,
-    /// Maximum GPU search depth.
-    #[arg(long)]
-    pub(crate) search_depth: Option<i32>,
-    /// Minimum GPU search depth completed before the time limit is honored.
-    #[arg(long)]
-    pub(crate) search_min_depth: Option<i32>,
     /// Collect GPU-search labels from the initial position or an optional snapshot JSON file.
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub(crate) sample_search: Option<String>,
@@ -270,8 +273,8 @@ impl GpuCliConfig {
             config.replay_max = value;
         }
         config.search_snapshot = args.snapshot;
-        config.search_depth = args.search_depth;
-        config.search_min_depth = args.search_min_depth;
+        config.search_depth = args.common.search_depth;
+        config.search_min_depth = args.common.search_min_depth;
         config.sample_search_snapshot = args.sample_search;
         if let Some(value) = args.sample_count {
             config.sample_count = value;
@@ -304,6 +307,11 @@ impl GpuCliConfig {
 
     pub(crate) fn normalize(&mut self) {
         self.sample_count = self.sample_count.max(1);
+        self.search_depth = self.search_depth.map(|depth| depth.max(1));
+        let maximum = self
+            .search_depth
+            .unwrap_or(crate::gpu::search::DEFAULT_GPU_SEARCH_DEPTH);
+        self.search_min_depth = self.search_min_depth.map(|depth| depth.clamp(1, maximum));
     }
 }
 
@@ -340,6 +348,12 @@ pub fn run_gpu_cli() {
     let training = config.train_search_snapshot.is_some()
         || config.train_samples.is_some()
         || config.train_projected_samples.is_some();
+    if training {
+        crate::training_runtime::set_cooperative_deadline(Some(
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(config.max_seconds.unwrap_or(600).max(1)),
+        ));
+    }
     let handled = if training && config.ui.resolve() == crate::training_runtime::UiMode::Tui {
         crate::training_runtime::run_interactive(move || run(&config))
             .unwrap_or_else(|message| panic!("interactive GPU training failed: {message}"))
@@ -452,9 +466,22 @@ pub(crate) fn run(config: &GpuCliConfig) -> bool {
             );
         }
     } else if config.train_search_snapshot.is_some() {
+        register_gpu_sampling_job(config);
+        gpu_stage_state("sampling", crate::training_runtime::JobState::Running, None);
         let response =
             collect_gpu_cli_search_labels(gpu_train_search_label_batch_request(config), config)
                 .unwrap_or_else(|message| panic!("{message}"));
+        gpu_stage_state(
+            "sampling",
+            if crate::training_runtime::cooperative_timed_out() {
+                crate::training_runtime::JobState::TimedOut
+            } else if crate::training_runtime::cooperative_cancelled() {
+                crate::training_runtime::JobState::Cancelled
+            } else {
+                crate::training_runtime::JobState::Completed
+            },
+            None,
+        );
         let (value_report, policy_report, wrote) =
             train_gpu_value_model_from_samples(&response.samples, config);
         crate::training_runtime::log(
@@ -819,11 +846,19 @@ fn gpu_label_batch_request(
         distill_model: gpu_sample_distill_model(config),
         count: config.sample_count,
         max_plies: config.sample_max_plies,
-        position_depth: crate::gpu::training::DEFAULT_SEARCH_SAMPLE_POSITION_DEPTH,
+        position_depth: config
+            .search_depth
+            .unwrap_or(crate::gpu::training::DEFAULT_SEARCH_SAMPLE_POSITION_DEPTH),
         position_nodes: crate::gpu::training::DEFAULT_SEARCH_SAMPLE_POSITION_NODES,
         position_time_ms: crate::gpu::training::DEFAULT_SEARCH_SAMPLE_POSITION_TIME_MS,
-        label_depth: crate::cpu::search::DEFAULT_CPU_SEARCH_DEPTH,
-        label_min_depth: Some(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
+        label_depth: config
+            .search_depth
+            .unwrap_or(crate::cpu::search::DEFAULT_CPU_SEARCH_DEPTH),
+        label_min_depth: Some(
+            config
+                .search_min_depth
+                .unwrap_or(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
+        ),
         label_nodes: config.nodes.max(1).min(i32::MAX as usize) as i32,
         label_time_ms: config.training_time_ms.max(1).min(i32::MAX as u64) as i32,
         label_weight: 1.0,
@@ -890,6 +925,11 @@ fn train_gpu_value_model_from_samples(
     String,
 ) {
     let started = std::time::Instant::now();
+    const DEFAULT_GPU_TRAINING_TIMEOUT_SECONDS: u64 = 600;
+    let timeout_seconds = config
+        .max_seconds
+        .unwrap_or(DEFAULT_GPU_TRAINING_TIMEOUT_SECONDS)
+        .max(1);
     crate::training_runtime::log(
         crate::training_runtime::LogLevel::Info,
         "gpu/train",
@@ -898,15 +938,52 @@ fn train_gpu_value_model_from_samples(
             samples.len(),
             config.epochs,
             config.validation_split,
-            config
-                .max_seconds
-                .map_or_else(|| "unlimited".to_string(), |value| value.to_string())
+            timeout_seconds
         ),
     );
-    for (stage, dependency) in crate::gpu::training::native_training_stage_graph(
-        crate::gpu::training::NativeTrainingSource::Samples,
-    ) {
+    let training_source = if config.train_search_snapshot.is_some() {
+        crate::gpu::training::NativeTrainingSource::Search
+    } else {
+        crate::gpu::training::NativeTrainingSource::Samples
+    };
+    for (stage, dependency) in crate::gpu::training::native_training_stage_graph(training_source) {
         let id = format!("gpu-{}", format!("{stage:?}").to_ascii_lowercase());
+        let dependency_id =
+            dependency.map(|value| format!("gpu-{}", format!("{value:?}").to_ascii_lowercase()));
+        let mut detail = std::collections::BTreeMap::from([
+            (
+                "source".into(),
+                format!("{training_source:?}").to_ascii_lowercase(),
+            ),
+            ("input samples".into(), samples.len().to_string()),
+            ("epochs".into(), config.epochs.to_string()),
+            (
+                "validation split".into(),
+                config.validation_split.to_string(),
+            ),
+            ("learning rate".into(), config.learning_rate.to_string()),
+            ("node limit".into(), config.nodes.to_string()),
+            (
+                "search depth".into(),
+                format!(
+                    "{}..={}",
+                    config
+                        .search_min_depth
+                        .unwrap_or(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
+                    config
+                        .search_depth
+                        .unwrap_or(crate::gpu::search::DEFAULT_GPU_SEARCH_DEPTH)
+                ),
+            ),
+            ("timeout".into(), format!("{timeout_seconds} s")),
+            (
+                "safe checkpoints".into(),
+                "between epochs or GPU submissions".into(),
+            ),
+        ]);
+        if let Some(dependency) = &dependency_id {
+            detail.insert("waits for".into(), dependency.clone());
+        }
         crate::training_runtime::render_structured_event(
             &crate::training_runtime::TrainingEvent::Added {
                 job: crate::training_runtime::JobSnapshot::new(
@@ -915,17 +992,20 @@ fn train_gpu_value_model_from_samples(
                         label: format!("{stage:?}"),
                         kind: "gpu-stage".into(),
                         seed: config.nodes as u64,
-                        dependencies: dependency
-                            .map(|value| {
-                                format!("gpu-{}", format!("{value:?}").to_ascii_lowercase())
-                            })
-                            .into_iter()
-                            .collect(),
+                        dependencies: dependency_id.clone().into_iter().collect(),
                         persistence_path: Some(config.candidate_out.clone().into()),
-                        detail: std::collections::BTreeMap::new(),
+                        detail,
                     },
                 ),
             },
+        );
+        crate::training_runtime::log(
+            crate::training_runtime::LogLevel::Debug,
+            "gpu/scheduler",
+            format!(
+                "registered gpu-{stage:?} dependency={}",
+                dependency_id.as_deref().unwrap_or("none")
+            ),
         );
     }
     gpu_stage_state(
@@ -965,31 +1045,6 @@ fn train_gpu_value_model_from_samples(
     let (value_report, policy_report, _) =
         train_gpu_value_model_from_samples_unvalidated(&training_samples, &candidate_config);
     gpu_stage_state(
-        "projection",
-        crate::training_runtime::JobState::Completed,
-        None,
-    );
-    gpu_stage_state(
-        "valuehead",
-        crate::training_runtime::JobState::Running,
-        None,
-    );
-    gpu_stage_state(
-        "valuehead",
-        crate::training_runtime::JobState::Completed,
-        None,
-    );
-    gpu_stage_state(
-        "policyhead",
-        crate::training_runtime::JobState::Running,
-        None,
-    );
-    gpu_stage_state(
-        "policyhead",
-        crate::training_runtime::JobState::Completed,
-        None,
-    );
-    gpu_stage_state(
         "validation",
         crate::training_runtime::JobState::Running,
         None,
@@ -1027,9 +1082,8 @@ fn train_gpu_value_model_from_samples(
         crate::training_runtime::cooperative_checkpoint(),
         crate::training_runtime::Checkpoint::Cancelled
     );
-    let timed_out = config
-        .max_seconds
-        .is_some_and(|seconds| started.elapsed().as_secs() >= seconds);
+    let timed_out = crate::training_runtime::cooperative_timed_out()
+        || started.elapsed().as_secs() >= timeout_seconds;
     let improved = !validation_samples.is_empty()
         && candidate_loss.is_finite()
         && baseline_loss.is_finite()
@@ -1089,7 +1143,40 @@ fn train_gpu_value_model_from_samples(
     persistence
         .shutdown()
         .unwrap_or_else(|message| panic!("GPU candidate persistence failed: {message}"));
+    crate::training_runtime::set_cooperative_deadline(None);
     (value_report, policy_report, config.candidate_out.clone())
+}
+
+fn register_gpu_sampling_job(config: &GpuCliConfig) {
+    crate::training_runtime::render_structured_event(
+        &crate::training_runtime::TrainingEvent::Added {
+            job: crate::training_runtime::JobSnapshot::new(crate::training_runtime::JobMetadata {
+                id: "gpu-sampling".into(),
+                label: "Sampling".into(),
+                kind: "gpu-stage".into(),
+                seed: config.nodes as u64,
+                dependencies: Vec::new(),
+                persistence_path: config.out.clone().map(Into::into),
+                detail: std::collections::BTreeMap::from([
+                    ("source".into(), "search".into()),
+                    ("requested samples".into(), config.sample_count.to_string()),
+                    ("label node limit".into(), config.nodes.to_string()),
+                    (
+                        "label time".into(),
+                        format!("{} ms", config.training_time_ms),
+                    ),
+                    (
+                        "timeout".into(),
+                        format!("{} s", config.max_seconds.unwrap_or(600).max(1)),
+                    ),
+                    (
+                        "safe checkpoints".into(),
+                        "between completed samples".into(),
+                    ),
+                ]),
+            }),
+        },
+    );
 }
 
 fn gpu_stage_state(stage: &str, state: crate::training_runtime::JobState, error: Option<String>) {
@@ -1100,6 +1187,16 @@ fn gpu_stage_state(stage: &str, state: crate::training_runtime::JobState, error:
             error,
         },
     );
+}
+
+fn gpu_stage_checkpoint_state() -> crate::training_runtime::JobState {
+    if crate::training_runtime::cooperative_timed_out() {
+        crate::training_runtime::JobState::TimedOut
+    } else if crate::training_runtime::cooperative_cancelled() {
+        crate::training_runtime::JobState::Cancelled
+    } else {
+        crate::training_runtime::JobState::Completed
+    }
 }
 
 fn validation_value_loss(
@@ -1151,6 +1248,12 @@ fn train_gpu_value_model_from_samples_unvalidated(
         },
     )
     .unwrap_or_else(|message| panic!("{message}"));
+    gpu_stage_state("projection", gpu_stage_checkpoint_state(), None);
+    gpu_stage_state(
+        "valuehead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
     train_native_gpu_value_model_from_projected(&working_set, &projected, model, config)
 }
 
@@ -1165,18 +1268,31 @@ fn train_gpu_value_model_from_samples_unvalidated(
 ) {
     let samples = crate::gpu::training::dedupe_training_samples(samples);
     let model = load_gpu_value_model(config);
+    gpu_stage_state("projection", gpu_stage_checkpoint_state(), None);
+    gpu_stage_state(
+        "valuehead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
     let (value_trained, value_report) = crate::gpu::training::train_value_head_cpu(
         &model,
         &samples,
         value_head_training_config(config),
     )
     .unwrap_or_else(|message| panic!("{message}"));
+    gpu_stage_state("valuehead", gpu_stage_checkpoint_state(), None);
+    gpu_stage_state(
+        "policyhead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
     let (trained, policy_report) = crate::gpu::training::train_policy_head_cpu(
         &value_trained,
         &samples,
         value_head_training_config(config),
     )
     .unwrap_or_else(|message| panic!("{message}"));
+    gpu_stage_state("policyhead", gpu_stage_checkpoint_state(), None);
     if let Some(out) = &config.out {
         crate::gpu::training::save_compact_value_model(out, &trained)
             .unwrap_or_else(|message| panic!("{message}"));
@@ -1208,6 +1324,12 @@ fn train_native_gpu_value_model_from_projected(
             train_hidden_layers: true,
         })
         .unwrap_or_else(|message| panic!("{message}"));
+    gpu_stage_state("valuehead", gpu_stage_checkpoint_state(), None);
+    gpu_stage_state(
+        "policyhead",
+        crate::training_runtime::JobState::Running,
+        None,
+    );
     let (trained, policy_report) = crate::gpu::native::train_policy_head(
         crate::gpu::native::NativePolicyHeadTrainingRequest {
             model: value_trained,
@@ -1217,6 +1339,7 @@ fn train_native_gpu_value_model_from_projected(
         },
     )
     .unwrap_or_else(|message| panic!("{message}"));
+    gpu_stage_state("policyhead", gpu_stage_checkpoint_state(), None);
     if let Some(out) = &config.out {
         crate::gpu::training::save_compact_value_model(out, &trained)
             .unwrap_or_else(|message| panic!("{message}"));
@@ -1249,6 +1372,23 @@ mod tests {
         assert_eq!(training.epochs, 96);
         assert_eq!(training.weight_decay, 0.0005);
         assert_eq!(training.momentum, 0.85);
+    }
+
+    #[test]
+    fn gpu_training_search_depth_controls_label_generation() {
+        let config = GpuCliConfig::from_env(vec![
+            "train".into(),
+            "--source".into(),
+            "search".into(),
+            "--search-depth".into(),
+            "9".into(),
+            "--search-min-depth".into(),
+            "4".into(),
+        ]);
+        let request = gpu_train_search_label_batch_request(&config);
+        assert_eq!(request.position_depth, 9);
+        assert_eq!(request.label_depth, 9);
+        assert_eq!(request.label_min_depth, Some(4));
     }
 
     #[test]

@@ -2753,7 +2753,14 @@ async fn train_value_head_on_device(
         .len()
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "output weight buffer size overflowed".to_string())?;
+    let mut epochs_completed = 0;
     for _ in 0..request.config.epochs.max(1) {
+        if !matches!(
+            crate::training_runtime::cooperative_checkpoint(),
+            crate::training_runtime::Checkpoint::Continue
+        ) {
+            break;
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("native_value_train_epoch"),
         });
@@ -2791,6 +2798,7 @@ async fn train_value_head_on_device(
             best_loss = loss;
             best_output_weights.clone_from(&output_weights);
         }
+        epochs_completed += 1;
     }
 
     trained.output_weights = best_output_weights;
@@ -2800,7 +2808,7 @@ async fn train_value_head_on_device(
             initial_loss,
             final_loss: best_loss,
             samples: sample_count,
-            epochs: request.config.epochs.max(1),
+            epochs: epochs_completed,
         },
     ))
 }
@@ -3337,7 +3345,14 @@ async fn train_value_model_with_hidden_layers_on_device(
         .len()
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "output weight buffer size overflowed".to_string())?;
+    let mut epochs_completed = 0;
     for _ in 0..request.config.epochs.max(1) {
+        if !matches!(
+            crate::training_runtime::cooperative_checkpoint(),
+            crate::training_runtime::Checkpoint::Continue
+        ) {
+            break;
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("native_hidden_train_epoch"),
         });
@@ -3436,6 +3451,7 @@ async fn train_value_model_with_hidden_layers_on_device(
             best_hidden_weights.clone_from(&candidate.hidden_weights);
             best_output_weights.clone_from(&candidate.output_weights);
         }
+        epochs_completed += 1;
     }
 
     trained.hidden_weights = best_hidden_weights;
@@ -3446,7 +3462,7 @@ async fn train_value_model_with_hidden_layers_on_device(
             initial_loss,
             final_loss: best_loss,
             samples: sample_count,
-            epochs: request.config.epochs.max(1),
+            epochs: epochs_completed,
         },
     ))
 }
@@ -3735,7 +3751,14 @@ async fn train_policy_head_on_device(
         .checked_mul(std::mem::size_of::<f32>())
         .ok_or_else(|| "policy weight buffer size overflowed".to_string())?;
     let steps = policy_training_steps(request.config.epochs);
+    let mut steps_completed = 0;
     for _ in 0..steps {
+        if !matches!(
+            crate::training_runtime::cooperative_checkpoint(),
+            crate::training_runtime::Checkpoint::Continue
+        ) {
+            break;
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("native_policy_train_step"),
         });
@@ -3782,6 +3805,7 @@ async fn train_policy_head_on_device(
             best_loss = loss;
             best_policy_weights.clone_from(&policy_weights);
         }
+        steps_completed += 1;
     }
 
     trained.policy_weights = best_policy_weights;
@@ -3791,7 +3815,7 @@ async fn train_policy_head_on_device(
             initial_loss,
             final_loss: best_loss,
             samples: policy_indices.len(),
-            steps,
+            steps: steps_completed,
         },
     ))
 }

@@ -15,6 +15,6 @@
   "drawWindow": 4,
   "drawRateLimit": 0.8,
   "maxMatchPlies": 40,
-  "maxMatchTimeMs": 400000,
+  "maxMatchTimeMs": 180000,
   "maxGenerationsWithoutCandidate": 2
 }

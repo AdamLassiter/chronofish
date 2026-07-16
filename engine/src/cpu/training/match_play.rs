@@ -6,9 +6,10 @@ pub(crate) fn play_match_until(
     weights: EvalWeights,
     opponent: EvalWeights,
     color: Color,
-    _candidate_label: &str,
-    _opponent_label: &str,
+    candidate_label: &str,
+    opponent_label: &str,
     match_label: &str,
+    parent_job: &str,
     config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> MatchReport {
@@ -24,6 +25,39 @@ pub(crate) fn play_match_until(
     let mut peak_playable_boards = 0;
     let match_deadline =
         Some(match_started + std::time::Duration::from_millis(max_match_time_ms(config).max(1)));
+    register_training_job(
+        match_label,
+        format!(
+            "{} vs {} ({})",
+            candidate_label,
+            opponent_label,
+            color.as_str()
+        ),
+        "paired-match",
+        config.seed,
+        vec![parent_job.to_string()],
+        None,
+        [
+            ("candidate".into(), candidate_label.into()),
+            ("opponent".into(), opponent_label.into()),
+            ("color".into(), color.as_str().into()),
+            (
+                "turn budget".into(),
+                format!("{} ms", config.training_time_ms),
+            ),
+            ("node limit".into(), config.nodes.to_string()),
+            (
+                "search depth".into(),
+                format!("{}..={}", config.search_min_depth, config.search_depth),
+            ),
+            ("ply limit".into(), config.max_match_plies.to_string()),
+            (
+                "match timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+            ("safe checkpoints".into(), "between completed plies".into()),
+        ],
+    );
     training_task_progress(
         match_label,
         0,

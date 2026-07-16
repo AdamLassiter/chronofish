@@ -18,6 +18,34 @@ pub(crate) fn compare_and_maybe_promote(
         );
         return;
     }
+    let deadline = bounded_training_deadline(
+        deadline,
+        std::time::Duration::from_millis(max_match_time_ms(config).max(1)),
+    );
+    let dependency = match config.training_strategy {
+        CpuTrainingStrategy::Sweep => "cpu-sweep",
+        CpuTrainingStrategy::Genetic => "cpu-genetic",
+    };
+    register_training_job(
+        "cpu-validation",
+        "Candidate validation",
+        "paired-validation",
+        config.seed,
+        vec![dependency.into()],
+        Some(config.candidate_out.clone().into()),
+        [
+            ("minimum pairs".into(), config.min_pairs.to_string()),
+            ("maximum pairs".into(), config.max_pairs.to_string()),
+            ("pair batch".into(), config.pair_batch.to_string()),
+            ("minimum wins".into(), config.min_wins.to_string()),
+            ("minimum delta".into(), config.min_total_delta.to_string()),
+            (
+                "validation timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+            ("promotion target".into(), config.ai_src.clone()),
+        ],
+    );
     let mut comparison_stats = ComparisonStats::default();
     let mut deltas = Vec::new();
     let mut comparison_match_stats = MatchStats::default();
@@ -103,7 +131,7 @@ pub(crate) fn compare_and_maybe_promote(
             comparison_match_stats.summary()
         ),
     );
-    if should_promote(comparison_stats, significance, config) {
+    if !training_expired(deadline) && should_promote(comparison_stats, significance, config) {
         training_log(
             crate::training_runtime::LogLevel::Info,
             "cpu/validation",
@@ -143,7 +171,24 @@ pub(crate) fn compare_and_maybe_promote(
             format!("candidate outcome={outcome}"),
         );
     }
-    finish_training_task("cpu-validation");
+    if crate::training_runtime::cooperative_cancelled() {
+        finish_training_task_with_state(
+            "cpu-validation",
+            crate::training_runtime::JobState::Cancelled,
+            Some("cancelled by user".into()),
+        );
+    } else if training_deadline_expired(deadline) {
+        finish_training_task_with_state(
+            "cpu-validation",
+            crate::training_runtime::JobState::TimedOut,
+            Some(format!(
+                "validation exceeded {} ms",
+                max_match_time_ms(config)
+            )),
+        );
+    } else {
+        finish_training_task("cpu-validation");
+    }
 }
 
 fn journal_cpu_validation(

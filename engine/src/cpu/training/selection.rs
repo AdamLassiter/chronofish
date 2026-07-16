@@ -53,6 +53,7 @@ pub(crate) fn select_league_winner(
                         seed,
                         &format!("league candidate {}", index + 1),
                         &format!("league opponent {}", opponent_index + 1),
+                        "cpu-league",
                         config,
                         deadline,
                     );

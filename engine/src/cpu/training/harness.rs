@@ -41,6 +41,38 @@ pub(crate) fn train_weights_until(
 ) -> EvalWeights {
     let mut rng = Lcg::new(config.seed);
     let committed = EvalWeights::default_tuned();
+    register_training_job(
+        "cpu-baseline",
+        "Committed CPU baseline",
+        "baseline",
+        config.seed,
+        Vec::new(),
+        Some(config.candidate_out.clone().into()),
+        [
+            ("source".into(), config.ai_src.clone()),
+            (
+                "match timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+        ],
+    );
+    finish_training_task("cpu-baseline");
+    register_training_job(
+        "cpu-genetic",
+        "Genetic training",
+        "scheduler",
+        config.seed,
+        vec!["cpu-baseline".into()],
+        Some(config.candidate_out.clone().into()),
+        [
+            ("generations".into(), config.generations.to_string()),
+            ("population".into(), config.population.to_string()),
+            (
+                "candidate timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+        ],
+    );
     let mut population = vec![committed];
     refill_unique_population(&mut population, config.population, &mut rng, || committed);
 
@@ -64,6 +96,24 @@ pub(crate) fn train_weights_until(
         let search_nodes = config.nodes * node_boost;
         let scoring_config = config.with_search(search_nodes, config.training_time_ms);
         let screening_config = scoring_config.screening_search();
+        let screening_job = format!("cpu-generation-{generation}-screening");
+        register_training_job(
+            &screening_job,
+            format!("Generation {} screening", generation + 1),
+            "candidate-screening",
+            config.seed,
+            vec!["cpu-baseline".into()],
+            Some(config.candidate_out.clone().into()),
+            [
+                ("generation".into(), (generation + 1).to_string()),
+                ("population".into(), population.len().to_string()),
+                ("node limit".into(), screening_config.nodes.to_string()),
+                (
+                    "turn budget".into(),
+                    format!("{} ms", screening_config.training_time_ms),
+                ),
+            ],
+        );
         let unique_population = unique_weights(&population);
         let screening_key = baseline_fitness_key(&screening_config);
         let screening_opponent_limit = screening_config.screening_opponent_variants;
@@ -179,6 +229,24 @@ pub(crate) fn train_weights_until(
                         .is_some()
             })
             .count();
+        let finalist_job = format!("cpu-generation-{generation}-finalists");
+        register_training_job(
+            &finalist_job,
+            format!("Generation {} finalists", generation + 1),
+            "finalist-scoring",
+            config.seed,
+            vec![screening_job.clone()],
+            Some(config.candidate_out.clone().into()),
+            [
+                ("finalists".into(), finalists.len().to_string()),
+                ("uncached jobs".into(), scoring_jobs.len().to_string()),
+                ("node limit".into(), search_nodes.to_string()),
+                (
+                    "candidate timeout".into(),
+                    format!("{} ms", max_match_time_ms(config)),
+                ),
+            ],
+        );
         let finalists_done = AtomicUsize::new(0);
         let scored_jobs: Vec<(FitnessReport, EvalWeights)> = scoring_jobs
             .par_iter()
@@ -344,6 +412,22 @@ pub(crate) fn train_weights_until(
             );
             break;
         }
+    }
+
+    if crate::training_runtime::cooperative_cancelled() {
+        finish_training_task_with_state(
+            "cpu-genetic",
+            crate::training_runtime::JobState::Cancelled,
+            Some("cancelled by user".into()),
+        );
+    } else if training_deadline_expired(deadline) {
+        finish_training_task_with_state(
+            "cpu-genetic",
+            crate::training_runtime::JobState::TimedOut,
+            Some("global training deadline reached".into()),
+        );
+    } else {
+        finish_training_task("cpu-genetic");
     }
 
     if best_seen == committed {

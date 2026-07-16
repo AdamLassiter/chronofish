@@ -338,12 +338,13 @@ Fitness uses
 paired candidate/baseline matches from identical seeded starts, mixes in tactical
 mate-training positions, tracks win-rate confidence and Elo-style estimates, and
 keeps recent promoted weights in a JSONL hall of fame. `./train-cpu` is evidence
-bounded rather than time bounded by default: it runs comparison pairs until a
-candidate is promoted, rejected, or marked inconclusive because it hit the pair
-or draw-stagnation caps. Individual self-play matches are also adjudicated after
-a bounded number of plies so unresolved games cannot occupy worker threads
-forever; override this with `--max-match-plies N` or `--max-match-ms N` when
-needed. Set `--max-seconds N` for an optional wall-clock safety limit. If a
+bounded at both the evidence and task levels: it runs comparison pairs until a
+candidate is promoted, rejected, or marked inconclusive because it hit the pair,
+draw-stagnation, or task-time caps. Individual matches, parameter sweeps,
+candidate fitness jobs, and validation use the configured match timeout (three
+minutes by default), so unresolved work cannot occupy worker threads forever;
+override this with `--max-match-plies N` or `--max-match-ms N` when needed. Set
+`--max-seconds N` for an optional whole-run wall-clock safety limit. If a
 candidate is promoted, the trainer rewrites
 `engine/models/cpu-v1/parameters.json`, appends the candidate to the hall of
 fame at `engine/models/cpu-v1/hall_of_fame.jsonl`, runs verification, and commits
@@ -351,11 +352,17 @@ the updated data. Training-mode servers also
 expose these CPU parameters over `/api/training/cpu-parameters` for GET/PUT.
 
 Both native trainers accept `--ui auto|tui|plain|json`, `--max-seconds`,
-`--candidate-out`, and `--improvement-log`. Auto mode selects the interactive
+`--candidate-out`, `--improvement-log`, `--search-depth`, and
+`--search-min-depth`. The depth flags bound iterative deepening; they do not
+replace the node, per-search, match, or whole-run deadlines. GPU search-source
+training applies them to both position generation and label search. The aliases
+`--training-search-depth`, `--training-search-min-depth`, and the older
+`--depth` form remain accepted. Auto mode selects the interactive
 terminal only when both input and output are terminals. The job view supports
 mouse hover/wheel and keyboard navigation; Space pauses, `c` cancels, `r`
 restarts a stopped job, and `q` or Ctrl-C shuts down gracefully. Paused time is
-included in the global deadline. CPU candidates default to
+included in the global deadline. GPU training has a ten-minute whole-run safety
+limit when `--max-seconds` is omitted. CPU candidates default to
 `parameters.candidate.json` plus `parameters.improvements.jsonl`; active model
 promotion still uses the existing comparison, verification, and hall-of-fame
 path. `./train-cpu search [snapshot.json]` and

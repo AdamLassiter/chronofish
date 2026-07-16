@@ -57,6 +57,42 @@ pub(crate) fn train_weights_sweep_until(
     let run_id = stable_run_id(config.seed);
     let persistence = PersistenceWorker::start(config.improvement_log.clone().into());
     let persistence_sender = persistence.sender();
+    register_training_job(
+        "cpu-baseline",
+        "Frozen CPU baseline",
+        "baseline",
+        config.seed,
+        Vec::new(),
+        Some(config.candidate_out.clone().into()),
+        [
+            ("source".into(), config.ai_src.clone()),
+            (
+                "match timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+            (
+                "global timeout".into(),
+                config
+                    .max_seconds
+                    .map_or_else(|| "not configured".into(), |seconds| format!("{seconds} s")),
+            ),
+        ],
+    );
+    finish_training_task("cpu-baseline");
+    register_training_job(
+        "cpu-sweep",
+        "Coordinate sweep",
+        "scheduler",
+        config.seed,
+        vec!["cpu-baseline".into()],
+        Some(config.candidate_out.clone().into()),
+        [
+            ("parameter jobs".into(), config.parameter_jobs.to_string()),
+            ("parameters".into(), parameters.len().to_string()),
+            ("candidate points".into(), config.sweep_points.to_string()),
+            ("paired seeds".into(), config.min_pairs.max(1).to_string()),
+        ],
+    );
 
     while !training_expired(deadline) && config.sweep_passes.is_none_or(|limit| pass < limit) {
         let pass_start = current;
@@ -235,6 +271,51 @@ fn score_sweep_candidates(
 ) -> SweepScore {
     let original = parameter.value(baseline);
     let seeds = sweep_seeds(config, pass, parameter_index);
+    let task_id = format!("cpu-pass-{}-parameter-{}", pass + 1, parameter.name);
+    let baseline_id = format!("cpu-pass-{}-baseline", pass + 1);
+    register_training_job(
+        &baseline_id,
+        format!("Pass {} frozen baseline", pass + 1),
+        "baseline",
+        config.seed,
+        vec!["cpu-baseline".into()],
+        None,
+        [("pass".into(), (pass + 1).to_string())],
+    );
+    finish_training_task(&baseline_id);
+    let task_deadline = bounded_training_deadline(
+        deadline,
+        std::time::Duration::from_millis(max_match_time_ms(config).max(1)),
+    );
+    register_training_job(
+        &task_id,
+        format!("Pass {}: {}", pass + 1, parameter.name),
+        "coordinate-sweep",
+        config.seed,
+        vec![baseline_id],
+        Some(config.candidate_out.clone().into()),
+        [
+            ("parameter".into(), parameter.name.into()),
+            ("baseline value".into(), original.to_string()),
+            (
+                "bounds".into(),
+                format!("{}..={}", parameter.min, parameter.max),
+            ),
+            (
+                "tested values".into(),
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.value.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            ("paired seeds".into(), seeds.len().to_string()),
+            (
+                "task timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+        ],
+    );
     let completed = AtomicUsize::new(0);
     let scores: Vec<SweepScore> = candidates
         .par_iter()
@@ -242,7 +323,7 @@ fn score_sweep_candidates(
             let mut score = 0;
             let mut blunders = 0usize;
             for seed in &seeds {
-                if training_expired(deadline) {
+                if training_expired(task_deadline) {
                     break;
                 }
                 let report = paired_report(
@@ -251,15 +332,16 @@ fn score_sweep_candidates(
                     *seed,
                     &format!("sweep {}={}", parameter.name, candidate.value),
                     "sweep baseline",
+                    &task_id,
                     config,
-                    deadline,
+                    task_deadline,
                 );
                 score += report.delta();
                 blunders += report.candidate.blunders;
             }
             let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
             training_task_progress(
-                &format!("cpu-parameter-{}", parameter.name),
+                &task_id,
                 done,
                 candidates.len(),
                 format!(
@@ -267,7 +349,7 @@ fn score_sweep_candidates(
                     pass + 1,
                     candidate.value,
                     score,
-                    remaining_seconds(deadline)
+                    remaining_seconds(task_deadline)
                 ),
             );
             SweepScore {
@@ -280,7 +362,46 @@ fn score_sweep_candidates(
         })
         .collect();
 
-    finish_training_task(&format!("cpu-parameter-{}", parameter.name));
+    if crate::training_runtime::cooperative_cancelled() {
+        finish_training_task_with_state(
+            &task_id,
+            crate::training_runtime::JobState::Cancelled,
+            Some("cancelled by user".into()),
+        );
+        return SweepScore {
+            value: original,
+            weights: baseline,
+            score: 0,
+            blunders: usize::MAX,
+            movement: 0,
+        };
+    }
+    if training_deadline_expired(task_deadline) {
+        finish_training_task_with_state(
+            &task_id,
+            crate::training_runtime::JobState::TimedOut,
+            Some(format!(
+                "parameter exceeded {} ms",
+                max_match_time_ms(config)
+            )),
+        );
+        training_log(
+            crate::training_runtime::LogLevel::Warn,
+            "cpu/sweep",
+            format!(
+                "{} timed out; retaining baseline value {}",
+                parameter.name, original
+            ),
+        );
+        return SweepScore {
+            value: original,
+            weights: baseline,
+            score: 0,
+            blunders: usize::MAX,
+            movement: 0,
+        };
+    }
+    finish_training_task(&task_id);
     select_sweep_winner(&scores).unwrap_or(SweepScore {
         value: original,
         weights: baseline,

@@ -1,4 +1,14 @@
-use crate::training_runtime::{self, JobProgress, JobState, LogLevel, TrainingEvent};
+use std::{collections::BTreeMap, path::PathBuf};
+
+use crate::training_runtime::{
+    self,
+    JobMetadata,
+    JobProgress,
+    JobSnapshot,
+    JobState,
+    LogLevel,
+    TrainingEvent,
+};
 
 pub(crate) fn training_log(level: LogLevel, scope: impl Into<String>, message: impl Into<String>) {
     training_runtime::log(level, scope, message);
@@ -9,11 +19,13 @@ pub(crate) fn training_banner(config: &CpuCliConfig) {
         LogLevel::Info,
         "cpu",
         format!(
-            "starting {:?} training seed={} parameters={} jobs={} turn_ms={} nodes={} max_seconds={}",
+            "starting {:?} training seed={} parameters={} jobs={} depth={}:{} turn_ms={} nodes={} max_seconds={}",
             config.training_strategy,
             config.seed,
             super::parameters::sweep_weight_parameters(&config.sweep_parameter_groups).len(),
             config.parameter_jobs,
+            config.search_min_depth,
+            config.search_depth,
             config.training_time_ms,
             config.nodes,
             config
@@ -54,7 +66,39 @@ pub(crate) fn training_task_progress(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn register_training_job(
+    key: &str,
+    label: impl Into<String>,
+    kind: &str,
+    seed: u64,
+    dependencies: Vec<String>,
+    persistence_path: Option<PathBuf>,
+    detail: impl IntoIterator<Item = (String, String)>,
+) {
+    if crate::training_runtime::global_ui_mode() == crate::training_runtime::UiMode::Plain
+        && key.starts_with("cpu-match-")
+    {
+        return;
+    }
+    training_runtime::render_structured_event(&TrainingEvent::Added {
+        job: JobSnapshot::new(JobMetadata {
+            id: key.to_string(),
+            label: label.into(),
+            kind: kind.to_string(),
+            seed,
+            dependencies,
+            persistence_path,
+            detail: detail.into_iter().collect::<BTreeMap<_, _>>(),
+        }),
+    });
+}
+
 pub(crate) fn finish_training_task(key: &str) {
+    finish_training_task_with_state(key, JobState::Completed, None);
+}
+
+pub(crate) fn finish_training_task_with_state(key: &str, state: JobState, error: Option<String>) {
     if crate::training_runtime::global_ui_mode() == crate::training_runtime::UiMode::Plain
         && key.starts_with("cpu-match-")
     {
@@ -62,8 +106,8 @@ pub(crate) fn finish_training_task(key: &str) {
     }
     training_runtime::render_structured_event(&TrainingEvent::State {
         job_id: key.to_string(),
-        state: JobState::Completed,
-        error: None,
+        state,
+        error,
     });
 }
 
@@ -97,6 +141,10 @@ pub(crate) struct CpuCliConfig {
     pub(crate) generations: usize,
     pub(crate) population: usize,
     pub(crate) training_time_ms: u64,
+    pub(crate) search_depth: i32,
+    pub(crate) search_min_depth: i32,
+    pub(crate) search_depth_explicit: bool,
+    pub(crate) search_min_depth_explicit: bool,
     pub(crate) nodes: usize,
     pub(crate) seed: u64,
     pub(crate) max_seconds: Option<u64>,
@@ -151,7 +199,7 @@ pub(crate) fn max_match_time_ms(config: &CpuCliConfig) -> u64 {
         .training_time_ms
         .max(1)
         .saturating_mul(config.max_match_plies.max(1) as u64)
-        .saturating_mul(60)
+        .clamp(30_000, 300_000)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

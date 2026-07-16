@@ -56,7 +56,7 @@ fn alpha_beta_training_turn_search(
     context.options = SearchOptions::training();
     let profile = apply_training_search_profile(game, &mut context, plies_played);
     context.killers.resize(
-        (MAX_TRAINING_SEARCH_DEPTH as usize).saturating_add(3),
+        (config.search_depth as usize).saturating_add(3),
         [None, None],
     );
     let capped = context.root_plan_cap.is_some() || context.child_plan_cap.is_some();
@@ -71,7 +71,12 @@ fn alpha_beta_training_turn_search(
         None
     };
 
-    let (mut best, mut best_depth) = run_alpha_beta_training_search(game, &mut context);
+    let (mut best, mut best_depth) = run_alpha_beta_training_search(
+        game,
+        &mut context,
+        config.search_depth,
+        config.search_min_depth,
+    );
     if best.is_none() {
         best = fallback;
         best_depth = 0;
@@ -99,11 +104,13 @@ fn fallback_training_turn_plan(game: &Game, context: &mut SearchContext) -> Opti
 fn run_alpha_beta_training_search(
     game: &Game,
     context: &mut SearchContext,
+    maximum_depth: i32,
+    minimum_depth: i32,
 ) -> (Option<TurnPlan>, i32) {
     let mut best = None;
     let mut best_depth = 0;
     let mut previous_score = 0;
-    for depth in 1..=MAX_TRAINING_SEARCH_DEPTH {
+    for depth in 1..=maximum_depth.max(1) {
         if context.exhausted() {
             break;
         }
@@ -131,7 +138,11 @@ fn run_alpha_beta_training_search(
             break;
         }
     }
-    (best, best_depth)
+    if best_depth >= minimum_depth {
+        (best, best_depth)
+    } else {
+        (None, 0)
+    }
 }
 
 fn training_turn_deadline(

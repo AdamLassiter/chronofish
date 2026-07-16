@@ -34,6 +34,38 @@ pub(crate) fn fitness_until_with_opponent_limit(
     deadline: Option<SearchInstant>,
     opponent_limit: usize,
 ) -> FitnessReport {
+    let deadline = bounded_training_deadline(
+        deadline,
+        std::time::Duration::from_millis(max_match_time_ms(config).max(1)),
+    );
+    let candidate_job = format!(
+        "cpu-fitness-{:08x}",
+        stable_label_hash(candidate_label, "fitness")
+    );
+    register_training_job(
+        &candidate_job,
+        candidate_label,
+        "candidate-fitness",
+        config.seed,
+        vec!["cpu-baseline".into()],
+        Some(config.candidate_out.clone().into()),
+        [
+            ("opponents".into(), opponent_limit.max(1).to_string()),
+            (
+                "rounds per opponent".into(),
+                config.rounds_per_variant.to_string(),
+            ),
+            (
+                "turn budget".into(),
+                format!("{} ms", config.training_time_ms),
+            ),
+            ("node limit".into(), config.nodes.to_string()),
+            (
+                "task timeout".into(),
+                format!("{} ms", max_match_time_ms(config)),
+            ),
+        ],
+    );
     // Score candidates from paired seeded starts against the committed default,
     // nearby mutations, and recent promoted weights. Match results are primary;
     // heuristic margins only break ties and guide selection inside noisy draws.
@@ -87,6 +119,7 @@ pub(crate) fn fitness_until_with_opponent_limit(
                 *seed,
                 candidate_label,
                 opponent_label,
+                &candidate_job,
                 config,
                 deadline,
             )
@@ -97,6 +130,27 @@ pub(crate) fn fitness_until_with_opponent_limit(
         report.matches.add(pair.candidate.matches);
         report.score += pair.delta();
         report.blunders += pair.candidate.blunders;
+    }
+
+    if crate::training_runtime::cooperative_cancelled() {
+        finish_training_task_with_state(
+            &candidate_job,
+            crate::training_runtime::JobState::Cancelled,
+            Some("cancelled by user".into()),
+        );
+        report.score = i32::MIN / 4;
+    } else if training_deadline_expired(deadline) {
+        finish_training_task_with_state(
+            &candidate_job,
+            crate::training_runtime::JobState::TimedOut,
+            Some(format!(
+                "candidate exceeded {} ms",
+                max_match_time_ms(config)
+            )),
+        );
+        report.score = i32::MIN / 4;
+    } else {
+        finish_training_task(&candidate_job);
     }
 
     report
@@ -114,6 +168,7 @@ pub(crate) fn paired_baseline_report(
         seed,
         "comparison candidate",
         "committed baseline",
+        "cpu-validation",
         config,
         deadline,
     )
@@ -125,13 +180,15 @@ pub(crate) fn paired_report(
     seed: u64,
     candidate_label: &str,
     opponent_label: &str,
+    parent_job: &str,
     config: &CpuCliConfig,
     deadline: Option<SearchInstant>,
 ) -> PairReport {
     let start = seeded_start_position(seed, config, deadline);
     let black_start = start.clone();
-    let white_match = format!("cpu-match-{seed}-white");
-    let black_match = format!("cpu-match-{seed}-black");
+    let identity = stable_label_hash(candidate_label, opponent_label);
+    let white_match = format!("cpu-match-{seed}-{identity:08x}-white");
+    let black_match = format!("cpu-match-{seed}-{identity:08x}-black");
     let (candidate_white, candidate_black) = rayon::join(
         || {
             play_match_until(
@@ -142,6 +199,7 @@ pub(crate) fn paired_report(
                 candidate_label,
                 opponent_label,
                 &white_match,
+                parent_job,
                 config,
                 deadline,
             )
@@ -155,6 +213,7 @@ pub(crate) fn paired_report(
                 candidate_label,
                 opponent_label,
                 &black_match,
+                parent_job,
                 config,
                 deadline,
             )
@@ -169,6 +228,16 @@ pub(crate) fn paired_report(
     report.baseline.add_match(baseline_white);
     report.baseline.add_match(baseline_black);
     report
+}
+
+fn stable_label_hash(candidate: &str, opponent: &str) -> u32 {
+    candidate
+        .bytes()
+        .chain([0])
+        .chain(opponent.bytes())
+        .fold(0x811c_9dc5, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        })
 }
 
 pub(crate) fn invert_report(report: MatchReport) -> MatchReport {

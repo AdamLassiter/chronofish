@@ -2842,9 +2842,13 @@ pub fn collect_search_label_samples(
         let mut generated_positions = 0;
         let mut samples = Vec::with_capacity(requested);
         for index in 0..requested {
+            if native_training_should_stop() {
+                break;
+            }
             let game = generate_label_position(&base, index, &request);
             generated_positions += 1;
             samples.push(sample_from_game_label(&game, 0.0, DISTILLED_LABEL_WEIGHT));
+            native_sampling_progress(generated_positions, requested, "distilling positions");
         }
         let samples = distill_training_samples(&samples, model);
         let labeled_positions = samples.len();
@@ -2877,6 +2881,9 @@ pub fn collect_search_label_samples(
     let mut generated_positions = 0;
     let mut samples = Vec::with_capacity(requested);
     for index in 0..requested {
+        if native_training_should_stop() {
+            break;
+        }
         let game = generate_label_position(&base, index, &request);
         generated_positions += 1;
         let (mut sample, _, _, _) = search_label_sample_from_game(
@@ -2891,6 +2898,7 @@ pub fn collect_search_label_samples(
         if sample.policy.is_some() {
             samples.push(sample);
         }
+        native_sampling_progress(generated_positions, requested, "search labeling");
     }
     let labeled_positions = samples.len();
     Ok(SearchLabelBatchResponse {
@@ -2919,6 +2927,9 @@ pub fn collect_native_gpu_search_label_samples(
     let requested = request.count;
     let mut samples = Vec::with_capacity(requested);
     for index in 0..requested {
+        if native_training_should_stop() {
+            break;
+        }
         let game = generate_label_position(&base, index, &request);
         let response = crate::gpu::search::search(crate::gpu::search::GpuSearchRequest {
             snapshot_json: Some(game.to_json()),
@@ -2944,6 +2955,7 @@ pub fn collect_native_gpu_search_label_samples(
         {
             samples.push(sample);
         }
+        native_sampling_progress(index + 1, requested, "GPU search labeling");
     }
     let labeled_positions = samples.len();
     Ok(SearchLabelBatchResponse {
@@ -2954,6 +2966,38 @@ pub fn collect_native_gpu_search_label_samples(
         labeled_positions,
     })
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_training_should_stop() -> bool {
+    !matches!(
+        crate::training_runtime::cooperative_checkpoint(),
+        crate::training_runtime::Checkpoint::Continue
+    )
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_training_should_stop() -> bool {
+    false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_sampling_progress(current: usize, total: usize, detail: &str) {
+    crate::training_runtime::render_structured_event(
+        &crate::training_runtime::TrainingEvent::Progress {
+            job_id: "gpu-sampling".into(),
+            progress: crate::training_runtime::JobProgress {
+                current: current as u64,
+                total: total.max(1) as u64,
+                games_or_samples: current as u64,
+                detail: detail.into(),
+                ..Default::default()
+            },
+        },
+    );
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_sampling_progress(_current: usize, _total: usize, _detail: &str) {}
 
 fn search_label_sample_from_game(
     game: &Game,
@@ -3578,7 +3622,15 @@ pub fn train_value_head_from_features_cpu(
     let initial_loss = value_head_loss(features, samples, &output_weights);
     let mut best_loss = initial_loss;
     let mut best_output_weights = output_weights.clone();
+    let mut epochs_completed = 0;
     for _ in 0..config.epochs.max(1) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !matches!(
+            crate::training_runtime::cooperative_checkpoint(),
+            crate::training_runtime::Checkpoint::Continue
+        ) {
+            break;
+        }
         apply_value_head_gradient(
             features,
             samples,
@@ -3591,6 +3643,7 @@ pub fn train_value_head_from_features_cpu(
             best_loss = loss;
             best_output_weights.clone_from(&output_weights);
         }
+        epochs_completed += 1;
     }
     trained.output_weights = best_output_weights;
     Ok((
@@ -3599,7 +3652,7 @@ pub fn train_value_head_from_features_cpu(
             initial_loss,
             final_loss: best_loss,
             samples: samples.len(),
-            epochs: config.epochs.max(1),
+            epochs: epochs_completed,
         },
     ))
 }
@@ -3676,7 +3729,15 @@ pub fn train_policy_head_from_features_cpu(
     let mut best_loss = initial_loss;
     let mut best_weights = weights.clone();
     let steps = policy_training_steps(config.epochs);
+    let mut steps_completed = 0;
     for _ in 0..steps {
+        #[cfg(not(target_arch = "wasm32"))]
+        if !matches!(
+            crate::training_runtime::cooperative_checkpoint(),
+            crate::training_runtime::Checkpoint::Continue
+        ) {
+            break;
+        }
         apply_policy_head_gradient(
             features,
             samples,
@@ -3691,6 +3752,7 @@ pub fn train_policy_head_from_features_cpu(
             best_loss = loss;
             best_weights.clone_from(&weights);
         }
+        steps_completed += 1;
     }
     trained.policy_weights = best_weights;
     Ok((
@@ -3699,7 +3761,7 @@ pub fn train_policy_head_from_features_cpu(
             initial_loss,
             final_loss: best_loss,
             samples: indices.len(),
-            steps,
+            steps: steps_completed,
         },
     ))
 }

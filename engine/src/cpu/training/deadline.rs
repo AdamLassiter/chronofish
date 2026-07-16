@@ -14,6 +14,21 @@ pub(crate) fn training_expired(deadline: Option<SearchInstant>) -> bool {
     ) || deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
 }
 
+pub(crate) fn training_deadline_expired(deadline: Option<SearchInstant>) -> bool {
+    deadline.is_some_and(|deadline| SearchInstant::now() >= deadline)
+}
+
+pub(crate) fn bounded_training_deadline(
+    deadline: Option<SearchInstant>,
+    budget: std::time::Duration,
+) -> Option<SearchInstant> {
+    let task_deadline = SearchInstant::now() + budget;
+    match deadline {
+        Some(global) => Some(global.min(task_deadline)),
+        None => Some(task_deadline),
+    }
+}
+
 pub(crate) fn remaining_seconds(deadline: Option<SearchInstant>) -> String {
     deadline.map_or_else(
         || "unlimited".to_string(),
