@@ -1,5 +1,4 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { glsl } from "esbuild-plugin-glsl";
 import path from "node:path";
 import * as esbuild from "esbuild";
 
@@ -28,10 +27,7 @@ await esbuild.build({
   chunkNames: "chunks/[name]-[hash]",
   entryNames: "[dir]/[name]",
   platform: "browser",
-  plugins: [
-    appVersionPlugin(),
-    glsl()
-  ],
+  plugins: [appVersionPlugin()],
   logLevel: "info"
 });
 

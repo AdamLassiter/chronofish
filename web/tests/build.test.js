@@ -44,6 +44,20 @@ test("build output declares package version on the main page", async () => {
   assert.equal(appVersion.trim(), `export const APP_VERSION = ${JSON.stringify(packageJson.version)};`);
 });
 
+test("WebGPU shaders are requested from the server instead of imported from the engine tree", async () => {
+  const shaderSources = await Promise.all([
+    "ai-shaders.ts",
+    "training-shaders.ts",
+    "ai-frontier-neural.ts"
+  ].map((file) => readFile(path.join(root, "src", file), "utf8")));
+  const dockerfile = await readFile(path.join(root, "..", "Dockerfile"), "utf8");
+
+  assert.doesNotMatch(shaderSources.join("\n"), /\.\.\/\.\.\/engine\/src\/gpu/);
+  assert.match(shaderSources.join("\n"), /loadShader\("\/shaders\/search\/frontier_forward\.wgsl"\)/);
+  assert.match(shaderSources.join("\n"), /loadShader\("\/shaders\/training\/project_features\.wgsl"\)/);
+  assert.doesNotMatch(dockerfile, /COPY engine\/src\/gpu\/(?:search|training)\/shaders/);
+});
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

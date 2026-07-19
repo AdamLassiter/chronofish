@@ -57,6 +57,19 @@ mod static_file_tests {
     }
 
     #[test]
+    fn gpu_shaders_are_compiled_into_the_server() {
+        let search = embedded_static_asset("/shaders/search/frontier_expand.wgsl")
+            .expect("search shader should be embedded");
+        let training = embedded_static_asset("/shaders/training/project_features.wgsl")
+            .expect("training shader should be embedded");
+
+        assert_eq!(search.content_type, "text/plain; charset=utf-8");
+        assert_eq!(training.content_type, "text/plain; charset=utf-8");
+        assert!(search.bytes.starts_with(b"struct ") || search.bytes.starts_with(b"const "));
+        assert!(training.bytes.starts_with(b"struct ") || training.bytes.starts_with(b"const "));
+    }
+
+    #[test]
     fn gpu_effort_is_served_from_the_gpu_model_directory() {
         let root = workspace_root();
         let path = resolve_request_path(&root, "/ai/gpu-effort.json")

@@ -11,7 +11,7 @@ import {
   GPU_FRONTIER_PLAN_OFFSET,
   GPU_FRONTIER_SUMMARY_STRIDE
 } from "./ai-layout.js";
-import { GPU_FRONTIER_EXPAND_SHADER, GPU_FRONTIER_SELECT_SHADER, GPU_FRONTIER_STATE_SHADER } from "./ai-shaders.js";
+import { loadAiShaders } from "./ai-shaders.js";
 import { engineDeriveFrontierTuning, engineFrontierNumber, engineFrontierSelectionPlan } from "./engine-gpu-search.js";
 import type { ChronofishEngine } from "./types.js";
 
@@ -547,6 +547,7 @@ export function align4(value: number, engine?: ChronofishEngine): number {
 }
 
 async function createFrontierPipelines(device: GPUDevice, tuning: FrontierTuning): Promise<FrontierPipelines> {
+  const shaders = await loadAiShaders();
   const layouts = frontierPipelineLayouts(device);
   const [
     expand,
@@ -561,17 +562,17 @@ async function createFrontierPipelines(device: GPUDevice, tuning: FrontierTuning
     reduce,
     copyReduced
   ] = await Promise.all([
-    createPipeline(device, "frontier_expand", GPU_FRONTIER_EXPAND_SHADER, "expand_frontier", { EXPAND_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.expand),
-    createPipeline(device, "frontier_hash", GPU_FRONTIER_SELECT_SHADER, "hash_candidates", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_order", GPU_FRONTIER_SELECT_SHADER, "bucket_order", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_sort", GPU_FRONTIER_SELECT_SHADER, "bitonic_sort", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_unique", GPU_FRONTIER_SELECT_SHADER, "mark_unique", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_parent_quota", GPU_FRONTIER_SELECT_SHADER, "mark_parent_quota", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_compact", GPU_FRONTIER_SELECT_SHADER, "compact_selected", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
-    createPipeline(device, "frontier_select", GPU_FRONTIER_SELECT_SHADER, "fill_selection_underflow", undefined, layouts.select),
-    createPipeline(device, "frontier_materialize", GPU_FRONTIER_STATE_SHADER, "materialize_selected", { MATERIALIZE_WORKGROUP_SIZE: tuning.mutationTileSize }, layouts.materialize),
-    createPipeline(device, "frontier_reduce", GPU_FRONTIER_STATE_SHADER, "minimax_reduce_stage", undefined, layouts.reduce),
-    createPipeline(device, "frontier_reduce_copy", GPU_FRONTIER_STATE_SHADER, "minimax_copy_scores", undefined, layouts.reduce)
+    createPipeline(device, "frontier_expand", shaders.frontierExpand, "expand_frontier", { EXPAND_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.expand),
+    createPipeline(device, "frontier_hash", shaders.frontierSelect, "hash_candidates", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_order", shaders.frontierSelect, "bucket_order", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_sort", shaders.frontierSelect, "bitonic_sort", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_unique", shaders.frontierSelect, "mark_unique", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_parent_quota", shaders.frontierSelect, "mark_parent_quota", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_compact", shaders.frontierSelect, "compact_selected", { SELECT_WORKGROUP_SIZE: tuning.candidateWorkgroupSize }, layouts.select),
+    createPipeline(device, "frontier_select", shaders.frontierSelect, "fill_selection_underflow", undefined, layouts.select),
+    createPipeline(device, "frontier_materialize", shaders.frontierState, "materialize_selected", { MATERIALIZE_WORKGROUP_SIZE: tuning.mutationTileSize }, layouts.materialize),
+    createPipeline(device, "frontier_reduce", shaders.frontierState, "minimax_reduce_stage", undefined, layouts.reduce),
+    createPipeline(device, "frontier_reduce_copy", shaders.frontierState, "minimax_copy_scores", undefined, layouts.reduce)
   ]);
   return {
     expand,

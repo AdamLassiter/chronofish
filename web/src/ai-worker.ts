@@ -1,6 +1,6 @@
 import { GPU_CANDIDATE_STRIDE, GPU_SOURCE_STRIDE, GPU_TARGET_STRIDE, GPU_BOARD_STRIDE, GPU_MUTATION_BOARD_STRIDE, GPU_MUTATION_CHILD_STRIDE, GPU_MUTATION_STATUS_BRANCH_OK, GPU_TURN_STATUS_RECORD_STRIDE, GPU_FRONTIER_BOARD_OFFSET } from "./ai-layout.js";
 import { colorCode } from "./ai-snapshot.js";
-import { GPU_TURN_STATUS_SHADER, GPU_MOVEGEN_SHADER, GPU_REPLY_SHADER, GPU_MUTATE_SHADER } from "./ai-shaders.js";
+import { loadAiShaders } from "./ai-shaders.js";
 import { autotuneFrontier, frontierStateBytes, frontierStateStride, FrontierGpuPipeline } from "./ai-frontier.js";
 import type { EncodedFrontierRoot, FrontierBufferSet, FrontierTuning } from "./ai-frontier.js";
 import { FrontierNeuralEvaluator } from "./ai-frontier-neural.js";
@@ -769,7 +769,7 @@ async function turnStatusOnGpu(device: GPUDevice, snapshot: GpuSnapshot): Promis
   view.setUint32(0, boardRecords.length / GPU_TURN_STATUS_RECORD_STRIDE, true);
   view.setInt32(4, colorCode(snapshot.turn), true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = await createComputePipelineChecked(device, "turn_status", GPU_TURN_STATUS_SHADER, "turn_status");
+  const pipeline = await createComputePipelineChecked(device, "turn_status", (await loadAiShaders()).turnStatus, "turn_status");
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [boardBuffer, resultBuffer, paramsBuffer]
@@ -915,7 +915,7 @@ async function scoreCandidatesOnGpu(device: GPUDevice, inputs: GpuCandidateInput
   }
   const targetBuffer = storageBuffer(device, inputs.targets, GPUBufferUsage.STORAGE);
   const boardBuffer = storageBuffer(device, inputs.boards ?? new Int32Array(GPU_BOARD_STRIDE), GPUBufferUsage.STORAGE);
-  const pipeline = await createComputePipelineChecked(device, "score_candidates", GPU_MOVEGEN_SHADER, "score_candidates");
+  const pipeline = await createComputePipelineChecked(device, "score_candidates", (await loadAiShaders()).movegen, "score_candidates");
   const records = new Int32Array(candidateCount * GPU_CANDIDATE_STRIDE);
   const scores = new Int32Array(candidateCount);
   const sourceBatchSize = engineGpuSearch.engineGpuCandidateSourceBatchSize(engine, maxCandidatesPerBatch, inputs.targetCount);
@@ -1002,7 +1002,7 @@ async function mutateRankedCandidatesOnGpu(
   view.setUint32(4, inputs.boardCount, true);
   view.setUint32(8, await engineGpuSearch.engineGpuMutationTurnCode(candidateRecords), true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = await createComputePipelineChecked(device, "mutate_candidates", GPU_MUTATE_SHADER, "mutate_candidates");
+  const pipeline = await createComputePipelineChecked(device, "mutate_candidates", (await loadAiShaders()).mutate, "mutate_candidates");
   const encoder = device.createCommandEncoder();
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -1069,7 +1069,7 @@ async function scoreRootCandidatesWithReplies(
   view.setUint32(0, rankedRoots.length, true);
   view.setUint32(4, rankedReplies.length, true);
   const paramsBuffer = storageBuffer(device, params, GPUBufferUsage.UNIFORM);
-  const pipeline = await createComputePipelineChecked(device, "score_replies", GPU_REPLY_SHADER, "score_replies");
+  const pipeline = await createComputePipelineChecked(device, "score_replies", (await loadAiShaders()).reply, "score_replies");
   const encoder = device.createCommandEncoder();
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),

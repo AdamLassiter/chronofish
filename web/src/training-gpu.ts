@@ -1,4 +1,4 @@
-import { PROJECT_FEATURES_SHADER, FORWARD_LAYER_SHADER, FORWARD_INDEXED_LAYER_SHADER, FORWARD_OUTPUT_SHADER, OUTPUT_DELTA_SHADER, HIDDEN_DELTA_SHADER, HIDDEN3_DELTA_SHADER, APPLY_LAYER_SHADER, APPLY_INDEXED_LAYER_SHADER, APPLY_OUTPUT_SHADER, POLICY_SHADER, POLICY_LOSS_SHADER, REDUCE_LOSS_SHADER } from "./training-shaders.js";
+import { loadTrainingShaders } from "./training-shaders.js";
 import { CPU_HEAD_TRAINING_MAX_POSITIONS, CPU_PREDICTION_MAX_BATCH, HIDDEN_LAYERS, MIN_HIDDEN_TRAINING_POSITIONS, MIN_POLICY_WORKING_SET_FRACTION, NEURAL_BOARD_PLANES, NEURAL_BOARD_SQUARES, OPTIMIZER_MOMENTUM, POLICY_BUCKETS, PROJECTION_CHUNK_SIZE, PROJECTION_SEED, PROJECTION_SIZE, PROJECTION_TEMPORARY_BUDGET, VALUE_SCORE_SCALE } from "./training-gpu-constants.js";
 import { align4, createComputePipelineChecked, denseKernelEntryPoint as fallbackDenseKernelEntryPoint, formatBytes, getGpuDevice } from "./training-gpu-device.js";
 import { byteArraysEqual, compactModelIsFinite, encodeCompactModel } from "./training-gpu-model.js";
@@ -615,24 +615,25 @@ export async function trainValue(
   const applyLayerEntryPoint = denseKernelEntryPoint("apply_layer", batchSize, engine);
   const hiddenDeltaEntryPoint = denseKernelEntryPoint("hidden_delta", batchSize, engine);
   const denseKernelSuffix = denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint);
-  const forwardIndexedLayerPipeline = await createComputePipelineChecked(device, `forward_indexed_layer_${denseKernelSuffix}`, FORWARD_INDEXED_LAYER_SHADER, forwardLayerEntryPoint);
-  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelSuffix}`, FORWARD_LAYER_SHADER, forwardLayerEntryPoint);
-  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
-  const reduceLossPipeline = await createComputePipelineChecked(device, "reduce_loss", REDUCE_LOSS_SHADER, "reduce_loss");
-  const outputDeltaPipeline = await createComputePipelineChecked(device, "output_delta", OUTPUT_DELTA_SHADER, "output_delta");
+  const shaders = await loadTrainingShaders();
+  const forwardIndexedLayerPipeline = await createComputePipelineChecked(device, `forward_indexed_layer_${denseKernelSuffix}`, shaders.forwardIndexedLayer, forwardLayerEntryPoint);
+  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelSuffix}`, shaders.forwardLayer, forwardLayerEntryPoint);
+  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", shaders.forwardOutput, "forward_output");
+  const reduceLossPipeline = await createComputePipelineChecked(device, "reduce_loss", shaders.reduceLoss, "reduce_loss");
+  const outputDeltaPipeline = await createComputePipelineChecked(device, "output_delta", shaders.outputDelta, "output_delta");
   const lastHiddenDeltaPipeline = hiddenLayersTrained
-    ? await createComputePipelineChecked(device, "hidden3_delta", HIDDEN3_DELTA_SHADER, "hidden3_delta")
+    ? await createComputePipelineChecked(device, "hidden3_delta", shaders.hidden3Delta, "hidden3_delta")
     : null;
   const hiddenDeltaPipeline = hiddenLayersTrained
-    ? await createComputePipelineChecked(device, `hidden_delta_${denseKernelSuffix}`, HIDDEN_DELTA_SHADER, hiddenDeltaEntryPoint)
+    ? await createComputePipelineChecked(device, `hidden_delta_${denseKernelSuffix}`, shaders.hiddenDelta, hiddenDeltaEntryPoint)
     : null;
   const applyIndexedLayerPipeline = hiddenLayersTrained
-    ? await createComputePipelineChecked(device, `apply_indexed_layer_${denseKernelSuffix}`, APPLY_INDEXED_LAYER_SHADER, applyLayerEntryPoint)
+    ? await createComputePipelineChecked(device, `apply_indexed_layer_${denseKernelSuffix}`, shaders.applyIndexedLayer, applyLayerEntryPoint)
     : null;
   const applyLayerPipeline = hiddenLayersTrained
-    ? await createComputePipelineChecked(device, `apply_layer_${denseKernelSuffix}`, APPLY_LAYER_SHADER, applyLayerEntryPoint)
+    ? await createComputePipelineChecked(device, `apply_layer_${denseKernelSuffix}`, shaders.applyLayer, applyLayerEntryPoint)
     : null;
-  const applyOutputPipeline = await createComputePipelineChecked(device, "apply_output", APPLY_OUTPUT_SHADER, "apply_output");
+  const applyOutputPipeline = await createComputePipelineChecked(device, "apply_output", shaders.applyOutput, "apply_output");
 
   const lossIndices = validationIndices.length ? validationIndices : trainIndices;
   const initialValidationLoss = await timed(config.metrics, "initialValidationLoss", () =>
@@ -826,7 +827,7 @@ export async function trainValue(
   const policyFeatureForwardPipeline = await createComputePipelineChecked(
     device,
     `forward_layer_${policyFeatureKernelSuffix}`,
-    FORWARD_LAYER_SHADER,
+    shaders.forwardLayer,
     policyFeatureEntryPoint
   );
   const policyFeatures = forwardHiddenFeaturesOnProjectedGpu(
@@ -948,10 +949,11 @@ export async function trainPolicy(
   const policyForwardEntryPoint = denseKernelEntryPoint("forward_policy", batchSize, engine);
   const policyApplyEntryPoint = denseKernelEntryPoint("apply_policy", batchSize, engine);
   const policyKernelSuffix = denseKernelLabelSuffix("forward_policy", policyForwardEntryPoint);
-  const forwardPipeline = await createComputePipelineChecked(device, `policy_forward_${policyKernelSuffix}`, POLICY_SHADER, policyForwardEntryPoint);
-  const deltaPipeline = await createComputePipelineChecked(device, "policy_delta", POLICY_SHADER, "policy_delta");
-  const applyPipeline = await createComputePipelineChecked(device, `policy_apply_${policyKernelSuffix}`, POLICY_SHADER, policyApplyEntryPoint);
-  const lossPipeline = await createComputePipelineChecked(device, "policy_loss", POLICY_LOSS_SHADER, "reduce_policy_loss");
+  const shaders = await loadTrainingShaders();
+  const forwardPipeline = await createComputePipelineChecked(device, `policy_forward_${policyKernelSuffix}`, shaders.policy, policyForwardEntryPoint);
+  const deltaPipeline = await createComputePipelineChecked(device, "policy_delta", shaders.policy, "policy_delta");
+  const applyPipeline = await createComputePipelineChecked(device, `policy_apply_${policyKernelSuffix}`, shaders.policy, policyApplyEntryPoint);
+  const lossPipeline = await createComputePipelineChecked(device, "policy_loss", shaders.policyLoss, "reduce_policy_loss");
   const lossIndices = validationIndices.length ? validationIndices : trainIndices;
   const initialValidationLoss = await policyLossOnGpu(
     device,
@@ -1553,7 +1555,7 @@ export async function projectSamplesToBuffer(device: GPUDevice, samples: Trainin
     size: align4(projectedBytes),
     usage: gpuBufferUsage.STORAGE | gpuBufferUsage.COPY_SRC
   });
-  const pipeline = await createComputePipelineChecked(device, "project_features", PROJECT_FEATURES_SHADER, "project_features");
+  const pipeline = await createComputePipelineChecked(device, "project_features", (await loadTrainingShaders()).projectFeatures, "project_features");
   const temporaryBudget = projectionTemporaryBudget(device, engine);
   const projectionChunkSize = projectionBatchChunkSize(engine);
   let batchOffset = 0;
@@ -2736,8 +2738,9 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
   );
   const forwardOutputParams = outputParamsBuffer(device, sampleCount, finalHiddenSize, 0, engine);
   const forwardLayerEntryPoint = denseKernelEntryPoint("forward_layer", sampleCount, engine);
-  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint)}`, FORWARD_LAYER_SHADER, forwardLayerEntryPoint);
-  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", FORWARD_OUTPUT_SHADER, "forward_output");
+  const shaders = await loadTrainingShaders();
+  const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint)}`, shaders.forwardLayer, forwardLayerEntryPoint);
+  const forwardOutputPipeline = await createComputePipelineChecked(device, "forward_output", shaders.forwardOutput, "forward_output");
   const encoder = device.createCommandEncoder();
   for (let layerIndex = 0; layerIndex < hiddenLayers.length; layerIndex += 1) {
     const inputBuffer = layerIndex === 0 ? featureBuffer : activationBuffers[layerIndex - 1]!;

@@ -1,18 +1,34 @@
-import turn_status from "../../engine/src/gpu/search/shaders/turn_status.wgsl";
-import frontier_select from "../../engine/src/gpu/search/shaders/frontier_select.wgsl";
-import frontier_state from "../../engine/src/gpu/search/shaders/frontier_state.wgsl";
-import frontier_expand from "../../engine/src/gpu/search/shaders/frontier_expand.wgsl";
-import movegen from "../../engine/src/gpu/search/shaders/movegen.wgsl";
-import reply from "../../engine/src/gpu/search/shaders/reply.wgsl";
-import mutate from "../../engine/src/gpu/search/shaders/mutate.wgsl";
+import { loadShader } from "./shader-loader.js";
 
-export const GPU_TURN_STATUS_SHADER = turn_status;
-export const GPU_FRONTIER_SELECT_SHADER = frontier_select;
-export const GPU_FRONTIER_STATE_SHADER = frontier_state;
-export const GPU_FRONTIER_EXPAND_SHADER = frontier_expand;
+export interface AiShaders {
+  turnStatus: string;
+  frontierSelect: string;
+  frontierState: string;
+  frontierExpand: string;
+  movegen: string;
+  reply: string;
+  mutate: string;
+}
 
-export const GPU_MOVEGEN_SHADER = movegen;
+let shadersPromise: Promise<AiShaders> | undefined;
 
-export const GPU_REPLY_SHADER = reply;
-
-export const GPU_MUTATE_SHADER = mutate;
+export function loadAiShaders(): Promise<AiShaders> {
+  shadersPromise ??= Promise.all([
+    loadShader("/shaders/search/turn_status.wgsl"),
+    loadShader("/shaders/search/frontier_select.wgsl"),
+    loadShader("/shaders/search/frontier_state.wgsl"),
+    loadShader("/shaders/search/frontier_expand.wgsl"),
+    loadShader("/shaders/search/movegen.wgsl"),
+    loadShader("/shaders/search/reply.wgsl"),
+    loadShader("/shaders/search/mutate.wgsl")
+  ]).then(([turnStatus, frontierSelect, frontierState, frontierExpand, movegen, reply, mutate]) => ({
+    turnStatus,
+    frontierSelect,
+    frontierState,
+    frontierExpand,
+    movegen,
+    reply,
+    mutate
+  }));
+  return shadersPromise;
+}

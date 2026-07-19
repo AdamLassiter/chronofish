@@ -3,8 +3,8 @@ import type { CompactValueModel } from "./training-gpu.js";
 import { engineFrontierNumber, engineGpuSearchBytesRequired, engineGpuSearchOutputBytes } from "./engine-gpu-search.js";
 import { instantiateChronofishWasm } from "./wasm-loader.js";
 import type { ChronofishEngine } from "./types.js";
-import { FRONTIER_NEURAL_SHADER, FRONTIER_POLICY_SHADER } from "./training-shaders.js";
-import frontierForward from "../../engine/src/gpu/search/shaders/frontier_forward.wgsl";
+import { loadTrainingShaders } from "./training-shaders.js";
+import { loadShader } from "./shader-loader.js";
 
 interface BufferUsageConstants {
   COPY_SRC: number;
@@ -505,17 +505,21 @@ function readQuantizedPolicyUpload(bytes: Uint8Array, weightCount: number): {
 }
 
 async function createPipelines(device: GPUDevice): Promise<Pipelines> {
+  const [shaders, frontierForward] = await Promise.all([
+    loadTrainingShaders(),
+    loadShader("/shaders/search/frontier_forward.wgsl")
+  ]);
   const f16 = device.features?.has("shader-f16" as GPUFeatureName) ?? false;
-  const forwardShader = f16 ? frontierForwardF16 : frontierForward;
-  const policyShader = f16 ? frontierPolicyF16 : FRONTIER_POLICY_SHADER;
+  const forwardShader = f16 ? frontierForwardF16(frontierForward) : frontierForward;
+  const policyShader = f16 ? frontierPolicyF16(shaders.frontierPolicy) : shaders.frontierPolicy;
   const suffix = f16 ? "_f16" : "";
   const [selectBoards, project, forwardLayer, forwardOutput, forwardOutputLinear, applyValues, applyPolicy] = await Promise.all([
-    pipeline(device, "frontier_select_neural_boards", FRONTIER_NEURAL_SHADER, "select_neural_boards"),
-    pipeline(device, "frontier_project", FRONTIER_NEURAL_SHADER, "project_neural_features"),
+    pipeline(device, "frontier_select_neural_boards", shaders.frontierNeural, "select_neural_boards"),
+    pipeline(device, "frontier_project", shaders.frontierNeural, "project_neural_features"),
     pipeline(device, `frontier_forward_layer${suffix}`, forwardShader, "forward_layer_masked"),
     pipeline(device, `frontier_forward_output${suffix}`, forwardShader, "forward_output_masked"),
     pipeline(device, `frontier_forward_output_linear${suffix}`, forwardShader, "forward_output_masked_linear"),
-    pipeline(device, "frontier_apply_neural", FRONTIER_NEURAL_SHADER, "apply_neural_values"),
+    pipeline(device, "frontier_apply_neural", shaders.frontierNeural, "apply_neural_values"),
     pipeline(device, `frontier_apply_policy${suffix}`, policyShader, "apply_policy_prior")
   ]);
   return { selectBoards, project, forwardLayer, forwardOutput, forwardOutputLinear, applyValues, applyPolicy };
@@ -574,19 +578,23 @@ function float32ToFloat16Array(values: Float32Array, engine: ChronofishEngine): 
   return new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / Uint16Array.BYTES_PER_ELEMENT).slice();
 }
 
-const frontierForwardF16 = `enable f16;
+function frontierForwardF16(frontierForward: string): string {
+  return `enable f16;
 ${frontierForward
   .replace("var<storage, read> weights: array<f32>;", "var<storage, read> weights: array<f16>;")
   .replace(/var sum = weights\[row \+ layer_params\.input_size\];/g, "var sum = f32(weights[row + layer_params.input_size]);")
   .replace(/var sum = weights\[layer_params\.input_size\];/g, "var sum = f32(weights[layer_params.input_size]);")
   .replace(/weights\[row \+ input_index\]/g, "f32(weights[row + input_index])")
   .replace(/weights\[input_index\]/g, "f32(weights[input_index])")}`;
+}
 
-const frontierPolicyF16 = `enable f16;
-${FRONTIER_POLICY_SHADER
+function frontierPolicyF16(frontierPolicy: string): string {
+  return `enable f16;
+${frontierPolicy
   .replace("var<storage, read> policy_weights: array<f32>;", "var<storage, read> policy_weights: array<f16>;")
   .replace(/var logit = policy_weights\[row \+ params\.input_size\];/g, "var logit = f32(policy_weights[row + params.input_size]);")
   .replace(/policy_weights\[row \+ input\]/g, "f32(policy_weights[row + input])")}`;
+}
 
 function uniformBytes(device: GPUDevice, bytes: Uint8Array, engine?: ChronofishEngine): GPUBuffer {
   const buffer = device.createBuffer({ size: align4(bytes.byteLength, engine), usage: usage.COPY_DST | usage.UNIFORM });

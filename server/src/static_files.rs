@@ -39,12 +39,86 @@ struct EmbeddedStaticAsset {
 
 const FAVICON_SVG: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../logo.svg"));
 
+macro_rules! engine_shader {
+    ($path:literal) => {
+        EmbeddedStaticAsset {
+            bytes: include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../engine/src/gpu/",
+                $path
+            )),
+            content_type: "text/plain; charset=utf-8",
+        }
+    };
+}
+
 fn embedded_static_asset(request_path: &str) -> Option<EmbeddedStaticAsset> {
     match request_path {
         "/favicon.svg" => Some(EmbeddedStaticAsset {
             bytes: FAVICON_SVG,
             content_type: "image/svg+xml",
         }),
+        "/shaders/search/turn_status.wgsl" => {
+            Some(engine_shader!("search/shaders/turn_status.wgsl"))
+        }
+        "/shaders/search/frontier_select.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_select.wgsl"))
+        }
+        "/shaders/search/frontier_state.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_state.wgsl"))
+        }
+        "/shaders/search/frontier_expand.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_expand.wgsl"))
+        }
+        "/shaders/search/frontier_forward.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_forward.wgsl"))
+        }
+        "/shaders/search/frontier_policy.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_policy.wgsl"))
+        }
+        "/shaders/search/frontier_neural.wgsl" => {
+            Some(engine_shader!("search/shaders/frontier_neural.wgsl"))
+        }
+        "/shaders/search/movegen.wgsl" => Some(engine_shader!("search/shaders/movegen.wgsl")),
+        "/shaders/search/reply.wgsl" => Some(engine_shader!("search/shaders/reply.wgsl")),
+        "/shaders/search/mutate.wgsl" => Some(engine_shader!("search/shaders/mutate.wgsl")),
+        "/shaders/training/project_features.wgsl" => {
+            Some(engine_shader!("training/shaders/project_features.wgsl"))
+        }
+        "/shaders/training/forward_layer.wgsl" => {
+            Some(engine_shader!("training/shaders/forward_layer.wgsl"))
+        }
+        "/shaders/training/forward_indexed_layer.wgsl" => Some(engine_shader!(
+            "training/shaders/forward_indexed_layer.wgsl"
+        )),
+        "/shaders/training/forward_output.wgsl" => {
+            Some(engine_shader!("training/shaders/forward_output.wgsl"))
+        }
+        "/shaders/training/output_delta.wgsl" => {
+            Some(engine_shader!("training/shaders/output_delta.wgsl"))
+        }
+        "/shaders/training/hidden_delta.wgsl" => {
+            Some(engine_shader!("training/shaders/hidden_delta.wgsl"))
+        }
+        "/shaders/training/hidden3_delta.wgsl" => {
+            Some(engine_shader!("training/shaders/hidden3_delta.wgsl"))
+        }
+        "/shaders/training/apply_layer.wgsl" => {
+            Some(engine_shader!("training/shaders/apply_layer.wgsl"))
+        }
+        "/shaders/training/apply_indexed_layer.wgsl" => {
+            Some(engine_shader!("training/shaders/apply_indexed_layer.wgsl"))
+        }
+        "/shaders/training/apply_output.wgsl" => {
+            Some(engine_shader!("training/shaders/apply_output.wgsl"))
+        }
+        "/shaders/training/policy.wgsl" => Some(engine_shader!("training/shaders/policy.wgsl")),
+        "/shaders/training/policy_loss.wgsl" => {
+            Some(engine_shader!("training/shaders/policy_loss.wgsl"))
+        }
+        "/shaders/training/reduce_loss.wgsl" => {
+            Some(engine_shader!("training/shaders/reduce_loss.wgsl"))
+        }
         _ => None,
     }
 }
@@ -72,10 +146,7 @@ const STATIC_CACHE_CONTROL: &str = "no-cache, max-age=0, must-revalidate";
 
 fn apply_static_headers(response: &mut Response, content_type: &'static str, etag: &str) {
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(content_type),
-    );
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(STATIC_CONTENT_SECURITY_POLICY),
@@ -84,7 +155,10 @@ fn apply_static_headers(response: &mut Response, content_type: &'static str, eta
         header::CACHE_CONTROL,
         HeaderValue::from_static(STATIC_CACHE_CONTROL),
     );
-    headers.insert(header::ETAG, HeaderValue::from_str(etag).expect("valid etag"));
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(etag).expect("valid etag"),
+    );
 }
 
 fn asset_etag(bytes: &[u8]) -> String {
@@ -123,6 +197,7 @@ fn content_type(path: &Path) -> &'static str {
         Some("js") => "text/javascript; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
         Some("wasm") => "application/wasm",
+        Some("wgsl") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
