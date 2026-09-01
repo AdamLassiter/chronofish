@@ -1,6 +1,7 @@
 use super::*;
 use crate::cpu::{
     effort::ai_effort_config,
+    search::CpuSearchStrategy,
     training::{
         default_hall_of_fame_path,
         train_weights,
@@ -11,6 +12,47 @@ use crate::cpu::{
     },
     *,
 };
+
+#[test]
+fn search_ordering_reorders_plans_in_place_by_score_hint() {
+    let game = Game::new();
+    let context = SearchContext::new(EvalWeights::default_tuned(), game.turn, 1_024, None);
+    let movement = |x, y| MoveStep {
+        from: Position {
+            timeline_id: 0,
+            time: 0,
+            x,
+            y: 1,
+        },
+        to: Position {
+            timeline_id: 0,
+            time: 0,
+            x,
+            y,
+        },
+    };
+    let mut plans = vec![
+        TurnPlan {
+            moves: vec![movement(0, 2)],
+            score_hint: 10,
+        },
+        TurnPlan {
+            moves: vec![movement(1, 3)],
+            score_hint: 30,
+        },
+        TurnPlan {
+            moves: vec![movement(2, 2)],
+            score_hint: 20,
+        },
+    ];
+
+    game.apply_search_ordering(&mut plans, &context);
+
+    assert_eq!(
+        plans.iter().map(|plan| plan.score_hint).collect::<Vec<_>>(),
+        vec![30, 20, 10]
+    );
+}
 
 #[test]
 fn bounded_evaluation_is_deterministic_and_respects_fast_limits() {
@@ -616,6 +658,8 @@ fn effort_config_parses_configurable_min_depth() {
 
     assert_eq!(effort.min_depth, Game::DEFAULT_MIN_AI_SEARCH_DEPTH);
     assert!(effort.min_depth <= effort.depth);
+    assert_eq!(effort.search_strategy, CpuSearchStrategy::AlphaBeta);
+    assert_eq!(default_cpu_search_strategy(), CpuSearchStrategy::AlphaBeta);
 }
 
 #[test]

@@ -94,8 +94,12 @@ impl Game {
             .find(|timeline| timeline.id == timeline_id)
     }
 
+    #[inline]
     pub(crate) fn board(&self, timeline_id: i32, time: i32) -> Option<&BoardSnapshot> {
         let boards = &self.timeline(timeline_id)?.boards;
+        if boards.last().is_some_and(|board| board.time == time) {
+            return boards.last();
+        }
         boards
             .binary_search_by_key(&time, |board| board.time)
             .ok()
@@ -113,6 +117,7 @@ impl Game {
         self.latest_time(timeline_id) == Some(time)
     }
 
+    #[inline]
     pub(crate) fn piece_at(&self, position: Position) -> Option<Piece> {
         if !Self::in_bounds(position.x, position.y) {
             return None;

@@ -182,13 +182,19 @@ impl EvaluationCache {
     }
 
     pub(crate) fn get(&self, key: u64) -> Option<i32> {
-        self.slots[key as usize & self.mask]
-            .filter(|slot| slot.key == key)
-            .map(|slot| slot.score)
+        cache_indices(key, self.mask).into_iter().find_map(|index| {
+            self.slots[index]
+                .filter(|slot| slot.key == key)
+                .map(|slot| slot.score)
+        })
     }
 
     pub(crate) fn insert(&mut self, key: u64, score: i32) {
-        let index = key as usize & self.mask;
+        let indices = cache_indices(key, self.mask);
+        let index = indices
+            .into_iter()
+            .find(|index| self.slots[*index].is_none_or(|slot| slot.key == key))
+            .unwrap_or(indices[0]);
         self.slots[index] = Some(EvaluationSlot { key, score });
     }
 }
@@ -203,20 +209,51 @@ impl TranspositionTable {
     }
 
     pub(crate) fn get(&self, key: &u64) -> Option<&SearchEntry> {
-        self.slots[*key as usize & self.mask]
-            .as_ref()
-            .filter(|slot| slot.key == *key)
-            .map(|slot| &slot.entry)
+        cache_indices(*key, self.mask)
+            .into_iter()
+            .find_map(|index| {
+                self.slots[index]
+                    .as_ref()
+                    .filter(|slot| slot.key == *key)
+                    .map(|slot| &slot.entry)
+            })
     }
 
     pub(crate) fn insert(&mut self, key: u64, entry: SearchEntry) {
-        let index = key as usize & self.mask;
-        let replace =
-            self.slots[index].is_none_or(|slot| slot.key == key || entry.depth >= slot.entry.depth);
-        if replace {
+        let indices = cache_indices(key, self.mask);
+        if let Some(index) = indices
+            .into_iter()
+            .find(|index| self.slots[*index].is_some_and(|slot| slot.key == key))
+        {
+            if self.slots[index].is_none_or(|slot| entry.depth >= slot.entry.depth) {
+                self.slots[index] = Some(TranspositionSlot { key, entry });
+            }
+            return;
+        }
+        let index = indices
+            .into_iter()
+            .find(|index| self.slots[*index].is_none())
+            .unwrap_or_else(|| {
+                indices
+                    .into_iter()
+                    .min_by_key(|index| {
+                        self.slots[*index].map_or(i32::MIN, |slot| slot.entry.depth)
+                    })
+                    .unwrap_or(indices[0])
+            });
+        if self.slots[index].is_none_or(|slot| entry.depth >= slot.entry.depth) {
             self.slots[index] = Some(TranspositionSlot { key, entry });
         }
     }
+}
+
+fn cache_indices(key: u64, mask: usize) -> [usize; 2] {
+    let primary = key as usize & mask;
+    let mut secondary = mix64(key ^ 0xa076_1d64_78bd_642f) as usize & mask;
+    if secondary == primary {
+        secondary = primary.wrapping_add(1) & mask;
+    }
+    [primary, secondary]
 }
 
 impl SearchOptions {
@@ -334,4 +371,69 @@ pub(crate) fn mix64(mut value: u64) -> u64 {
     value ^= value >> 27;
     value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluation_cache_retains_two_keys_with_the_same_primary_slot() {
+        let mut cache = EvaluationCache::new(512);
+        let [first, second] = colliding_keys(cache.mask);
+
+        cache.insert(first, 17);
+        cache.insert(second, 29);
+
+        assert_eq!(cache.get(first), Some(17));
+        assert_eq!(cache.get(second), Some(29));
+    }
+
+    #[test]
+    fn transposition_table_retains_two_keys_with_the_same_primary_slot() {
+        let mut table = TranspositionTable::new(1_024);
+        let [first, second] = colliding_keys(table.mask);
+
+        table.insert(first, search_entry(2, 17));
+        table.insert(second, search_entry(3, 29));
+
+        assert_eq!(table.get(&first).map(|entry| entry.score), Some(17));
+        assert_eq!(table.get(&second).map(|entry| entry.score), Some(29));
+    }
+
+    #[test]
+    fn transposition_table_preserves_deeper_entries_on_replacement() {
+        let mut table = TranspositionTable::new(1_024);
+        let key = 37;
+
+        table.insert(key, search_entry(4, 41));
+        table.insert(key, search_entry(2, 19));
+
+        let entry = table.get(&key).expect("deeper entry remains cached");
+        assert_eq!(entry.depth, 4);
+        assert_eq!(entry.score, 41);
+    }
+
+    fn colliding_keys(mask: usize) -> [u64; 2] {
+        let first = 0;
+        let first_secondary = cache_indices(first, mask)[1];
+        let stride = (mask + 1) as u64;
+        let second = (1..10_000)
+            .map(|multiple| multiple * stride)
+            .find(|key| {
+                let [primary, secondary] = cache_indices(*key, mask);
+                primary == 0 && secondary != first_secondary
+            })
+            .expect("a secondary cache slot distinct from the first key");
+        [first, second]
+    }
+
+    fn search_entry(depth: i32, score: i32) -> SearchEntry {
+        SearchEntry {
+            depth,
+            score,
+            bound: SearchBound::Exact,
+            best_move: None,
+        }
+    }
 }

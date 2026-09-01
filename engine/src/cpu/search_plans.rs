@@ -428,12 +428,12 @@ impl Game {
             .tt_best_move
             .then(|| context.table.get(&key).and_then(|entry| entry.best_move))
             .flatten();
-        let mut bonuses: Vec<(i32, usize)> = plans
+        let mut order = plans
             .iter()
             .enumerate()
             .map(|(index, plan)| (self.plan_order_bonus(plan, tt_move, context), index))
-            .collect();
-        bonuses.sort_by(|(left_bonus, left_index), (right_bonus, right_index)| {
+            .collect::<Vec<_>>();
+        order.sort_by(|(left_bonus, left_index), (right_bonus, right_index)| {
             right_bonus.cmp(left_bonus).then_with(|| {
                 plans[*right_index]
                     .score_hint
@@ -441,11 +441,17 @@ impl Game {
                     .then_with(|| Self::turn_plan_cmp(&plans[*left_index], &plans[*right_index]))
             })
         });
-        let ordered = bonuses
-            .into_iter()
-            .map(|(_, index)| plans[index].clone())
-            .collect::<Vec<_>>();
-        plans.clone_from_slice(&ordered);
+        let mut target_by_original = vec![0; order.len()];
+        for (target_index, (_, original_index)) in order.into_iter().enumerate() {
+            target_by_original[original_index] = target_index;
+        }
+        for original_index in 0..target_by_original.len() {
+            while target_by_original[original_index] != original_index {
+                let target_index = target_by_original[original_index];
+                plans.swap(original_index, target_index);
+                target_by_original.swap(original_index, target_index);
+            }
+        }
     }
 
     pub(crate) fn plan_order_bonus(

@@ -9,6 +9,8 @@ const benchmarkTimeMs = positiveNumber(optionValue("--benchmark-time-ms") ?? pro
 const smokeTimeoutMs = positiveNumber(optionValue("--smoke-timeout-ms") ?? process.env.CHRONOFISH_GPU_SMOKE_TIMEOUT_MS, 45_000, 5_000);
 const runPerformanceGates = !hasFlag("--skip-performance-gates");
 const smokeGpuMode = optionValue("--gpu-mode") ?? "full";
+const forceFullGpu = smokeGpuMode === "full" && !hasFlag("--allow-full-fallback");
+const expectFullGpu = smokeGpuMode === "full" && forceFullGpu;
 const allowSoftwareAdapter = hasFlag("--allow-software-adapter");
 const disableNeural = hasFlag("--disable-neural");
 const cpuMinDepthOnly = hasFlag("--cpu-min-depth-only");
@@ -143,19 +145,22 @@ async function main() {
       if (search.authoritativeReplay !== true) {
         throw new Error(fixture.name + " did not report authoritative WASM replay validation.");
       }
+      if (smokeGpuMode === "full" && !forceFullGpu && search.gpuMode !== "hybrid") {
+        throw new Error(fixture.name + " did not report automatic hybrid fallback: " + JSON.stringify(search));
+      }
       if (fixture.minMoves && search.moves.length < fixture.minMoves) {
         throw new Error(fixture.name + " did not complete the expected multi-board turn: " + JSON.stringify(search.moves));
       }
-      if (smokeGpuMode === "full" && (!search.gpuDiagnostics || search.gpuDiagnostics.readbacks !== 1)) {
+      if (expectFullGpu && (!search.gpuDiagnostics || search.gpuDiagnostics.readbacks !== 1)) {
         throw new Error(fixture.name + " did not report the expected single-readback frontier diagnostics.");
       }
-      if (smokeGpuMode === "full" && search.gpuSearch !== "neural-frontier" && search.gpuSearch !== "heuristic-frontier") {
+      if (expectFullGpu && search.gpuSearch !== "neural-frontier" && search.gpuSearch !== "heuristic-frontier") {
         throw new Error(fixture.name + " did not use the resident frontier path: " + JSON.stringify(search));
       }
-      if (smokeGpuMode === "full" && search.gpuDiagnostics.candidateOverflow) {
+      if (expectFullGpu && search.gpuDiagnostics.candidateOverflow) {
         throw new Error(fixture.name + " reported a capacity-truncated frontier: " + JSON.stringify(search.gpuDiagnostics));
       }
-      if (smokeGpuMode === "full" && (search.gpuDiagnostics.nodes ?? 0) > 0 && search.gpuDiagnostics.selectedCount < Math.min(search.gpuDiagnostics.frontierWidth ?? 0, search.gpuDiagnostics.nodes ?? 0)) {
+      if (expectFullGpu && (search.gpuDiagnostics.nodes ?? 0) > 0 && search.gpuDiagnostics.selectedCount < Math.min(search.gpuDiagnostics.frontierWidth ?? 0, search.gpuDiagnostics.nodes ?? 0)) {
         throw new Error(fixture.name + " underfilled the resident frontier: " + JSON.stringify(search.gpuDiagnostics));
       }
       console.log(JSON.stringify({
@@ -283,6 +288,7 @@ function cpuMinimumDepthExpression() {
     minDepth: 3,
     nodes: 20_000,
     timeMs: 1,
+    searchStrategy: "alpha-beta",
     partitionIndex: 0
   };
   return "new Promise((resolve) => {"
@@ -343,6 +349,7 @@ function workerSmokeExpression(fixture) {
     nodes: fixture.nodes,
     timeMs: 15_000,
     gpuMode: smokeGpuMode,
+    forceFullGpu,
     disableNeural,
     randomSeed: 12345
   };
@@ -361,6 +368,7 @@ function staleGenerationExpression(slowGame, fastGame) {
     nodes: 1024,
     timeMs: 15_000,
     gpuMode: smokeGpuMode,
+    forceFullGpu,
     disableNeural,
     randomSeed: 12345
   };
@@ -371,6 +379,7 @@ function staleGenerationExpression(slowGame, fastGame) {
     nodes: 64,
     timeMs: 15_000,
     gpuMode: smokeGpuMode,
+    forceFullGpu,
     disableNeural,
     randomSeed: 12345
   };
@@ -403,6 +412,7 @@ function deviceLossExpression(game) {
     nodes: 64,
     timeMs: 15_000,
     gpuMode: smokeGpuMode,
+    forceFullGpu,
     disableNeural,
     randomSeed: 12345
   };
@@ -415,7 +425,7 @@ function deviceLossExpression(game) {
     + "const timeout = setTimeout(() => { worker.terminate(); resolve({ ok: false, error: 'timed out waiting for device-loss check: ' + JSON.stringify(messages) }); }, 45000);"
     + "function fail(error) { clearTimeout(timeout); worker.terminate(); resolve({ ok: false, error }); }"
     + "function assertFrontier(message, label) {"
-    + "const needsFrontierDiagnostics = " + JSON.stringify(smokeGpuMode === "full") + ";"
+    + "const needsFrontierDiagnostics = " + JSON.stringify(expectFullGpu) + ";"
     + "if (!message.ok || !message.result || message.result.status !== 'ok' || message.result.authoritativeReplay !== true || (needsFrontierDiagnostics && (!message.result.gpuDiagnostics || message.result.gpuDiagnostics.readbacks !== 1 || message.result.gpuDiagnostics.candidateOverflow || message.result.gpuDiagnostics.selectedCount < Math.min(message.result.gpuDiagnostics.frontierWidth || 0, message.result.gpuDiagnostics.nodes || 0) || (message.result.gpuSearch !== 'neural-frontier' && message.result.gpuSearch !== 'heuristic-frontier')))) {"
     + "fail(label + ' did not return resident frontier diagnostics: ' + JSON.stringify(message));"
     + "return false;"

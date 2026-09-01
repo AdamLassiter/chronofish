@@ -26,7 +26,12 @@ test("GPU effort presets are model data with minimum depths", async () => {
     assert.ok(effort[name].minDepth <= effort[name].depth);
     assert.equal(typeof effort[name].nodes, "number");
     assert.equal(typeof effort[name].timeMs, "number");
+    assert.equal(effort[name].minDepth, 2);
   }
+  assert.deepEqual(
+    [effort.fast.timeMs, effort.balanced.timeMs, effort.expert.timeMs],
+    [1_500, 5_000, 15_000]
+  );
 });
 
 test("frontend loads GPU effort separately from CPU effort", async () => {
@@ -37,7 +42,7 @@ test("frontend loads GPU effort separately from CPU effort", async () => {
   assert.match(main, /bot-gpu-custom/);
 });
 
-test("CPU efforts default to beam search and custom CPU difficulty can override it", async () => {
+test("CPU efforts use bounded alpha-beta search and custom CPU difficulty can override it", async () => {
   const [effortText, main, controller, worker, binding, wasmApi, engineTypes] = await Promise.all([
     readFile(path.join(repoRoot, "engine/models/cpu-v1/effort.json"), "utf8"),
     readFile(path.join(webRoot, "src/main.ts"), "utf8"),
@@ -50,12 +55,18 @@ test("CPU efforts default to beam search and custom CPU difficulty can override 
   const effort = JSON.parse(effortText);
 
   for (const name of ["fast", "balanced", "expert"]) {
-    assert.equal(effort[name].searchStrategy, "beam");
+    assert.equal(effort[name].searchStrategy, "alpha-beta");
+    assert.equal(effort[name].minDepth, 2);
   }
-  assert.match(main, /searchStrategy: "beam"/);
-  assert.match(main, /candidate\.searchStrategy === "alpha-beta" \? "alpha-beta" : "beam"/);
+  assert.deepEqual(
+    [effort.fast.timeMs, effort.balanced.timeMs, effort.expert.timeMs],
+    [1_500, 5_000, 15_000]
+  );
+  assert.match(main, /timeMs: 5_000,[\s\S]*searchStrategy: "alpha-beta"/);
+  assert.match(main, /candidate\.searchStrategy === "beam" \? "beam" : "alpha-beta"/);
   assert.match(main, /customCpuSearchStrategyInput/);
   assert.match(controller, /searchStrategy: effort\.searchStrategy/);
+  assert.match(controller, /effort\.searchStrategy === "beam"[\s\S]*targetDepth: 1, minDepth: 1/);
   assert.match(worker, /searchStrategy\?: "alpha-beta" \| "beam"/);
   assert.match(binding, /engine\.chronofish_cpu_search_json\(ptr, len\)/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_search_json/);
@@ -68,7 +79,7 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   const wasmApi = await readFile(path.join(repoRoot, "engine/src/wasm_api.rs"), "utf8");
   const engineTypes = await readFile(path.join(webRoot, "src/types.ts"), "utf8");
 
-  assert.match(controller, /const searchConfig = botSearchConfig\(effort\)/);
+  assert.match(controller, /const searchConfig = botSearchConfig\(effort, backend, gpuMode\)/);
   assert.match(controller, /targetDepth: searchConfig\.targetDepth/);
   assert.match(controller, /minDepth: searchConfig\.minDepth/);
   assert.match(controller, /nodes: searchConfig\.nodes/);
@@ -100,6 +111,8 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /is completing depth/);
   assert.match(controller, /selectDeepestStoredResult\(pending\)/);
   assert.match(controller, /startMinimumDepthCpuFallback\(pending\)/);
+  assert.match(controller, /searchStrategy: "alpha-beta"/);
+  assert.match(controller, /if \(\(bestResult\?\.depth \?\? 0\) >= pending\.minDepth\)[\s\S]*finishBotSearch\(pending, "complete"\)/);
   assert.match(controller, /is completing minimum depth/);
   assert.match(controller, /minDepth: pending\.minDepth/);
   assert.match(controller, /pending\.bestByDepth\.set\(entry\.depth, depthBest\)/);
@@ -122,6 +135,18 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(engineTypes, /chronofish_bot_worker_search_time_ms\(timeMs: number\): number/);
   assert.match(engineTypes, /chronofish_bot_completed_search_depth\(resultDepth: number, requestedDepth: number, resultEndsInRoyalCapture: number\): number/);
   assert.match(engineTypes, /chronofish_bot_result_ends_in_royal_capture_json\(ptr: number, length: number\): number/);
+});
+
+test("GPU bots default to the deep frontier while hybrid mode stops honestly at depth two", async () => {
+  const controller = await readFile(path.join(webRoot, "src/bot-controller.ts"), "utf8");
+
+  assert.match(controller, /localStorage\.getItem\(GPU_MODE_STORAGE_KEY\) === "hybrid" \? "hybrid" : "full"/);
+  assert.match(controller, /backend === "gpu" && gpuMode === "hybrid"/);
+  assert.match(controller, /targetDepth: Math\.min\(config\.targetDepth, 2\)/);
+  assert.match(controller, /minDepth: Math\.min\(config\.minDepth, 2\)/);
+  assert.match(controller, /gpuMode: pending\.gpuMode/);
+  assert.match(controller, /result\.gpuMode === "hybrid"/);
+  assert.match(controller, /pending\.targetDepth = Math\.min\(pending\.targetDepth, 2\)/);
 });
 
 test("bot countdown switches to overtime after the nominal deadline", async () => {

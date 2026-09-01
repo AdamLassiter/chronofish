@@ -74,6 +74,7 @@ fn native_cpu_search_returns_web_worker_compatible_json() {
         min_depth: Some(1),
         nodes: 64,
         time_ms: 1_000,
+        search_strategy: CpuSearchStrategy::Beam,
         ..CpuSearchRequest::default()
     })
     .expect("run native CPU search");
@@ -90,9 +91,9 @@ fn native_cpu_search_returns_web_worker_compatible_json() {
 #[test]
 fn native_cpu_search_can_use_alpha_beta_when_requested() {
     let response = search(CpuSearchRequest {
-        depth: 1,
-        min_depth: Some(1),
-        nodes: 64,
+        depth: 2,
+        min_depth: Some(2),
+        nodes: 20_000,
         time_ms: 1_000,
         search_strategy: CpuSearchStrategy::AlphaBeta,
         ..CpuSearchRequest::default()
@@ -102,6 +103,28 @@ fn native_cpu_search_can_use_alpha_beta_when_requested() {
     let value: serde_json::Value =
         serde_json::from_str(&response.result_json).expect("CPU search JSON should parse");
     assert_eq!(value["status"], "ok");
+    assert_eq!(value["depth"], 2);
+    assert!(value["principalVariation"]
+        .as_array()
+        .is_some_and(|pv| pv.len() >= 2));
+}
+
+#[test]
+fn native_cpu_beam_search_reports_its_actual_one_ply_depth() {
+    let response = search(CpuSearchRequest {
+        depth: 8,
+        min_depth: Some(6),
+        nodes: 200_000,
+        time_ms: 1_000,
+        search_strategy: CpuSearchStrategy::Beam,
+        ..CpuSearchRequest::default()
+    })
+    .expect("run beam CPU search");
+
+    let value: serde_json::Value =
+        serde_json::from_str(&response.result_json).expect("CPU search JSON should parse");
+    assert_eq!(value["status"], "beam");
+    assert_eq!(value["depth"], 1);
 }
 
 #[test]
@@ -132,7 +155,7 @@ fn cpu_worker_search_config_matches_browser_worker_contract() {
     assert_eq!(value["minDepth"], 4);
     assert_eq!(value["nodes"], 127);
     assert_eq!(value["timeMs"], 250);
-    assert_eq!(value["searchStrategy"], "beam");
+    assert_eq!(value["searchStrategy"], "alpha-beta");
 
     let defaults = cpu_worker_search_config_json("{}").expect("default CPU worker search config");
     let value: serde_json::Value =
@@ -141,7 +164,7 @@ fn cpu_worker_search_config_matches_browser_worker_contract() {
     assert!(value.get("minDepth").is_none());
     assert_eq!(value["nodes"], 64);
     assert_eq!(value["timeMs"], 10_000);
-    assert_eq!(value["searchStrategy"], "beam");
+    assert_eq!(value["searchStrategy"], "alpha-beta");
 
     let bounded = cpu_worker_search_config_json(
         r#"{
@@ -158,7 +181,7 @@ fn cpu_worker_search_config_matches_browser_worker_contract() {
     assert_eq!(value["minDepth"], 1);
     assert_eq!(value["nodes"], 64);
     assert_eq!(value["timeMs"], 1);
-    assert_eq!(value["searchStrategy"], "beam");
+    assert_eq!(value["searchStrategy"], "alpha-beta");
 
     let alpha_beta = cpu_worker_search_config_json(r#"{"searchStrategy":"alpha-beta"}"#)
         .expect("alpha-beta CPU worker search config");

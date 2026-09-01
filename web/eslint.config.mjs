@@ -37,6 +37,9 @@ const nodeGlobals = {
   console: "readonly",
   process: "readonly",
   setTimeout: "readonly",
+  TextDecoder: "readonly",
+  TextEncoder: "readonly",
+  WebAssembly: "readonly",
   WebSocket: "readonly"
 };
 

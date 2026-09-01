@@ -232,8 +232,8 @@ pub struct CpuSearchRequest {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CpuSearchStrategy {
-    AlphaBeta,
     #[default]
+    AlphaBeta,
     Beam,
 }
 
@@ -246,7 +246,7 @@ impl Default for CpuSearchRequest {
             min_depth: Some(crate::Game::DEFAULT_MIN_AI_SEARCH_DEPTH),
             nodes: DEFAULT_CPU_SEARCH_NODES,
             time_ms: DEFAULT_CPU_SEARCH_TIME_MS,
-            search_strategy: CpuSearchStrategy::Beam,
+            search_strategy: CpuSearchStrategy::AlphaBeta,
         }
     }
 }
@@ -302,7 +302,7 @@ pub(crate) fn search_game_json(
     }
 }
 
-fn beam_search_result(game: &Game, nodes: i32) -> AiSearchResult {
+pub(crate) fn beam_search_result(game: &Game, nodes: i32) -> AiSearchResult {
     let nodes = nodes.max(1) as usize;
     let weights = EvalWeights::active_tuned();
     let mut context = SearchContext::new(weights, game.turn, nodes, None);

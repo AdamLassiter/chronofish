@@ -895,7 +895,7 @@ export async function trainPolicy(
     if (!hasPolicyTrainingTarget(sample, engine)) {
       continue;
     }
-    targets[index] = policyTrainingTarget(sample.policy, engine);
+    targets[index] = policyTrainingTarget(sample.policy ?? undefined, engine);
     labelWeights[index] = trainingLabelWeight(sample.labelWeight, engine);
   }
   const weightCount = POLICY_BUCKETS * (inputSize + 1);
@@ -2587,7 +2587,7 @@ function policyHeadLossOnCpu(
     for (const logit of logits) {
       denominator += Math.exp(logit - maxLogit);
     }
-    const target = policyTrainingTarget(samples[index]!.policy);
+    const target = policyTrainingTarget(samples[index]!.policy ?? undefined);
     const weight = trainingLabelWeight(samples[index]!.labelWeight);
     total += weight * (Math.log(Math.max(denominator, 1e-12)) - (logits[target]! - maxLogit));
     totalWeight += weight;
@@ -2625,7 +2625,7 @@ function applyPolicyHeadGradientOnCpu(
       logits[bucket] = Math.exp(logits[bucket]! - maxLogit);
       denominator += logits[bucket]!;
     }
-    const target = policyTrainingTarget(samples[sampleIndex]!.policy);
+    const target = policyTrainingTarget(samples[sampleIndex]!.policy ?? undefined);
     const sampleWeight = trainingLabelWeight(samples[sampleIndex]!.labelWeight);
     for (let bucket = 0; bucket < POLICY_BUCKETS; bucket += 1) {
       const delta = ((logits[bucket]! / denominator) - (bucket === target ? 1 : 0)) * sampleWeight;
@@ -2736,7 +2736,7 @@ export async function predictValuesOnGpu(device: GPUDevice, samples: TrainingSam
       0
     )
   );
-  const forwardOutputParams = outputParamsBuffer(device, sampleCount, finalHiddenSize, 0, engine);
+  const forwardOutputParams = outputParamsBuffer(device, sampleCount, finalHiddenSize, 0, 0, 0, engine);
   const forwardLayerEntryPoint = denseKernelEntryPoint("forward_layer", sampleCount, engine);
   const shaders = await loadTrainingShaders();
   const forwardLayerPipeline = await createComputePipelineChecked(device, `forward_layer_${denseKernelLabelSuffix("forward_layer", forwardLayerEntryPoint)}`, shaders.forwardLayer, forwardLayerEntryPoint);

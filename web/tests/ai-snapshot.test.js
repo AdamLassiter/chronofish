@@ -62,7 +62,7 @@ async function buildTestModules() {
       path.join(root, "src/engine-io.ts")
     ],
     outdir,
-    bundle: false,
+    bundle: true,
     format: "esm",
     platform: "node",
     target: "es2022",

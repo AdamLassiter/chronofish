@@ -1,16 +1,18 @@
 import { GPUBufferUsage } from "./ai-worker-types.js";
 
-const pipelineCache = new Map<string, GPUComputePipeline>();
+let pipelineCaches = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>();
 
 export function storageBuffer(device: GPUDevice, data: ArrayBuffer | ArrayBufferView, usage: number): GPUBuffer {
-  const bytes = data instanceof ArrayBuffer
-    ? data
-    : data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  const byteLength = data.byteLength;
   const buffer = device.createBuffer({
-    size: align4(bytes.byteLength),
+    size: align4(byteLength),
     usage: usage | GPUBufferUsage.COPY_DST
   });
-  device.queue.writeBuffer(buffer, 0, bytes);
+  if (data instanceof ArrayBuffer) {
+    device.queue.writeBuffer(buffer, 0, data);
+  } else {
+    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+  }
   return buffer;
 }
 
@@ -41,6 +43,11 @@ export async function requestHighLimitDevice(adapter: GPUAdapter): Promise<GPUDe
 
 export async function createComputePipelineChecked(device: GPUDevice, label: string, code: string, entryPoint: string): Promise<GPUComputePipeline> {
   const cacheKey = `${label}:${entryPoint}`;
+  let pipelineCache = pipelineCaches.get(device);
+  if (!pipelineCache) {
+    pipelineCache = new Map<string, GPUComputePipeline>();
+    pipelineCaches.set(device, pipelineCache);
+  }
   const cached = pipelineCache.get(cacheKey);
   if (cached) {
     return cached;
@@ -63,7 +70,7 @@ export async function createComputePipelineChecked(device: GPUDevice, label: str
 }
 
 export function clearComputePipelineCache(): void {
-  pipelineCache.clear();
+  pipelineCaches = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>();
 }
 
 export function formatShaderErrors(label: string, errors: GPUCompilationMessage[]): string {

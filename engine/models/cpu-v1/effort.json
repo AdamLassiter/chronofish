@@ -9,8 +9,8 @@
     "depth": 4,
     "minDepth": 2,
     "nodes": 20000,
-    "timeMs": 10000,
-    "searchStrategy": "beam"
+    "timeMs": 1500,
+    "searchStrategy": "alpha-beta"
   },
   "balanced": {
     "label": "Bot: Balanced",
@@ -20,10 +20,10 @@
       "Causality Capablanca"
     ],
     "depth": 6,
-    "minDepth": 4,
+    "minDepth": 2,
     "nodes": 80000,
-    "timeMs": 50000,
-    "searchStrategy": "beam"
+    "timeMs": 5000,
+    "searchStrategy": "alpha-beta"
   },
   "expert": {
     "label": "Bot: Expert",
@@ -33,9 +33,9 @@
       "Anandromeda"
     ],
     "depth": 8,
-    "minDepth": 6,
+    "minDepth": 2,
     "nodes": 200000,
-    "timeMs": 250000,
-    "searchStrategy": "beam"
+    "timeMs": 15000,
+    "searchStrategy": "alpha-beta"
   }
 }

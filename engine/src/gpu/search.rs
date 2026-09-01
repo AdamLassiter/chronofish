@@ -784,29 +784,54 @@ pub fn gpu_square_record_from_code(input: GpuSquareRecordInput) -> [i32; GPU_SOU
 pub fn gpu_target_square_records_for_board(
     board: &GpuSquareRecordBoardInput,
 ) -> Vec<GpuCandidateSquareRecord> {
-    gpu_square_records_for_board(board, false)
+    gpu_square_records_for_board(
+        board.timeline_id,
+        board.time,
+        board.timeline_row,
+        board.side_to_move,
+        board.owner,
+        board.latest,
+        &board.squares,
+        false,
+    )
 }
 
 pub fn gpu_source_square_records_for_board(
     board: &GpuSquareRecordBoardInput,
 ) -> Vec<GpuCandidateSquareRecord> {
-    gpu_square_records_for_board(board, true)
+    gpu_square_records_for_board(
+        board.timeline_id,
+        board.time,
+        board.timeline_row,
+        board.side_to_move,
+        board.owner,
+        board.latest,
+        &board.squares,
+        true,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gpu_square_records_for_board(
-    board: &GpuSquareRecordBoardInput,
+    timeline_id: i32,
+    time: i32,
+    timeline_row: i32,
+    side_to_move: i32,
+    owner: i32,
+    latest: bool,
+    squares: &[i32],
     occupied_only: bool,
 ) -> Vec<GpuCandidateSquareRecord> {
-    let mut records = Vec::with_capacity(if occupied_only { 0 } else { 64 });
+    let mut records = Vec::with_capacity(if occupied_only { 32 } else { 64 });
     for y in 0..8 {
         for x in 0..8 {
-            let piece_code = *board.squares.get(y * 8 + x).unwrap_or(&0);
+            let piece_code = *squares.get(y * 8 + x).unwrap_or(&0);
             if occupied_only && (piece_code & 255) == 0 {
                 continue;
             }
             let meta = GpuCandidatePosition {
-                timeline_id: board.timeline_id,
-                time: board.time,
+                timeline_id,
+                time,
                 x: x as i32,
                 y: y as i32,
             };
@@ -814,14 +839,14 @@ fn gpu_square_records_for_board(
                 meta,
                 words: gpu_square_record_from_code(GpuSquareRecordInput {
                     piece_code,
-                    timeline_id: board.timeline_id,
-                    time: board.time,
+                    timeline_id,
+                    time,
                     x: x as i32,
                     y: y as i32,
-                    timeline_row: board.timeline_row,
-                    side_to_move: board.side_to_move,
-                    owner: board.owner,
-                    latest: board.latest,
+                    timeline_row,
+                    side_to_move,
+                    owner,
+                    latest,
                 }),
             });
         }
@@ -832,40 +857,76 @@ fn gpu_square_records_for_board(
 pub fn gpu_candidate_board_records_from_snapshot(
     board: &GpuCandidateBoardInput,
 ) -> GpuCandidateBoardRecords {
-    let board_record = gpu_board_record_from_snapshot(&GpuBoardRecordInput {
-        timeline_id: board.timeline_id,
-        timeline_row: board.timeline_row,
-        time: board.time,
-        side_to_move: board.side_to_move,
-        castling: board.castling,
-        en_passant: board.en_passant,
-        squares: board.squares.clone(),
-    });
-    let mutation_board = gpu_mutation_board_record_from_snapshot(&GpuMutationBoardRecordInput {
-        timeline_index: board.timeline_index,
-        timeline_id: board.timeline_id,
-        time: board.time,
-        side_to_move: board.side_to_move,
-        castling: board.castling,
-        en_passant: board.en_passant,
-        latest: board.latest,
-        origin_kind: board.origin_kind,
-        squares: board.squares.clone(),
-    });
-    let square_board = GpuSquareRecordBoardInput {
-        timeline_id: board.timeline_id,
-        time: board.time,
-        timeline_row: board.timeline_row,
-        side_to_move: board.side_to_move,
-        owner: board.owner,
-        latest: board.latest,
-        squares: board.squares.clone(),
-    };
+    gpu_candidate_board_records(
+        board.timeline_id,
+        board.timeline_row,
+        board.timeline_index,
+        board.time,
+        board.side_to_move,
+        board.owner,
+        board.castling,
+        board.en_passant,
+        board.latest,
+        board.origin_kind,
+        &board.squares,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gpu_candidate_board_records(
+    timeline_id: i32,
+    timeline_row: i32,
+    timeline_index: i32,
+    time: i32,
+    side_to_move: i32,
+    owner: i32,
+    castling: i32,
+    en_passant: Option<GpuEnPassantRecord>,
+    latest: bool,
+    origin_kind: i32,
+    squares: &[i32],
+) -> GpuCandidateBoardRecords {
     GpuCandidateBoardRecords {
-        board: board_record,
-        mutation_board,
-        sources: gpu_source_square_records_for_board(&square_board),
-        targets: gpu_target_square_records_for_board(&square_board),
+        board: gpu_board_record(
+            timeline_id,
+            timeline_row,
+            time,
+            side_to_move,
+            castling,
+            en_passant,
+            squares,
+        ),
+        mutation_board: gpu_mutation_board_record(
+            timeline_index,
+            timeline_id,
+            time,
+            side_to_move,
+            castling,
+            en_passant,
+            latest,
+            origin_kind,
+            squares,
+        ),
+        sources: gpu_square_records_for_board(
+            timeline_id,
+            time,
+            timeline_row,
+            side_to_move,
+            owner,
+            latest,
+            squares,
+            true,
+        ),
+        targets: gpu_square_records_for_board(
+            timeline_id,
+            time,
+            timeline_row,
+            side_to_move,
+            owner,
+            latest,
+            squares,
+            false,
+        ),
     }
 }
 
@@ -895,30 +956,22 @@ pub fn gpu_candidate_inputs_from_timelines(
         let Some(timeline) = timelines.get(timeline_index) else {
             continue;
         };
-        let latest_time = gpu_latest_board_index(
-            &timeline
-                .boards
-                .iter()
-                .map(|board| board.time)
-                .collect::<Vec<_>>(),
-        )
-        .and_then(|index| timeline.boards.get(index))
-        .map(|board| board.time);
+        let latest_time = timeline.boards.iter().map(|board| board.time).max();
 
         for board in &timeline.boards {
-            let records = gpu_candidate_board_records_from_snapshot(&GpuCandidateBoardInput {
-                timeline_id: timeline.id,
-                timeline_row: timeline.row,
-                timeline_index: 0,
-                time: board.time,
-                side_to_move: board.side_to_move,
-                owner: timeline.owner,
-                castling: board.castling,
-                en_passant: board.en_passant,
-                latest: latest_time.is_some_and(|latest| board.time == latest),
-                origin_kind: board.origin_kind,
-                squares: board.squares.clone(),
-            });
+            let records = gpu_candidate_board_records(
+                timeline.id,
+                timeline.row,
+                timeline_index as i32,
+                board.time,
+                board.side_to_move,
+                timeline.owner,
+                board.castling,
+                board.en_passant,
+                latest_time.is_some_and(|latest| board.time == latest),
+                board.origin_kind,
+                &board.squares,
+            );
             output.boards.extend(records.board);
             output.mutation_boards.extend(records.mutation_board);
             for target in records.targets {
@@ -1341,34 +1394,68 @@ fn gpu_candidate_inputs_from_game(game: &Game) -> GpuCandidateInputs {
 }
 
 pub fn gpu_board_record_from_snapshot(board: &GpuBoardRecordInput) -> Vec<i32> {
-    let mut record = Vec::with_capacity(GPU_BOARD_STRIDE);
-    record.extend_from_slice(&[
+    gpu_board_record(
         board.timeline_id,
         board.timeline_row,
         board.time,
         board.side_to_move,
         board.castling,
-    ]);
-    push_en_passant_record(&mut record, board.en_passant);
+        board.en_passant,
+        &board.squares,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gpu_board_record(
+    timeline_id: i32,
+    timeline_row: i32,
+    time: i32,
+    side_to_move: i32,
+    castling: i32,
+    en_passant: Option<GpuEnPassantRecord>,
+    squares: &[i32],
+) -> Vec<i32> {
+    let mut record = Vec::with_capacity(GPU_BOARD_STRIDE);
+    record.extend_from_slice(&[timeline_id, timeline_row, time, side_to_move, castling]);
+    push_en_passant_record(&mut record, en_passant);
     for index in 0..64 {
-        record.push(*board.squares.get(index).unwrap_or(&0));
+        record.push(*squares.get(index).unwrap_or(&0));
     }
     record
 }
 
 pub fn gpu_mutation_board_record_from_snapshot(board: &GpuMutationBoardRecordInput) -> Vec<i32> {
-    let mut record = Vec::with_capacity(GPU_MUTATION_BOARD_STRIDE);
-    record.extend_from_slice(&[
+    gpu_mutation_board_record(
         board.timeline_index,
         board.timeline_id,
         board.time,
         board.side_to_move,
         board.castling,
-    ]);
-    push_en_passant_record(&mut record, board.en_passant);
-    record.extend_from_slice(&[i32::from(board.latest), board.origin_kind, 0]);
+        board.en_passant,
+        board.latest,
+        board.origin_kind,
+        &board.squares,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gpu_mutation_board_record(
+    timeline_index: i32,
+    timeline_id: i32,
+    time: i32,
+    side_to_move: i32,
+    castling: i32,
+    en_passant: Option<GpuEnPassantRecord>,
+    latest: bool,
+    origin_kind: i32,
+    squares: &[i32],
+) -> Vec<i32> {
+    let mut record = Vec::with_capacity(GPU_MUTATION_BOARD_STRIDE);
+    record.extend_from_slice(&[timeline_index, timeline_id, time, side_to_move, castling]);
+    push_en_passant_record(&mut record, en_passant);
+    record.extend_from_slice(&[i32::from(latest), origin_kind, 0]);
     for index in 0..64 {
-        record.push(*board.squares.get(index).unwrap_or(&0));
+        record.push(*squares.get(index).unwrap_or(&0));
     }
     record
 }

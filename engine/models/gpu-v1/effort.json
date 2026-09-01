@@ -9,7 +9,7 @@
     "depth": 4,
     "minDepth": 2,
     "nodes": 20000,
-    "timeMs": 20000
+    "timeMs": 1500
   },
   "balanced": {
     "label": "GPU Bot: Balanced",
@@ -19,9 +19,9 @@
       "Komodo Chrono"
     ],
     "depth": 6,
-    "minDepth": 4,
+    "minDepth": 2,
     "nodes": 80000,
-    "timeMs": 100000
+    "timeMs": 5000
   },
   "expert": {
     "label": "GPU Bot: Expert",
@@ -31,8 +31,8 @@
       "Houdini's Horizon"
     ],
     "depth": 8,
-    "minDepth": 6,
+    "minDepth": 2,
     "nodes": 200000,
-    "timeMs": 500000
+    "timeMs": 15000
   }
 }

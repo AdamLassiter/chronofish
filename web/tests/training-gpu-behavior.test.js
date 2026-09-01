@@ -830,7 +830,7 @@ test("projection temporary budget delegates device-limit policy to engine", asyn
   const wasmApi = await readFile(path.join(path.dirname(root), "engine/src/wasm_api.rs"), "utf8");
   const engineTraining = await readFile(path.join(path.dirname(root), "engine/src/gpu/training.rs"), "utf8");
   assert.match(trainingGpu, /const temporaryBudget = projectionTemporaryBudget\(device, engine\)/);
-  assert.match(trainingGpu, /engine\.chronofish_projection_temporary_budget\(maxBufferSize\)/);
+  assert.match(trainingGpu, /engineGpuTrainingPolicy\.numeric\(engine, "chronofish_projection_temporary_budget", maxBufferSize\)/);
   assert.match(engineTypes, /chronofish_projection_temporary_budget\(maxBufferSize: number\): number/);
   assert.match(wasmApi, /pub extern "C" fn chronofish_projection_temporary_budget/);
   assert.match(engineTraining, /pub fn projection_temporary_budget/);
@@ -1780,30 +1780,6 @@ function sample(positionKey, overrides = {}) {
     labelWeight: 1,
     ...overrides
   };
-}
-
-function move(fromTimeline, fromTime, fromX, fromY, toTimeline, toTime, toX, toY) {
-  return {
-    from: { timelineId: fromTimeline, time: fromTime, x: fromX, y: fromY },
-    to: { timelineId: toTimeline, time: toTime, x: toX, y: toY }
-  };
-}
-
-function board(time, sideToMove, boardSquares) {
-  return {
-    time,
-    sideToMove,
-    castling: 0,
-    enPassant: null,
-    origin: null,
-    board: boardSquares
-  };
-}
-
-function pieceAt(x, y, color, type) {
-  const squares = Array.from({ length: 8 }, () => Array(8).fill(null));
-  squares[y][x] = { color, type };
-  return squares;
 }
 
 async function buildTrainingModules() {

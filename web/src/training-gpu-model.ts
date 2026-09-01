@@ -332,8 +332,8 @@ function compactModelFromJson(value: CompactValueModelJson): CompactValueModel {
     auxiliaryValueWeights: new Float32Array(value.auxiliaryValueWeights ?? []),
     policyWeights: new Float32Array(value.policyWeights ?? []),
     policyLogits: new Float32Array(value.policyLogits ?? []),
-    scale: value.scale,
-    bias: value.bias,
-    outputActivation: value.outputActivation
+    ...(value.scale === undefined ? {} : { scale: value.scale }),
+    ...(value.bias === undefined ? {} : { bias: value.bias }),
+    ...(value.outputActivation === undefined ? {} : { outputActivation: value.outputActivation })
   };
 }

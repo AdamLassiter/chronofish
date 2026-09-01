@@ -170,8 +170,8 @@ const DEFAULT_CUSTOM_CPU_EFFORT: CustomCpuEffortConfig = {
   depth: 4,
   minDepth: 2,
   nodes: 80_000,
-  timeMs: 50_000,
-  searchStrategy: "beam"
+  timeMs: 5_000,
+  searchStrategy: "alpha-beta"
 };
 let customCpuEffort: CustomCpuEffortConfig = loadCustomCpuEffort();
 const DEFAULT_CUSTOM_GPU_EFFORT: CustomGpuEffortConfig = {
@@ -180,7 +180,7 @@ const DEFAULT_CUSTOM_GPU_EFFORT: CustomGpuEffortConfig = {
   depth: 4,
   minDepth: 2,
   nodes: 80_000,
-  timeMs: 50_000
+  timeMs: 5_000
 };
 let customGpuEffort: CustomGpuEffortConfig = loadCustomGpuEffort();
 let game: GameSnapshot = {
@@ -411,7 +411,7 @@ function normalizeCustomCpuEffort(value: unknown): CustomCpuEffortConfig {
     minDepth: Math.min(depth, clampInteger(candidate.minDepth, 1, 16, DEFAULT_CUSTOM_CPU_EFFORT.minDepth)),
     nodes: clampInteger(candidate.nodes, 1, 1_000_000, DEFAULT_CUSTOM_CPU_EFFORT.nodes),
     timeMs: clampInteger(candidate.timeMs, 1, 600_000, DEFAULT_CUSTOM_CPU_EFFORT.timeMs),
-    searchStrategy: candidate.searchStrategy === "alpha-beta" ? "alpha-beta" : "beam"
+    searchStrategy: candidate.searchStrategy === "beam" ? "beam" : "alpha-beta"
   };
 }
 
@@ -452,7 +452,7 @@ function syncCustomCpuInputs(): void {
   elements.customCpuMinDepthInput.value = String(customCpuEffort.minDepth);
   elements.customCpuNodesInput.value = String(customCpuEffort.nodes);
   elements.customCpuTimeMsInput.value = String(customCpuEffort.timeMs);
-  elements.customCpuSearchStrategyInput.value = customCpuEffort.searchStrategy ?? "beam";
+  elements.customCpuSearchStrategyInput.value = customCpuEffort.searchStrategy ?? "alpha-beta";
 }
 
 function readCustomCpuInputs(): CustomCpuEffortConfig {
@@ -488,7 +488,7 @@ function resetCustomCpuModal(): void {
   elements.customCpuMinDepthInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.minDepth);
   elements.customCpuNodesInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.nodes);
   elements.customCpuTimeMsInput.value = String(DEFAULT_CUSTOM_CPU_EFFORT.timeMs);
-  elements.customCpuSearchStrategyInput.value = DEFAULT_CUSTOM_CPU_EFFORT.searchStrategy ?? "beam";
+  elements.customCpuSearchStrategyInput.value = DEFAULT_CUSTOM_CPU_EFFORT.searchStrategy ?? "alpha-beta";
 }
 
 function saveCustomGpuEffort(next: CustomGpuEffortConfig): void {

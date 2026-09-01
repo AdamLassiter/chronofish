@@ -6,6 +6,8 @@ use std::{
 
 use crate::{
     cpu::{
+        search::beam_search_result,
+        AiSearchResult,
         EvalWeights,
         EvaluationLimits,
         EvaluationStats,
@@ -293,6 +295,81 @@ fn perf_shallow_search_stats() {
             print_search_stats("search", result.score, sample.nodes, &sample.stats);
         }
     }
+}
+
+#[test]
+#[ignore = "playing-strength diagnostics; run with --ignored --nocapture"]
+fn perf_alpha_beta_quality_against_beam() {
+    let positions = fixture_positions();
+    let mut alpha_wins = 0;
+    let mut beam_wins = 0;
+    let mut equal = 0;
+    let mut total_delta = 0_i64;
+
+    println!("\nalpha-beta versus beam reply-adjusted quality");
+    for position in &positions {
+        let root_color = position.game.turn;
+        let beam = beam_search_result(&position.game, 20_000);
+        let alpha = position
+            .game
+            .best_ai_turn_with_min_depth(2, 2, 20_000, None);
+        let beam_score = reply_adjusted_score(&position.game, &beam, root_color);
+        let alpha_score = reply_adjusted_score(&position.game, &alpha, root_color);
+        let delta = i64::from(alpha_score) - i64::from(beam_score);
+        total_delta += delta;
+        match delta.cmp(&0) {
+            std::cmp::Ordering::Greater => alpha_wins += 1,
+            std::cmp::Ordering::Less => beam_wins += 1,
+            std::cmp::Ordering::Equal => equal += 1,
+        }
+        println!(
+            "position={} beam_score={} alpha_score={} delta={} same_move={} alpha_depth={}",
+            position.name,
+            beam_score,
+            alpha_score,
+            delta,
+            beam.moves == alpha.moves,
+            alpha.depth,
+        );
+    }
+    println!(
+        "quality_summary positions={} alpha_wins={} beam_wins={} equal={} total_delta={}",
+        positions.len(),
+        alpha_wins,
+        beam_wins,
+        equal,
+        total_delta,
+    );
+
+    assert_eq!(alpha_wins + beam_wins + equal, positions.len());
+    assert!(alpha_wins > beam_wins);
+    assert!(total_delta > 0);
+}
+
+fn reply_adjusted_score(game: &Game, result: &AiSearchResult, root_color: Color) -> i32 {
+    let Some(child) = apply_search_result(game, result) else {
+        return -CHECKMATE_SCORE;
+    };
+    if let Some(score) = child.terminal_score_until(root_color, None) {
+        return score;
+    }
+    let reply = child.best_ai_turn_with_min_depth(1, 1, 20_000, None);
+    let Some(after_reply) = apply_search_result(&child, &reply) else {
+        return CHECKMATE_SCORE;
+    };
+    after_reply
+        .terminal_score_until(root_color, None)
+        .unwrap_or_else(|| after_reply.evaluate_heuristic(root_color, &EvalWeights::active_tuned()))
+}
+
+fn apply_search_result(game: &Game, result: &AiSearchResult) -> Option<Game> {
+    let mut next = game.clone_for_search();
+    for movement in &result.moves {
+        if next.apply_move(movement.from, movement.to) == 0 {
+            return None;
+        }
+    }
+    (next.submit_turn() != 0).then_some(next)
 }
 
 fn fixture_positions() -> Vec<NamedPosition> {

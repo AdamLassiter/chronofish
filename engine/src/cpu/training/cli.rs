@@ -759,7 +759,10 @@ fn cpu_search_request(config: &CpuCliConfig) -> crate::cpu::search::CpuSearchReq
         }),
         nodes: config.nodes.max(1).min(i32::MAX as usize) as i32,
         time_ms: config.training_time_ms.max(1).min(i32::MAX as u64) as i32,
-        search_strategy: crate::cpu::search::CpuSearchStrategy::Beam,
+        search_strategy: match config.search_strategy {
+            TrainingSearchStrategy::AlphaBeta => crate::cpu::search::CpuSearchStrategy::AlphaBeta,
+            TrainingSearchStrategy::Beam => crate::cpu::search::CpuSearchStrategy::Beam,
+        },
     }
 }
 
@@ -800,6 +803,31 @@ mod command_tests {
         assert_eq!(
             normalize_cpu_command(vec!["score".into()], false),
             vec!["--score-default"]
+        );
+    }
+
+    #[test]
+    fn cpu_search_uses_the_requested_search_strategy() {
+        let alpha_beta = CpuCliConfig::from_args(CpuCliArgs::parse_from([
+            "train-cpu",
+            "--search-strategy",
+            "alpha-beta",
+            "--cpu-search",
+        ]));
+        assert_eq!(
+            cpu_search_request(&alpha_beta).search_strategy,
+            crate::cpu::search::CpuSearchStrategy::AlphaBeta
+        );
+
+        let beam = CpuCliConfig::from_args(CpuCliArgs::parse_from([
+            "train-cpu",
+            "--search-strategy",
+            "beam",
+            "--cpu-search",
+        ]));
+        assert_eq!(
+            cpu_search_request(&beam).search_strategy,
+            crate::cpu::search::CpuSearchStrategy::Beam
         );
     }
 }

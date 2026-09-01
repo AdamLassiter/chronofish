@@ -481,9 +481,9 @@ test("GPU frontier projects retained states sparsely for neural evaluation", asy
   assert.match(source, /#cacheStats\.hits \+= stateCount/);
   assert.match(source, /#cacheStats\.misses \+= stateCount/);
   assert.match(source, /#cacheStats\.stores \+= batchCount/);
-  assert.match(source, /hitRate: frontierNeuralCacheHitRate\(this\.\#cacheStats\.hits, this\.\#cacheStats\.misses, this\.\#engine \?\? undefined\)/);
+  assert.match(source, /hitRate: frontierNeuralCacheHitRate\(this\.#cacheStats\.hits, this\.#cacheStats\.misses, this\.#engine \?\? undefined\)/);
   assert.match(source, /"chronofish_frontier_neural_cache_hit_rate"/);
-  assert.doesNotMatch(source, /Math\.round\(\(this\.\#cacheStats\.hits \/ lookups\) \* 1000\) \/ 1000/);
+  assert.doesNotMatch(source, /Math\.round\(\(this\.#cacheStats\.hits \/ lookups\) \* 1000\) \/ 1000/);
   assert.match(source, /sharedBoardEncoder/);
   assert.match(source, /engine: ChronofishEngine/);
   assert.match(source, /frontierNeuralParams\(this\.device, modelBuffers\.engine/);
@@ -676,10 +676,10 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
   assert.match(neural, /format: "int8-dequantized-upload"/);
   assert.match(neural, /format: inferencePrecision === "fp16" \? "int8-to-fp16-upload" : "int8-dequantized-upload"/);
   assert.match(neural, /device\.features\?\.has\("shader-f16" as GPUFeatureName\)/);
-  assert.match(neural, /const frontierForwardF16 = `enable f16;/);
-  assert.match(neural, /var<storage, read> weights: array<f16>/);
-  assert.match(neural, /const frontierPolicyF16 = `enable f16;/);
-  assert.match(neural, /var<storage, read> policy_weights: array<f16>/);
+  assert.match(neural, /function frontierForwardF16\(frontierForward: string\): string/);
+  assert.match(neural, /\.replace\("var<storage, read> weights: array<f32>;", "var<storage, read> weights: array<f16>;"\)/);
+  assert.match(neural, /function frontierPolicyF16\(frontierPolicy: string\): string/);
+  assert.match(neural, /\.replace\("var<storage, read> policy_weights: array<f32>;", "var<storage, read> policy_weights: array<f16>;"\)/);
   assert.match(neural, /float32ToFloat16Array\(values, engine\)/);
   assert.match(neural, /policyWeights: policyQuantization \? await initializedWeightBuffer\(device, policyQuantization\.dequantized, inferencePrecision, engine\) : null/);
   assert.match(neural, /modelBuffers\.fastNet\.policyWeights/);
@@ -691,7 +691,8 @@ test("GPU frontier applies serialized policy priors before candidate pruning", a
   assert.match(engineTypes, /chronofish_frontier_policy_params_bytes/);
   assert.match(neural, /#currentPolicyFeatures/);
   assert.match(neural, /advancePolicyFeatures/);
-  assert.match(neural, /FRONTIER_POLICY_SHADER/);
+  assert.match(neural, /loadTrainingShaders\(\)/);
+  assert.match(neural, /shaders\.frontierPolicy/);
   assert.match(worker, /runtime\.neural\.encodePolicyPrior/);
   assert.match(worker, /"gpu-v1-cfnn-v3-policy-head"/);
   assert.match(shader, /fn policy_bucket/);
@@ -1050,6 +1051,20 @@ test("full GPU mode enters the resident frontier before legacy CPU candidate pro
   assert.ok(body.indexOf("if (gpuMode === \"full\")") < body.indexOf("engineGpuCandidateInputsFromSnapshot"));
 });
 
+test("software GPU adapters automatically use the bounded hybrid path unless full mode is forced", async () => {
+  const worker = await readGpuSearchWorkerSources();
+  const smoke = await readFile(path.join(root, "scripts/gpu-frontier-smoke.mjs"), "utf8");
+
+  assert.match(worker, /gpuAdapterIsSoftwareFallback\(cachedGpuAdapter\)/);
+  assert.match(worker, /gpuMode === "full"[\s\S]*!forceFullGpu[\s\S]*\? "hybrid"[\s\S]*: gpuMode/);
+  assert.match(worker, /info\.isFallbackAdapter === true/);
+  assert.match(worker, /swiftshader\|llvmpipe\|software/);
+  assert.match(worker, /if \(effectiveGpuMode === "full"\)/);
+  assert.match(worker, /gpuResultWithMode\([\s\S]*"hybrid"/);
+  assert.match(smoke, /--allow-full-fallback/);
+  assert.match(smoke, /forceFullGpu,/);
+});
+
 test("GPU bot search uses one worker and one device queue", async () => {
   const controller = await readFile(path.join(root, "src/bot-controller.ts"), "utf8");
 
@@ -1110,7 +1125,7 @@ test("GPU training harness uses bounded parallel WebGPU workers", async () => {
   assert.match(worker, /timeMs: searchConfig\.timeMs/);
   assert.doesNotMatch(worker, /const shallowConfig = \{ \.\.\.config, nodes: Math\.max\(1, Math\.min\(512, config\.nodes\)\) \}/);
   assert.doesNotMatch(worker, /timeMs: 3000/);
-  assert.match(engineTraining, /pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 8/);
+  assert.match(engineTraining, /pub const MAX_PARALLEL_GPU_TRAINING_WORKERS: usize = 16/);
   assert.match(engineTraining, /pub const MAX_PLAYOUT_PLIES: usize = 10/);
   assert.match(engineTraining, /pub const GPU_WARMUP_MAX_TIME_MS: u64 = 5_000/);
   assert.match(engineTraining, /pub const GPU_POSITION_GENERATION_TIME_MS: u64 = 3_000/);
@@ -1399,7 +1414,7 @@ test("GPU frontier smoke harness can force device-loss cleanup and rebuild", asy
   assert.match(worker, /device\.destroy\(\)/);
   assert.match(worker, /cachedGpuAdapter = null/);
   assert.match(worker, /clearComputePipelineCache\(\)/);
-  assert.match(gpuDevice, /pipelineCache\.clear\(\)/);
+  assert.match(gpuDevice, /pipelineCaches = new WeakMap<GPUDevice, Map<string, GPUComputePipeline>>\(\)/);
 });
 
 test("GPU frontier tuning uses timestamp queries when available", async () => {
@@ -1521,7 +1536,6 @@ test("GPU frontier fills from unsorted candidates when shortlist pruning underfi
 
 test("GPU policy training applies label weights to move priors", async () => {
   const trainer = await readFile(path.join(root, "src/training-gpu.ts"), "utf8");
-  const sampleHelpers = await readFile(path.join(root, "src/training-gpu-samples.ts"), "utf8");
   const constants = await readFile(path.join(root, "src/training-gpu-constants.ts"), "utf8");
   const shader = await readFile(path.join(trainingShaderRoot, "policy.wgsl"), "utf8");
   const lossShader = await readFile(path.join(trainingShaderRoot, "policy_loss.wgsl"), "utf8");
@@ -1558,7 +1572,7 @@ test("GPU policy training applies label weights to move priors", async () => {
   assert.match(trainer, /chronofish_policy_training_indices_bytes/);
   assert.match(trainer, /hasPolicyTrainingTarget\(sample, engine\)/);
   assert.match(trainer, /chronofish_has_policy_training_target_json/);
-  assert.match(trainer, /targets\[index\] = policyTrainingTarget\(sample\.policy, engine\)/);
+  assert.match(trainer, /targets\[index\] = policyTrainingTarget\(sample\.policy \?\? undefined, engine\)/);
   assert.match(trainer, /labelWeights\[index\] = trainingLabelWeight\(sample\.labelWeight, engine\)/);
   assert.match(trainer, /fillGroupedTrainingBatchIndices\(/);
   assert.match(trainer, /policyTrainingSteps\(config\.epochs, engine\)/);
@@ -1742,7 +1756,7 @@ test("GPU training has staged curriculum and tactical adversarial label modes", 
   assert.doesNotMatch(worker, /function temporalPowerPieceCount/);
   assert.match(worker, /chronofish_curriculum_search_config_json/);
   assert.match(worker, /chronofish_tactical_search_config_json/);
-  assert.doesNotMatch(worker, /const stage = index % 6;\n  return \{\n    \.\.\.config,\n    depth: Math\.max\(1, Math\.min\(config\.depth, 1 \+ Math\.floor\(stage \/ 2\)\)\)/);
+  assert.doesNotMatch(worker, /const stage = index % 6;\n\s*return \{\n\s*\.\.\.config,\n\s*depth: Math\.max\(1, Math\.min\(config\.depth, 1 \+ Math\.floor\(stage \/ 2\)\)\)/);
   assert.doesNotMatch(worker, /depth: Math\.max\(2, Math\.min\(config\.depth, 3 \+ attempt\)\)/);
   assert.match(engineTraining, /pub fn curriculum_stage/);
   assert.match(engineTraining, /pub fn curriculum_search_config/);
@@ -1789,8 +1803,8 @@ test("GPU training has staged curriculum and tactical adversarial label modes", 
   assert.match(engineTraining, /heuristic-duel-batch/);
   assert.match(engineTraining, /fn outcome_label_samples/);
   assert.match(engineTraining, /fn duel_label_samples/);
-  assert.match(trainingCli, /--gpu-sample-mode/);
-  assert.match(trainingCli, /config\.gpu_sample_mode/);
+  assert.match(trainingCli, /long = "gpu-sample-mode"/);
+  assert.match(trainingCli, /config\.sample_mode/);
   assert.match(worker, /collectGpuSearchLabels\(positions, config, progress, "curriculum"/);
   assert.match(worker, /collectGpuSearchLabels\([\s\S]*"tactical"/);
   assert.match(html, /<option value="curriculum" selected/);
@@ -1824,9 +1838,9 @@ test("GPU distillation labels searched positions instead of duplicating the root
   assert.match(engineTraining, /pub const DISTILLED_LABEL_WEIGHT: f32 = 0\.25/);
   assert.match(engineTraining, /SearchLabelMode::Distilled/);
   assert.match(engineTraining, /distilled sample mode requires a compact value model/);
-  assert.match(trainingCli, /--gpu-distill-samples/);
-  assert.match(trainingCli, /"--gpu-model" \| "--gpu-value-model"/);
-  assert.match(trainingCli, /self\.gpu_value_model_path = value\.to_string\(\)/);
+  assert.match(trainingCli, /pub\(crate\) distill_samples: Option<String>/);
+  assert.match(trainingCli, /long = "gpu-model", visible_alias = "gpu-value-model"/);
+  assert.match(trainingCli, /config\.value_model_path = value/);
   assert.match(trainingCli, /fn gpu_value_model_path\(config: &GpuCliConfig\) -> &str/);
   assert.match(trainingCli, /fn load_gpu_value_model\(config: &GpuCliConfig\)/);
   assert.match(trainingCli, /gpu_sample_distill_model/);
@@ -1902,7 +1916,7 @@ test("GPU training validation split falls back to a high-signal holdout", async 
   assert.match(trainer, /splitValidationSamples\(samples, config\.validationSplit, engine\)/);
   assert.match(trainer, /splitPolicyTrainingIndices\(samples, policyIndices, split, config\.validationSplit \?\? 0, engine\)/);
   assert.match(trainer, /splitPolicyTrainingIndices\(samples, policyIndices, valueSplit, config\.validationSplit \?\? 0, engine\)/);
-  assert.match(trainer, /trainPolicy\([\s\S]*outputLayerSize\(HIDDEN_LAYERS, engine\),\n        engine/);
+  assert.match(trainer, /trainPolicy\([\s\S]*outputLayerSize\(HIDDEN_LAYERS, engine\),\n\s*engine/);
   assert.match(sampleHelpers, /validationSplit > 0 && !validationIndices\.length && trainIndices\.length > 1/);
   assert.match(sampleHelpers, /movePositionGroupToValidation\(samples, trainIndices, validationIndices, seed\)/);
   assert.match(sampleHelpers, /groupTrainingIndicesByPosition\(samples, trainIndices\)/);
@@ -2408,9 +2422,9 @@ test("GPU replay retention prioritizes stronger label sources", async () => {
   assert.match(trainingCli, /let samples = crate::gpu::training::dedupe_training_samples\(samples\);/);
   assert.match(trainingCli, /train_value_head_cpu\(\s*&model,\s*&samples,/s);
   assert.match(trainingCli, /select_training_working_set_for_projection\(\s*&samples,/s);
-  assert.match(trainingCli, /append_replay_samples\(\s*&buffer,\s*&samples,\s*config\.gpu_replay_max\.max\(1\),/s);
+  assert.match(trainingCli, /append_replay_samples\(\s*&buffer,\s*&samples,\s*config\.replay_max\.max\(1\)\)/s);
   assert.match(trainingCli, /model_path: Some\(gpu_value_model_path\(config\)\.to_string\(\)\)/);
   assert.match(trainingCli, /let model = load_gpu_value_model\(config\);/);
-  assert.match(trainingCli, /--gpu-replay-append/);
-  assert.match(trainingCli, /--gpu-replay-buffer/);
+  assert.match(trainingCli, /pub\(crate\) replay_append: Option<String>/);
+  assert.match(trainingCli, /pub\(crate\) replay_buffer: Option<String>/);
 });

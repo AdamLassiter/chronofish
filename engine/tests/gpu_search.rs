@@ -2536,6 +2536,10 @@ fn gpu_candidate_inputs_from_timelines_match_web_candidate_input_contract() {
     assert_eq!(inputs.targets.len(), GPU_TARGET_STRIDE * 192);
     assert_eq!(inputs.sources.len(), GPU_SOURCE_STRIDE * 3);
 
+    assert_eq!(inputs.mutation_boards[0], 1);
+    assert_eq!(inputs.mutation_boards[GPU_MUTATION_BOARD_STRIDE], 1);
+    assert_eq!(inputs.mutation_boards[GPU_MUTATION_BOARD_STRIDE * 2], 0);
+
     assert_eq!(inputs.target_meta[0].timeline_id, -1);
     assert_eq!(inputs.target_meta[0].time, 4);
     assert_eq!(

@@ -7,6 +7,7 @@ const GPU_MODE_STORAGE_KEY = "chronofish.gpuMode";
 type BotColor = Color;
 type AiStatus = "ok" | "noLegalTurn" | string;
 type BotBackend = "gpu" | "cpu";
+type BotGpuMode = "full" | "hybrid";
 
 interface BotCredentials {
   color: BotColor;
@@ -34,6 +35,7 @@ interface AiChoice {
   depth?: number | null;
   nodes?: number | null;
   gpuSearch?: string | null;
+  gpuMode?: BotGpuMode | null;
   cpuSearch?: string | null;
   principalVariation?: PrincipalVariation;
 }
@@ -67,6 +69,7 @@ interface PendingSearch {
   id: number;
   botColor: BotColor;
   backend: BotBackend;
+  gpuMode: BotGpuMode;
   game: GameSnapshot;
   targetDepth: number;
   minDepth: number;
@@ -340,11 +343,12 @@ export function createBotController({
     const botColor = getGame().turn;
     const effortName = botEffortName(getAssignments()[botColor]);
     const backend = botBackend(getAssignments()[botColor]);
+    const gpuMode = botGpuMode();
     const effort = botEffort(getAssignments()[botColor]);
     if (!effort) {
       return;
     }
-    const searchConfig = botSearchConfig(effort);
+    const searchConfig = botSearchConfig(effort, backend, gpuMode);
     const workerCount = botSearchWorkerCount(effortName, backend);
     terminateAiWorkers();
     bot.thinking = true;
@@ -352,6 +356,7 @@ export function createBotController({
       id,
       botColor,
       backend,
+      gpuMode,
       game: cloneGame(getGame()),
       targetDepth: searchConfig.targetDepth,
       minDepth: searchConfig.minDepth,
@@ -413,7 +418,7 @@ export function createBotController({
           timeMs: workerTimeMs,
           minDepth: Math.min(nextDepth, pending.minDepth),
           ...(pending.backend === "cpu" && pending.searchStrategy ? { searchStrategy: pending.searchStrategy } : {}),
-          gpuMode: botGpuMode(),
+          gpuMode: pending.gpuMode,
           partitionIndex,
           partitionCount: pending.workerCount
         });
@@ -443,14 +448,30 @@ export function createBotController({
     return loadedEngine().chronofish_bot_worker_search_time_ms(timeMs);
   }
 
-  function botSearchConfig(effort: BotEffort): BotSearchConfig {
+  function botSearchConfig(effort: BotEffort, backend: BotBackend, gpuMode: BotGpuMode): BotSearchConfig {
     const engine = loadedEngine();
-    return engineBotPolicy.resultValue<BotSearchConfig>(engine, "chronofish_bot_search_config_json",
+    const config = engineBotPolicy.resultValue<BotSearchConfig>(engine, "chronofish_bot_search_config_json",
       effort.depth ?? Number.NaN,
       effort.minDepth ?? Number.NaN,
       effort.nodes ?? Number.NaN,
       effort.timeMs ?? Number.NaN
     );
+    // Beam ranks complete legal turns without searching an opponent reply. Treat
+    // that result as the one-ply search it is so the iterative controller accepts
+    // it immediately instead of waiting for an impossible deeper completion.
+    if (effort.searchStrategy === "beam") {
+      return { ...config, targetDepth: 1, minDepth: 1 };
+    }
+    // The compatibility GPU path searches a root turn and one opponent reply.
+    // Full mode uses the resident frontier and can honor deeper targets.
+    if (backend === "gpu" && gpuMode === "hybrid") {
+      return {
+        ...config,
+        targetDepth: Math.min(config.targetDepth, 2),
+        minDepth: Math.min(config.minDepth, 2)
+      };
+    }
+    return config;
   }
 
   function nextBotSearchDepth(currentDepth: number, targetDepth: number): number {
@@ -471,8 +492,8 @@ export function createBotController({
     return engineBotPolicy.jsonBoolean(loadedEngine(), "chronofish_bot_result_ends_in_royal_capture_json", result);
   }
 
-  function botGpuMode(): "full" | "hybrid" {
-    return localStorage.getItem(GPU_MODE_STORAGE_KEY) === "full" ? "full" : "hybrid";
+  function botGpuMode(): BotGpuMode {
+    return localStorage.getItem(GPU_MODE_STORAGE_KEY) === "hybrid" ? "hybrid" : "full";
   }
 
   function botBackend(value: unknown): BotBackend {
@@ -537,6 +558,7 @@ export function createBotController({
         minDepth: pending.minDepth,
         nodes: pending.nodes,
         timeMs: pending.timeMs,
+        searchStrategy: "alpha-beta",
         partitionIndex: 0,
         partitionCount: 1
       });
@@ -565,6 +587,10 @@ export function createBotController({
 
     pending.depthReceived += 1;
     if (ok && result) {
+      if (pending.backend === "gpu" && result.gpuMode === "hybrid") {
+        pending.targetDepth = Math.min(pending.targetDepth, 2);
+        pending.minDepth = Math.min(pending.minDepth, 2);
+      }
       const receivedDepth = completedSearchDepth(result, pending.currentDepth);
       if (receivedDepth === null) {
         pending.incompleteDepthAttempt = true;
@@ -602,6 +628,10 @@ export function createBotController({
     }
 
     if (pending.incompleteDepthAttempt && pending.currentDepth >= pending.minDepth) {
+      if ((bestResult?.depth ?? 0) >= pending.minDepth) {
+        finishBotSearch(pending, "complete");
+        return;
+      }
       if (pending.backend === "gpu" && !pending.minimumFallbackStarted) {
         startMinimumDepthCpuFallback(pending);
         return;

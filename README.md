@@ -144,7 +144,9 @@ device-loss/rebuild, and median latency gates by default: full resident frontier
 search must be no more than 10% slower on the one-board fixture and at least 2x
 faster on the three- and five-board fixtures than the legacy hybrid GPU path.
 Use `--skip-performance-gates` for a legality-only browser smoke run while
-debugging.
+debugging. On a software adapter, add `--allow-software-adapter
+--allow-full-fallback` to verify that a normal full-mode request automatically
+uses the bounded hybrid path instead of attempting the resident frontier.
 
 ## Playing
 
@@ -161,8 +163,8 @@ concessions leave the game in a post-match review state until dismissed.
 
 GPU bot modes require a browser with WebGPU support. CPU bot modes run the Rust
 search engine through WASM and also expose custom depth, node, time, and search
-strategy settings. Built-in CPU efforts use beam search by default; custom CPU
-difficulty can switch to alpha-beta when deeper tactical replies are preferred.
+strategy settings. Alpha-beta search is the default for built-in and custom CPU
+bots; beam remains available as an explicit low-latency single-ply option.
 
 The server stores rooms in memory, so restarting it clears all rooms. Match
 notation is appended to `logs/<room-id>.log`.
@@ -403,9 +405,16 @@ The default output is `flamegraph.svg`.
 
 `engine/models/cpu-v1/effort.json` contains CPU runtime bot presets shared by
 the Rust engine and frontend via `/ai/effort.json`. Each CPU preset selects a
-`searchStrategy`; the included presets use `beam` by default.
+`searchStrategy`; the included presets use iterative `alpha-beta` search with a
+minimum depth of two, then keep the deepest completed result within their move
+budget. Custom CPU bots can select `beam` for a single-ply, low-latency move.
 `engine/models/gpu-v1/effort.json` contains the corresponding GPU presets,
-including minimum depth, and is served via `/ai/gpu-effort.json`.
+including minimum depth, and is served via `/ai/gpu-effort.json`. Browser bots
+use the resident full-GPU frontier by default; setting
+`localStorage["chronofish.gpuMode"]` to `"hybrid"` selects the compatibility
+path, which reports its actual maximum depth of two. Software/fallback adapters
+select that bounded hybrid path automatically so a full-frontier minimum depth
+cannot leave a bot turn stuck behind software GPU emulation.
 
 | Preset | Runtime purpose |
 | --- | --- |

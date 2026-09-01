@@ -23,6 +23,7 @@ async function tryGpuSearch({
   nodes,
   timeMs,
   gpuMode = "hybrid",
+  forceFullGpu = false,
   disableNeural = false,
   snapshotOverride = null,
   sourceGame,
@@ -42,10 +43,15 @@ async function tryGpuSearch({
   if (!device) {
     return null;
   }
+  const effectiveGpuMode = gpuMode === "full"
+    && !forceFullGpu
+    && gpuAdapterIsSoftwareFallback(cachedGpuAdapter)
+    ? "hybrid"
+    : gpuMode;
   const searchNodes = await engineGpuSearch.engineGpuSearchNodes(nodes);
   const turnStatus = await turnStatusOnGpu(device, snapshot);
   const pendingBoards = await engineGpuSearch.enginePendingPresentBoards(snapshot, snapshot.turn);
-  if (gpuMode === "full") {
+  if (effectiveGpuMode === "full") {
     try {
       return await tryGpuResidentFrontierSearch(device, snapshot, {
         requestedDepth,
@@ -82,7 +88,10 @@ async function tryGpuSearch({
       temperature,
       randomSeed
     });
-    return completeGpuResultTurn(device, snapshot, result, { nodes: searchNodes, temperature, randomSeed });
+    return gpuResultWithMode(
+      await completeGpuResultTurn(device, snapshot, result, { nodes: searchNodes, temperature, randomSeed }),
+      "hybrid"
+    );
   }
 
   if (pendingBoards.length >= 1 && ranked.length > 0) {
@@ -113,11 +122,18 @@ async function tryGpuSearch({
         gpuSnapshot: snapshot.format,
         gpuSearch: "single-present-gpu-mutated"
       };
-      return completeGpuResultTurn(device, snapshot, result, { nodes: searchNodes, temperature, randomSeed });
+      return gpuResultWithMode(
+        await completeGpuResultTurn(device, snapshot, result, { nodes: searchNodes, temperature, randomSeed }),
+        "hybrid"
+      );
     }
   }
 
   return null;
+}
+
+function gpuResultWithMode(result: SearchResult | null, gpuMode: GpuMode): SearchResult | null {
+  return result ? { ...result, gpuMode } : null;
 }
 
 async function tryGpuResidentFrontierSearch(
@@ -1109,6 +1125,19 @@ async function getGpuDevice(): Promise<GPUDevice | null> {
   return cachedGpuDevice;
 }
 
+function gpuAdapterIsSoftwareFallback(adapter: GPUAdapter | null): boolean {
+  if (!adapter) {
+    return false;
+  }
+  const info = adapter.info as GPUAdapterInfo & { isFallbackAdapter?: boolean };
+  if (info.isFallbackAdapter === true) {
+    return true;
+  }
+  return /swiftshader|llvmpipe|software/.test(
+    `${info.vendor ?? ""} ${info.architecture ?? ""} ${info.device ?? ""} ${info.description ?? ""}`.toLowerCase()
+  );
+}
+
 function clearCachedGpuState(): void {
   frontierRuntime?.pipeline.destroy();
   frontierRuntime?.neural.destroy();
@@ -1175,6 +1204,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     temperature = 0,
     randomSeed = 0,
     gpuMode = "hybrid",
+    forceFullGpu = false,
     disableNeural = false,
     modelBytes
   } = event.data;
@@ -1245,6 +1275,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         nodes,
         timeMs: searchConfig.searchTimeMs,
         gpuMode,
+        forceFullGpu,
         disableNeural,
         snapshotOverride,
         sourceGame: clientGame,

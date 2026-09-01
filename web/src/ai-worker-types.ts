@@ -32,6 +32,7 @@ export interface GpuSearchOptions {
   nodes?: number | undefined;
   timeMs?: number | undefined;
   gpuMode?: GpuMode | undefined;
+  forceFullGpu?: boolean | undefined;
   disableNeural?: boolean | undefined;
   snapshotOverride?: GpuSnapshot | null | undefined;
   sourceGame?: GameSnapshot | undefined;
@@ -173,6 +174,7 @@ export interface WorkerRequest {
   temperature?: number;
   randomSeed?: number;
   gpuMode?: GpuMode;
+  forceFullGpu?: boolean;
   disableNeural?: boolean;
   notation?: string;
   turns?: Move[][];

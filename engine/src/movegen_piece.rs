@@ -324,6 +324,7 @@ impl Game {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn non_zero_distances(distances: [i32; 4]) -> ([i32; 4], usize) {
         let mut non_zero = [0; 4];
         let mut len = 0;
@@ -403,6 +404,25 @@ impl Game {
     }
 
     pub(crate) fn is_path_clear(&self, piece: Piece, from: Position, to: Position) -> bool {
+        if from.timeline_id == to.timeline_id && from.time == to.time {
+            let delta_x = to.x - from.x;
+            let delta_y = to.y - from.y;
+            let distance = delta_x.abs().max(delta_y.abs());
+            if distance <= 1 {
+                return true;
+            }
+            let Some(board) = self.board(from.timeline_id, from.time) else {
+                return false;
+            };
+            let step_x = delta_x.signum();
+            let step_y = delta_y.signum();
+            return (1..distance).all(|step| {
+                let x = from.x + step_x * step;
+                let y = from.y + step_y * step;
+                Self::in_bounds(x, y) && board.board[y as usize][x as usize].is_none()
+            });
+        }
+
         // Path walking follows timeline rows rather than ids. Ids encode
         // ownership/notation; rows encode geometry.
         let delta = self.movement_delta(from, to);
@@ -453,18 +473,23 @@ impl Game {
     }
 
     pub(crate) fn axis_delta(&self, from: Position, to: Position) -> Delta {
-        let from_row = self
-            .timeline(from.timeline_id)
-            .map_or(0, |timeline| timeline.row);
-        let to_row = self
-            .timeline(to.timeline_id)
-            .map_or(0, |timeline| timeline.row);
+        let timeline_delta = if from.timeline_id == to.timeline_id {
+            0
+        } else {
+            let from_row = self
+                .timeline(from.timeline_id)
+                .map_or(0, |timeline| timeline.row);
+            let to_row = self
+                .timeline(to.timeline_id)
+                .map_or(0, |timeline| timeline.row);
+            to_row - from_row
+        };
 
         Delta {
             x: to.x - from.x,
             y: to.y - from.y,
             t: to.time - from.time,
-            l: to_row - from_row,
+            l: timeline_delta,
         }
     }
 

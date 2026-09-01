@@ -67,13 +67,29 @@ export function engineGpuSearchColorCode(engine: ChronofishEngine, color: string
 
 export async function engineDeriveFrontierTuning<T>(limits: number[], requestedNodes: number, boardCount: number, additionalBoardCapacity: number): Promise<T> {
   const engine = await validationEngine();
-  const output = engine.chronofish_derive_frontier_tuning_json(...limits, requestedNodes, boardCount, additionalBoardCapacity);
+  const output = engine.chronofish_derive_frontier_tuning_json(
+    limits[0] ?? 0,
+    limits[1] ?? 0,
+    limits[2] ?? 0,
+    requestedNodes,
+    boardCount,
+    additionalBoardCapacity
+  );
   return JSON.parse(readWasmString(engine, output)) as T;
 }
 
 export async function engineFrontierSelectionPlan<T>(values: number[]): Promise<T> {
   const engine = await validationEngine();
-  const output = engine.chronofish_frontier_selection_plan_json(...values);
+  const output = engine.chronofish_frontier_selection_plan_json(
+    values[0] ?? 0,
+    values[1] ?? 0,
+    values[2] ?? 0,
+    values[3] ?? 0,
+    values[4] ?? 0,
+    values[5] ?? 0,
+    values[6] ?? 0,
+    values[7] ?? 0
+  );
   return JSON.parse(readWasmString(engine, output)) as T;
 }
 
