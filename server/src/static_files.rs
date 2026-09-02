@@ -142,7 +142,7 @@ fn static_bytes_response(
 }
 
 const STATIC_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; child-src 'self' blob:; connect-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'";
-const STATIC_CACHE_CONTROL: &str = "no-cache, max-age=0, must-revalidate";
+const STATIC_CACHE_CONTROL: &str = "max-age=3600, must-revalidate";
 
 fn apply_static_headers(response: &mut Response, content_type: &'static str, etag: &str) {
     let headers = response.headers_mut();
