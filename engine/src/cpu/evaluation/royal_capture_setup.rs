@@ -72,6 +72,9 @@ impl Game {
 
         let royal_targets = self.royal_pieces(color.opposite());
         let mut pieces = self.latest_pieces();
+        pieces.retain(|(_, piece)| {
+            piece.color == color && !matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
+        });
         if probe_limit != usize::MAX {
             pieces.sort_by_key(|(position, piece)| {
                 (
@@ -87,11 +90,6 @@ impl Game {
         let mut counted = 0;
         let mut probes = 0;
         'pieces: for (from, piece) in pieces {
-            if piece.color != color
-                || matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
-            {
-                continue;
-            }
             let Some(source_board) = self.board(from.timeline_id, from.time) else {
                 continue;
             };

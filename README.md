@@ -162,9 +162,9 @@ staged move, while `Reset` clears the current turn's staged moves. Checkmate and
 concessions leave the game in a post-match review state until dismissed.
 
 GPU bot modes require a browser with WebGPU support. CPU bot modes run the Rust
-search engine through WASM and also expose custom depth, node, time, and search
-strategy settings. Alpha-beta search is the default for built-in and custom CPU
-bots; beam remains available as an explicit low-latency single-ply option.
+search engine through WASM and also expose custom depth, node, and time
+settings. Built-in and custom CPU bots use iterative selective alpha-beta.
+Legacy saved `beam` settings remain accepted and select a bounded fast policy.
 
 The server stores rooms in memory, so restarting it clears all rooms. Match
 notation is appended to `logs/<room-id>.log`.
@@ -405,9 +405,12 @@ The default output is `flamegraph.svg`.
 
 `engine/models/cpu-v1/effort.json` contains CPU runtime bot presets shared by
 the Rust engine and frontend via `/ai/effort.json`. Each CPU preset selects a
-`searchStrategy`; the included presets use iterative `alpha-beta` search with a
-minimum depth of two, then keep the deepest completed result within their move
-budget. Custom CPU bots can select `beam` for a single-ply, low-latency move.
+`searchStrategy`; the included presets use iterative selective `alpha-beta`
+search and keep the deepest completed result within their hard move budget.
+The browser sends one target-depth request because iterative deepening and its
+transposition table are owned by the Rust engine. Minimum depth is a priority,
+not permission to overrun the wall-clock limit. Legacy `beam` settings map to
+the bounded fast policy.
 `engine/models/gpu-v1/effort.json` contains the corresponding GPU presets,
 including minimum depth, and is served via `/ai/gpu-effort.json`. Browser bots
 use the resident full-GPU frontier by default; setting

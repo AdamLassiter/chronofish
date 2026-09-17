@@ -599,7 +599,7 @@ impl EvalWeights {
         if candidate == self {
             self.mutate_with_scale(rng, scale)
         } else {
-            candidate
+            candidate.constrained()
         }
     }
 }

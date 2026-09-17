@@ -12,7 +12,9 @@ pub(crate) fn seeded_start_position(
 
     let mut rng = Lcg::new(seed);
     let mut game = Game::new();
-    let plies = rng.next_usize(3);
+    // Exercise actual middlegames and branching positions. The old zero-to-two
+    // ply starts mostly trained opening preferences and left 5D tactics unseen.
+    let plies = 4 + rng.next_usize(9);
     for _ in 0..plies {
         if training_expired(deadline) {
             break;

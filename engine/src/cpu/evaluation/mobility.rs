@@ -6,6 +6,51 @@ impl Game {
     }
 
     pub(crate) fn legal_single_move_count_for(&self, color: Color) -> i32 {
+        let mut moves = Vec::new();
+        let present_time = self.present_time();
+        for timeline in &self.timelines {
+            if !self.is_active_timeline(timeline.id) {
+                continue;
+            }
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            if board.side_to_move != color || present_time != Some(board.time) {
+                continue;
+            }
+            for y in 0..8 {
+                for x in 0..8 {
+                    let Some(piece) = board.board[y][x].filter(|piece| piece.color == color) else {
+                        continue;
+                    };
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    self.for_each_piece_candidate_destination(from, piece, |to| {
+                        let Some(move_kind) =
+                            self.legal_move_kind_from_valid_source(from, to, piece)
+                        else {
+                            return true;
+                        };
+                        let movement = MoveStep { from, to };
+                        if self.allows_search_move(from, to, piece, move_kind)
+                            && !moves.contains(&movement)
+                        {
+                            moves.push(movement);
+                        }
+                        true
+                    });
+                }
+            }
+        }
+        moves.len().min(i32::MAX as usize) as i32
+    }
+
+    #[cfg(test)]
+    pub(crate) fn legal_single_move_count_for_bruteforce(&self, color: Color) -> i32 {
         let mut count = 0;
         for timeline in &self.timelines {
             if !self.is_active_timeline(timeline.id) {
@@ -17,12 +62,9 @@ impl Game {
                 }
                 for y in 0..8 {
                     for x in 0..8 {
-                        let Some(piece) = board.board[y][x] else {
+                        let Some(_) = board.board[y][x].filter(|piece| piece.color == color) else {
                             continue;
                         };
-                        if piece.color != color {
-                            continue;
-                        }
                         let from = Position {
                             timeline_id: timeline.id,
                             time: board.time,
@@ -58,6 +100,7 @@ impl Game {
         count
     }
 
+    #[cfg(test)]
     pub(crate) fn legal_move_kind_for_turn(
         &self,
         turn: Color,

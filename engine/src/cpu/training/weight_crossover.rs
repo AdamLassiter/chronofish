@@ -99,5 +99,6 @@ impl EvalWeights {
             royal_distance_in_4d: pick!(royal_distance_in_4d),
             board_importance_weight: pick!(board_importance_weight),
         }
+        .constrained()
     }
 }

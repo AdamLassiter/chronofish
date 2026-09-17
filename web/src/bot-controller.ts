@@ -33,7 +33,11 @@ interface AiChoice {
   moves?: Move[];
   score?: number | null;
   depth?: number | null;
+  completedDepth?: number | null;
   nodes?: number | null;
+  elapsedMs?: number | null;
+  timedOut?: boolean | null;
+  searchEngine?: string | null;
   gpuSearch?: string | null;
   gpuMode?: BotGpuMode | null;
   cpuSearch?: string | null;
@@ -47,13 +51,18 @@ interface AiSearchResult {
   moves: Move[];
   score?: number | null;
   depth?: number | null;
+  completedDepth?: number | null;
   nodes?: number | null;
+  elapsedMs?: number | null;
+  timedOut?: boolean | null;
+  searchEngine?: string | null;
   terminal?: boolean | null;
   resultReason?: string | null;
   gpuTerminal?: boolean | null;
   choices?: AiChoice[];
   principalVariation?: PrincipalVariation;
   gpuSearch?: string | null;
+  gpuMode?: BotGpuMode | null;
   gpuDiagnostics?: Record<string, number | string | null | undefined> | null;
   cpuSearch?: string | null;
   trainingDecision?: BotDecisionRecord | null;
@@ -390,7 +399,12 @@ export function createBotController({
     if (!bot.thinking || !pending || pending.id !== id) {
       return;
     }
-    const nextDepth = nextBotSearchDepth(pending.currentDepth, pending.targetDepth);
+    // CPU search already performs iterative deepening internally and retains
+    // the last completed result. Sending depth 1, then 2, then 4 merely throws
+    // away its transposition table and repeats all shallower work.
+    const nextDepth = pending.backend === "cpu" && pending.currentDepth === 0
+      ? pending.targetDepth
+      : nextBotSearchDepth(pending.currentDepth, pending.targetDepth);
     const completedDepth = deepestStoredDepth(pending);
     if (
       nextDepth <= pending.currentDepth
@@ -456,11 +470,9 @@ export function createBotController({
       effort.nodes ?? Number.NaN,
       effort.timeMs ?? Number.NaN
     );
-    // Beam ranks complete legal turns without searching an opponent reply. Treat
-    // that result as the one-ply search it is so the iterative controller accepts
-    // it immediately instead of waiting for an impossible deeper completion.
+    // `beam` is a legacy saved-setting alias for the bounded fast policy.
     if (effort.searchStrategy === "beam") {
-      return { ...config, targetDepth: 1, minDepth: 1 };
+      return { ...config, targetDepth: Math.min(config.targetDepth, 2), minDepth: 1 };
     }
     // The compatibility GPU path searches a root turn and one opponent reply.
     // Full mode uses the resident frontier and can honor deeper targets.
@@ -478,8 +490,16 @@ export function createBotController({
     return loadedEngine().chronofish_bot_next_search_depth(currentDepth, targetDepth);
   }
 
-  function completedSearchDepth(result: AiSearchResult, requestedDepth: number): number | null {
+  function completedSearchDepth(
+    result: AiSearchResult,
+    requestedDepth: number,
+    backend: BotBackend
+  ): number | null {
     const depth = result.depth ?? requestedDepth;
+    if (backend === "cpu") {
+      const completedDepth = Math.min(requestedDepth, Math.floor(depth));
+      return completedDepth >= 1 ? completedDepth : null;
+    }
     const completedDepth = loadedEngine().chronofish_bot_completed_search_depth(
       depth,
       requestedDepth,
@@ -520,6 +540,10 @@ export function createBotController({
         ?? selectBestAiResult(pending.results.map((entry) => entry.result));
       if (bestResult && (bestResult.depth ?? 0) >= pending.minDepth) {
         finishBotSearch(pending, "timeout");
+        return;
+      }
+      if (pending.backend === "cpu") {
+        message.textContent = `${botDisplayName(botColor)} reached ${formatBotTimeLimit(timeMs)} and is finalizing its best completed depth.`;
         return;
       }
       if (pending.currentDepth <= pending.minDepth && pending.depthReceived < pending.depthExpected) {
@@ -591,7 +615,7 @@ export function createBotController({
         pending.targetDepth = Math.min(pending.targetDepth, 2);
         pending.minDepth = Math.min(pending.minDepth, 2);
       }
-      const receivedDepth = completedSearchDepth(result, pending.currentDepth);
+      const receivedDepth = completedSearchDepth(result, pending.currentDepth, pending.backend);
       if (receivedDepth === null) {
         pending.incompleteDepthAttempt = true;
         pending.errors.push(`AI worker returned incomplete or non-terminal odd depth ${result.depth ?? "unknown"} for requested depth ${pending.currentDepth}.`);

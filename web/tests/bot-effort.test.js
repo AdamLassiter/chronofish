@@ -66,7 +66,9 @@ test("CPU efforts use bounded alpha-beta search and custom CPU difficulty can ov
   assert.match(main, /candidate\.searchStrategy === "beam" \? "beam" : "alpha-beta"/);
   assert.match(main, /customCpuSearchStrategyInput/);
   assert.match(controller, /searchStrategy: effort\.searchStrategy/);
-  assert.match(controller, /effort\.searchStrategy === "beam"[\s\S]*targetDepth: 1, minDepth: 1/);
+  assert.match(controller, /effort\.searchStrategy === "beam"[\s\S]*targetDepth: Math\.min\(config\.targetDepth, 2\), minDepth: 1/);
+  assert.match(controller, /pending\.backend === "cpu" && pending\.currentDepth === 0[\s\S]*pending\.targetDepth/);
+  assert.match(controller, /backend === "cpu"[\s\S]*Math\.min\(requestedDepth, Math\.floor\(depth\)\)/);
   assert.match(worker, /searchStrategy\?: "alpha-beta" \| "beam"/);
   assert.match(binding, /engine\.chronofish_cpu_search_json\(ptr, len\)/);
   assert.match(wasmApi, /pub unsafe extern "C" fn chronofish_cpu_search_json/);
@@ -85,7 +87,7 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /nodes: searchConfig\.nodes/);
   assert.match(controller, /timeMs: searchConfig\.timeMs/);
   assert.match(controller, /"chronofish_bot_search_config_json"/);
-  assert.match(controller, /const nextDepth = nextBotSearchDepth\(pending\.currentDepth, pending\.targetDepth\)/);
+  assert.match(controller, /pending\.backend === "cpu" && pending\.currentDepth === 0[\s\S]*nextBotSearchDepth\(pending\.currentDepth, pending\.targetDepth\)/);
   assert.match(controller, /chronofish_bot_next_search_depth\(currentDepth, targetDepth\)/);
   assert.match(controller, /chronofish_bot_worker_search_time_ms\(timeMs\)/);
   assert.match(controller, /chronofish_bot_completed_search_depth/);
@@ -109,6 +111,7 @@ test("bot timeout preserves minimum depth and a completed legal result", async (
   assert.match(controller, /pending\.incompleteDepthAttempt = true/);
   assert.match(controller, /pending\.incompleteDepthAttempt && pending\.currentDepth >= pending\.minDepth/);
   assert.match(controller, /is completing depth/);
+  assert.match(controller, /is finalizing its best completed depth/);
   assert.match(controller, /selectDeepestStoredResult\(pending\)/);
   assert.match(controller, /startMinimumDepthCpuFallback\(pending\)/);
   assert.match(controller, /searchStrategy: "alpha-beta"/);

@@ -30,7 +30,9 @@ impl WeightParameter {
             self.json_name.to_string(),
             serde_json::Value::Number(serde_json::Number::from(next.clamp(self.min, self.max))),
         );
-        serde_json::from_value(value).expect("EvalWeights parameter metadata should be valid")
+        serde_json::from_value::<EvalWeights>(value)
+            .expect("EvalWeights parameter metadata should be valid")
+            .constrained()
     }
 }
 

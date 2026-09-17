@@ -141,34 +141,6 @@ impl Game {
             .killers
             .resize((depth as usize).saturating_add(3), [None, None]);
 
-        // Check evasions are tactically forced and should not wait behind the
-        // full multiverse turn planner. In heavily branched positions the full
-        // planner can spend its budget proving long alternatives while a simple
-        // capture/block already saves the royal piece.
-        if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
-            let score = plan.score_hint;
-            let terminal_royal_capture = self.turn_plan_ends_in_royal_capture(&plan.moves);
-            let result = AiSearchResult {
-                principal_variation: vec![plan.moves.clone()],
-                moves: plan.moves,
-                score,
-                depth: min_completed_depth,
-                nodes: context.nodes,
-                status: "ok",
-                terminal_royal_capture,
-            };
-            let sample = label.map(|label| SearchPerfSample {
-                label,
-                elapsed_micros: SearchInstant::now().duration_since(started).as_micros(),
-                nodes: context.nodes,
-                stats: context.stats,
-            });
-            if let Some(sample) = &sample {
-                let _ = sample.summary_score();
-            }
-            return (result, sample);
-        }
-
         let mut best = AiSearchResult {
             moves: Vec::new(),
             score: 0,
@@ -182,17 +154,21 @@ impl Game {
         // Iterative deepening preserves a usable shallower answer if the node
         // limit is hit before the requested depth completes.
         let requested_deadline = context.deadline;
-        let mut previous_score = 0;
+        let mut previous_score: i32 = 0;
+        // Depth one is a volatile material-only horizon in 5D chess. Give the
+        // first aspiration probe room for a queen-scale swing; subsequent
+        // iterations adapt to the actual score delta and regain narrow-window
+        // pruning.
+        let mut previous_delta = INITIAL_ASPIRATION_WINDOW / 2;
         for current_depth in 1..=depth {
-            context.deadline = if current_depth <= min_completed_depth {
-                None
-            } else {
-                requested_deadline
-            };
+            // The time budget is authoritative. A minimum depth is a priority,
+            // not permission to freeze the browser indefinitely.
+            context.deadline = requested_deadline;
             let window = if context.use_aspiration_windows() && current_depth > 1 {
+                let half_width = ASPIRATION_WINDOW.max(previous_delta.saturating_mul(2));
                 Some((
-                    previous_score - ASPIRATION_WINDOW,
-                    previous_score + ASPIRATION_WINDOW,
+                    previous_score.saturating_sub(half_width),
+                    previous_score.saturating_add(half_width),
                 ))
             } else {
                 None
@@ -202,6 +178,26 @@ impl Game {
             else {
                 break;
             };
+            if context.exhausted() {
+                // An interrupted iteration is not a completed depth. Preserve
+                // the previous result; at depth one the partial root result is
+                // still a legal and better-informed timeout fallback.
+                if best.status == "noLegalTurn" {
+                    best = AiSearchResult {
+                        principal_variation,
+                        terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
+                        moves: plan.moves,
+                        score,
+                        depth: 1,
+                        nodes: context.nodes,
+                        status: "ok",
+                    };
+                }
+                break;
+            }
+            if current_depth > 1 {
+                previous_delta = score.abs_diff(previous_score).min(i32::MAX as u32) as i32;
+            }
             previous_score = score;
             best = AiSearchResult {
                 principal_variation,
@@ -292,18 +288,6 @@ impl Game {
         context
             .killers
             .resize((depth as usize).saturating_add(3), [None, None]);
-
-        if let Some(plan) = self.immediate_check_escape_plan(&mut context) {
-            return AiSearchResult {
-                principal_variation: vec![plan.moves.clone()],
-                terminal_royal_capture: self.turn_plan_ends_in_royal_capture(&plan.moves),
-                moves: plan.moves,
-                score: plan.score_hint,
-                depth: 1,
-                nodes: context.nodes,
-                status: "ok",
-            };
-        }
 
         let partition_count = partition_count.max(1);
         let partition_index = partition_index.min(partition_count - 1);
@@ -648,6 +632,7 @@ impl Game {
         deadline: Option<SearchInstant>,
     ) -> Vec<MoveStep> {
         let mut moves = Vec::new();
+        let present_time = self.present_time();
         for timeline in &self.timelines {
             if !self.is_active_timeline(timeline.id) {
                 continue;
@@ -658,7 +643,7 @@ impl Game {
             if deadline_expired(deadline) {
                 return moves;
             }
-            if board.side_to_move != self.turn {
+            if board.side_to_move != self.turn || present_time != Some(board.time) {
                 continue;
             }
             for y in 0..8 {
@@ -677,7 +662,9 @@ impl Game {
                         if deadline_expired(deadline) {
                             return false;
                         }
-                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                        let Some(move_kind) =
+                            self.legal_move_kind_from_valid_source(from, to, piece)
+                        else {
                             return true;
                         };
                         if self.allows_search_move(from, to, piece, move_kind) {
@@ -733,7 +720,8 @@ impl Game {
                     if deadline_expired(deadline) {
                         return false;
                     }
-                    let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                    let Some(move_kind) = self.legal_move_kind_from_valid_source(from, to, piece)
+                    else {
                         return true;
                     };
                     if self.allows_search_move(from, to, piece, move_kind) {
@@ -796,7 +784,8 @@ impl Game {
                         return false;
                     }
                     legal_move_attempts += 1;
-                    let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
+                    let Some(move_kind) = self.legal_move_kind_from_valid_source(from, to, piece)
+                    else {
                         return true;
                     };
                     if self.allows_search_move(from, to, piece, move_kind) {
@@ -1001,11 +990,7 @@ impl Game {
         if matches!(move_kind, MoveKind::Branch) {
             return QueenTemporalIntent::CreateBranch;
         }
-        if self
-            .royal_piece_positions(piece.color)
-            .into_iter()
-            .any(|royal| same_board(royal, movement.to) && board_distance(royal, movement.to) <= 2)
-        {
+        if self.latest_royal_near(movement.to, Some(piece.color)) {
             return QueenTemporalIntent::DefendRoyal;
         }
         if self.is_square_attacked(movement.from, piece.color.opposite()) {
@@ -1350,22 +1335,12 @@ impl Game {
         movement: MoveStep,
         weights: &EvalWeights,
     ) -> i32 {
-        let Some(piece) = self.piece_at(movement.from) else {
+        if self.piece_at(movement.from).is_none() {
             return 0;
-        };
+        }
         let mut score = 0;
-        let source_touches_royal_board = self
-            .royal_piece_positions(piece.color)
-            .into_iter()
-            .chain(self.royal_piece_positions(piece.color.opposite()))
-            .any(|royal| {
-                same_board(royal, movement.from) && board_distance(royal, movement.from) <= 2
-            });
-        let destination_touches_royal_board = self
-            .royal_piece_positions(piece.color)
-            .into_iter()
-            .chain(self.royal_piece_positions(piece.color.opposite()))
-            .any(|royal| same_board(royal, movement.to) && board_distance(royal, movement.to) <= 2);
+        let (source_touches_royal_board, destination_touches_royal_board) =
+            self.royal_proximity_flags(movement.from, movement.to);
         if source_touches_royal_board {
             score += weights.royal_shelter.max(1) * 2;
         }
@@ -1387,6 +1362,69 @@ impl Game {
             score -= weights.piece_activity.max(1);
         }
         score
+    }
+
+    fn royal_proximity_flags(&self, source: Position, destination: Position) -> (bool, bool) {
+        let mut source_near = false;
+        let mut destination_near = false;
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            for (y, rank) in board.board.iter().enumerate() {
+                for (x, piece) in rank.iter().enumerate() {
+                    if !piece.is_some_and(|piece| Self::is_royal_piece(piece.piece_type)) {
+                        continue;
+                    }
+                    let royal = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x: x as i32,
+                        y: y as i32,
+                    };
+                    source_near |= same_board(royal, source) && board_distance(royal, source) <= 2;
+                    destination_near |=
+                        same_board(royal, destination) && board_distance(royal, destination) <= 2;
+                    if source_near && destination_near {
+                        return (true, true);
+                    }
+                }
+            }
+        }
+        (source_near, destination_near)
+    }
+
+    fn latest_royal_near(&self, target: Position, color: Option<Color>) -> bool {
+        self.timelines.iter().any(|timeline| {
+            timeline.boards.last().is_some_and(|board| {
+                board.board.iter().enumerate().any(|(y, rank)| {
+                    rank.iter().enumerate().any(|(x, piece)| {
+                        piece.is_some_and(|piece| {
+                            color.is_none_or(|color| piece.color == color)
+                                && Self::is_royal_piece(piece.piece_type)
+                                && same_board(
+                                    Position {
+                                        timeline_id: timeline.id,
+                                        time: board.time,
+                                        x: x as i32,
+                                        y: y as i32,
+                                    },
+                                    target,
+                                )
+                                && board_distance(
+                                    Position {
+                                        timeline_id: timeline.id,
+                                        time: board.time,
+                                        x: x as i32,
+                                        y: y as i32,
+                                    },
+                                    target,
+                                ) <= 2
+                        })
+                    })
+                })
+            })
+        })
     }
 
     pub(crate) fn quiet_development_order_score(
@@ -1622,28 +1660,15 @@ impl Game {
         }
 
         let mover = self.turn;
-        let creates_or_answers_royal_setup = child.royal_capture_available(mover)
-            || child.royal_capture_setup_pressure_for_limited(mover, &context.weights, 12) > 0
-            || child.temporal_royal_corridor_pressure_for(mover, &context.weights)
-                > self.temporal_royal_corridor_pressure_for(mover, &context.weights)
-            || child.royal_capture_setup_pressure_for_limited(
-                mover.opposite(),
-                &context.weights,
-                12,
-            ) < self.royal_capture_setup_pressure_for_limited(
-                mover.opposite(),
-                &context.weights,
-                12,
-            );
-
-        let reduced = depth > 2
-            && index >= LATE_MOVE_REDUCTION_AFTER
-            && !creates_or_answers_royal_setup
-            && plan.moves.iter().all(|movement| {
-                movement.from.timeline_id == movement.to.timeline_id
-                    && movement.from.time == movement.to.time
-                    && child.piece_at(movement.to).is_none()
+        let tactical = child.staged_royal_capture_by == Some(mover)
+            || child.is_in_check(mover.opposite())
+            || plan.moves.iter().any(|movement| {
+                self.piece_at(movement.to).is_some()
+                    || movement.from.timeline_id != movement.to.timeline_id
+                    || movement.from.time != movement.to.time
             });
+
+        let reduced = depth > 2 && index >= LATE_MOVE_REDUCTION_AFTER && !tactical;
 
         let base_depth = if reduced {
             context.stats.reduced_searches += 1;
@@ -1652,7 +1677,7 @@ impl Game {
             depth - 1
         };
 
-        if creates_or_answers_royal_setup {
+        if tactical {
             (base_depth + 1).min(depth)
         } else {
             base_depth

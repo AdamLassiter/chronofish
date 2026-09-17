@@ -26,6 +26,7 @@ impl Game {
         })
     }
 
+    #[inline(always)]
     pub(crate) fn attacks_square(&self, piece: Piece, from: Position, target: Position) -> bool {
         if !Self::in_bounds(target.x, target.y)
             || from.timeline_id == target.timeline_id
@@ -207,6 +208,7 @@ impl Game {
         self.pawn_move_kind(piece, from, to, delta)
     }
 
+    #[inline(always)]
     pub(crate) fn piece_attacks(
         &self,
         piece: Piece,
@@ -472,6 +474,7 @@ impl Game {
         true
     }
 
+    #[inline(always)]
     pub(crate) fn axis_delta(&self, from: Position, to: Position) -> Delta {
         let timeline_delta = if from.timeline_id == to.timeline_id {
             0
@@ -493,6 +496,7 @@ impl Game {
         }
     }
 
+    #[inline(always)]
     pub(crate) fn movement_delta(&self, from: Position, to: Position) -> Delta {
         let mut delta = self.axis_delta(from, to);
         // Cross-board time movement advances every other board because legal

@@ -76,6 +76,29 @@ fn bounded_evaluation_is_deterministic_and_respects_fast_limits() {
 }
 
 #[test]
+fn generated_mobility_count_matches_bruteforce_on_multiverse_positions() {
+    let mut branched = Game::new();
+    branched
+        .load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0f7pf5\n\
+             5. T4L0g4QT0L0e4>L1",
+        )
+        .expect("branched mobility fixture should replay");
+
+    for game in [&Game::new(), &branched] {
+        for color in [Color::White, Color::Black] {
+            assert_eq!(
+                game.legal_single_move_count_for(color),
+                game.legal_single_move_count_for_bruteforce(color),
+            );
+        }
+    }
+}
+
+#[test]
 fn full_evaluation_limits_preserve_direct_evaluation_score() {
     let game = Game::new();
     let weights = EvalWeights::default_tuned();
@@ -613,30 +636,36 @@ fn ai_timed_json_reports_principal_variation_beyond_selected_turn() {
 }
 
 #[test]
-fn timed_ai_search_completes_default_minimum_depth_before_timing_out() {
+fn timed_ai_search_returns_legal_fallback_without_ignoring_deadline() {
     let game = Game::new();
+    let started = SearchInstant::now();
     let json = game.ai_turn_timed_json(3, 20_000, 1);
+    let elapsed = SearchInstant::now().duration_since(started);
     let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
 
-    assert_eq!(
-        value["depth"].as_i64(),
-        Some(Game::DEFAULT_MIN_AI_SEARCH_DEPTH as i64),
-        "timed search should complete the default minimum depth before returning: {json}"
-    );
+    assert_eq!(value["status"], "ok");
+    assert!(value["moves"]
+        .as_array()
+        .is_some_and(|moves| !moves.is_empty()));
+    assert!(value["depth"].as_i64().is_some_and(|depth| depth >= 1));
+    assert!(elapsed < std::time::Duration::from_millis(250));
 }
 
 #[test]
-fn timed_ai_search_completes_requested_minimum_depth_before_timing_out() {
+fn requested_minimum_depth_does_not_override_wall_clock_budget() {
     let mut game = Game::new();
     game.timelines[0].boards = vec![snapshot(0, Color::White, empty_board_with_kings())];
+    let started = SearchInstant::now();
     let json = game.ai_turn_timed_min_depth_json(3, 3, 20_000, 1);
+    let elapsed = SearchInstant::now().duration_since(started);
     let value: serde_json::Value = serde_json::from_str(&json).expect("valid AI JSON");
 
-    assert_eq!(
-        value["depth"].as_i64(),
-        Some(3),
-        "timed search should complete the caller's minimum depth before returning: {json}"
-    );
+    assert_eq!(value["status"], "ok");
+    assert!(value["moves"]
+        .as_array()
+        .is_some_and(|moves| !moves.is_empty()));
+    assert!(value["depth"].as_i64().is_some_and(|depth| depth < 3));
+    assert!(elapsed < std::time::Duration::from_millis(250));
 }
 
 #[test]
@@ -660,6 +689,20 @@ fn effort_config_parses_configurable_min_depth() {
     assert!(effort.min_depth <= effort.depth);
     assert_eq!(effort.search_strategy, CpuSearchStrategy::AlphaBeta);
     assert_eq!(default_cpu_search_strategy(), CpuSearchStrategy::AlphaBeta);
+}
+
+#[test]
+fn runtime_weights_preserve_basic_material_ordering() {
+    let weights = EvalWeights::default_tuned();
+
+    assert!(weights.king > weights.queen);
+    assert!(weights.queen > weights.rook);
+    assert!(weights.rook > weights.bishop);
+    assert!(weights.rook > weights.knight);
+    assert!(weights.bishop > weights.pawn);
+    assert!(weights.knight > weights.pawn);
+    assert!(weights.centrality * 14 < weights.rook);
+    assert!(weights.mobility * 32 < weights.rook);
 }
 
 #[test]

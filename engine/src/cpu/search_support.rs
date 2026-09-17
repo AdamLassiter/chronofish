@@ -22,6 +22,9 @@ impl SearchContext {
             evaluation_cache: EvaluationCache::new(max_nodes),
             turn_plan_cache: std::collections::HashMap::new(),
             attack_cache: std::collections::HashMap::new(),
+            check_cache: std::collections::HashMap::new(),
+            pressure_cache: std::collections::HashMap::new(),
+            root_verification_cache: std::collections::HashMap::new(),
             killers: vec![[None, None]; 16],
             history: std::collections::HashMap::new(),
             stats: SearchStats::default(),
@@ -135,6 +138,17 @@ impl SearchContext {
         let attacked = game.is_square_attacked(target, by_color);
         self.attack_cache.insert(key, attacked);
         attacked
+    }
+
+    pub(crate) fn is_in_check_cached(&mut self, game: &Game, color: Color) -> bool {
+        let key = game.position_hash ^ color_hash(color).rotate_left(41);
+        if let Some(in_check) = self.check_cache.get(&key) {
+            self.stats.check_cache_hits += 1;
+            return *in_check;
+        }
+        let in_check = game.is_in_check(color);
+        self.check_cache.insert(key, in_check);
+        in_check
     }
 
     pub(crate) fn record_cutoff(&mut self, depth: i32, movement: Option<MoveStep>) {
@@ -303,6 +317,9 @@ impl SearchPerfSample {
             + self.stats.legal_move_attempts as u128
             + self.stats.attack_queries as u128
             + self.stats.attack_cache_hits as u128
+            + self.stats.check_cache_hits as u128
+            + self.stats.pressure_cache_hits as u128
+            + self.stats.root_verification_cache_hits as u128
             + self.stats.search_clones as u128
             + self.stats.turn_plan_cache_hits as u128
             + self.stats.tt_hits as u128

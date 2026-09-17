@@ -101,7 +101,7 @@ impl Game {
         }
 
         let limit = self.staged_move_limit(context, root_level, depth);
-        let generation_limit = self.staged_generation_limit(limit, root_level);
+        let generation_limit = self.staged_generation_limit(limit, root_level, context);
         let mut moves = self.prioritized_turn_moves(self.turn, context, generation_limit);
         if root_level {
             moves = self.root_move_beam(moves, limit, context);
@@ -154,7 +154,7 @@ impl Game {
             line.push(movement);
             line.extend(suffix);
             let score = if root_level {
-                self.verified_root_score(&line, score, context)
+                self.verified_root_score(&line, score, depth, context)
             } else {
                 score
             };
@@ -208,7 +208,7 @@ impl Game {
         }
 
         let limit = self.staged_move_limit(context, root_level, depth);
-        let generation_limit = self.staged_generation_limit(limit, root_level);
+        let generation_limit = self.staged_generation_limit(limit, root_level, context);
         let mut moves = self.prioritized_turn_moves(self.turn, context, generation_limit);
         if root_level {
             moves = self.root_move_beam(moves, limit, context);
@@ -250,7 +250,18 @@ impl Game {
                 self.search_pending_root_with_pv(depth, alpha, beta, context, None, false)
             };
             if let Some((_, score, _)) = &result {
-                if use_pvs && index > 0 && *score > alpha && *score < beta {
+                let tie_replaces = best.as_ref().is_some_and(|(best_moves, best_score, _)| {
+                    *score == *best_score
+                        && Self::move_cmp(&movement, best_moves.first().unwrap_or(&movement))
+                            .is_lt()
+                });
+                let missing_pv = result
+                    .as_ref()
+                    .is_some_and(|(_, _, principal_variation)| principal_variation.is_empty());
+                if use_pvs
+                    && index > 0
+                    && ((*score > alpha && *score < beta) || (missing_pv && tie_replaces))
+                {
                     result =
                         self.search_pending_root_with_pv(depth, alpha, beta, context, None, false);
                 }
@@ -263,7 +274,7 @@ impl Game {
             line.push(movement);
             line.extend(suffix);
             let score = if root_level {
-                self.verified_root_score(&line, score, context)
+                self.verified_root_score(&line, score, depth, context)
             } else {
                 score
             };
@@ -526,7 +537,7 @@ impl Game {
                     context.root_plan_limit().min(depth_move_limit(depth, 12))
                 }
                 SearchPressureMode::Quiet => {
-                    context.root_plan_limit().min(depth_move_limit(depth, 8))
+                    context.root_plan_limit().min(depth_move_limit(depth, 5))
                 }
             };
         }
@@ -536,7 +547,7 @@ impl Game {
             SearchPressureMode::Tactical => {
                 context.child_plan_limit().min(depth_move_limit(depth, 6))
             }
-            SearchPressureMode::Quiet => context.child_plan_limit().min(depth_move_limit(depth, 3)),
+            SearchPressureMode::Quiet => context.child_plan_limit().min(depth_move_limit(depth, 1)),
         }
     }
 
@@ -544,9 +555,14 @@ impl Game {
         self.present_obligation_count(self.turn) <= 1
     }
 
-    fn staged_generation_limit(&self, limit: usize, root_level: bool) -> usize {
+    fn staged_generation_limit(
+        &self,
+        limit: usize,
+        root_level: bool,
+        context: &mut SearchContext,
+    ) -> usize {
         if root_level
-            && !self.is_in_check(self.turn)
+            && !context.is_in_check_cached(self, self.turn)
             && self.present_obligation_count(self.turn) < 4
         {
             limit.saturating_mul(4).max(limit)
@@ -559,10 +575,10 @@ impl Game {
         &self,
         moves: Vec<MoveStep>,
         limit: usize,
-        context: &SearchContext,
+        context: &mut SearchContext,
     ) -> Vec<MoveStep> {
         if moves.len() <= limit
-            || self.is_in_check(self.turn)
+            || context.is_in_check_cached(self, self.turn)
             || self.present_obligation_count(self.turn) >= 4
         {
             return moves.into_iter().take(limit).collect();
@@ -629,9 +645,33 @@ impl Game {
         RootMoveIntent::Other
     }
 
-    fn verified_root_score(&self, line: &[MoveStep], score: i32, context: &SearchContext) -> i32 {
+    fn verified_root_score(
+        &self,
+        line: &[MoveStep],
+        score: i32,
+        depth: i32,
+        context: &mut SearchContext,
+    ) -> i32 {
         if self.present_obligation_count(self.turn) >= 4 {
             return score;
+        }
+        let depth_bucket = u64::from(depth <= 1);
+        let verification_key = line
+            .iter()
+            .fold(self.position_hash ^ mix64(depth_bucket), |key, movement| {
+                mix64(key ^ move_hash(*movement))
+            });
+        if let Some(refutation_penalty) = context
+            .root_verification_cache
+            .get(&verification_key)
+            .copied()
+        {
+            context.stats.root_verification_cache_hits += 1;
+            return if self.turn == context.root_color {
+                score - refutation_penalty
+            } else {
+                score + refutation_penalty
+            };
         }
         let plan = TurnPlan {
             moves: line.to_vec(),
@@ -645,14 +685,28 @@ impl Game {
         if child.royal_capture_available(opponent) {
             refutation_penalty += CHECKMATE_SCORE / 3;
         }
-        if child.royal_capture_setup_pressure_for_limited(opponent, &context.weights, 8) > 0 {
+        let setup_probe_limit = if depth > 1 { 2 } else { 8 };
+        if child.royal_capture_setup_pressure_for_limited(
+            opponent,
+            &context.weights,
+            setup_probe_limit,
+        ) > 0
+        {
             refutation_penalty += 20_000;
         }
-        if !child
-            .forcing_moves_until(&context.weights, context.deadline)
-            .is_empty()
+        // A full forcing-move scan is valuable at the one-ply horizon, but at
+        // deeper iterations alpha-beta has already searched the opponent turn.
+        if depth <= 1
+            && !child
+                .forcing_moves_until(&context.weights, context.deadline)
+                .is_empty()
         {
             refutation_penalty += 4_000;
+        }
+        if !deadline_expired(context.deadline) {
+            context
+                .root_verification_cache
+                .insert(verification_key, refutation_penalty);
         }
         if refutation_penalty == 0 {
             return score;
@@ -669,34 +723,33 @@ impl Game {
         color: Color,
         context: &mut SearchContext,
     ) -> SearchPressureMode {
+        let cache_key = self.position_hash ^ color_hash(color).rotate_left(17);
+        if let Some(mode) = context.pressure_cache.get(&cache_key).copied() {
+            context.stats.pressure_cache_hits += 1;
+            return mode;
+        }
         let obligations = self.present_obligation_count(color);
-        if obligations >= 4 || self.is_in_check(color) {
-            return SearchPressureMode::Panic;
-        }
-
-        let opponent = color.opposite();
-        if self.royal_capture_available(opponent)
-            || self.royal_capture_setup_pressure_for_limited(opponent, &context.weights, 8) > 0
-        {
-            return SearchPressureMode::Panic;
-        }
-
-        if obligations >= 2
-            || self.royal_capture_available(color)
-            || self.royal_capture_setup_pressure_for_limited(color, &context.weights, 8) > 0
-        {
-            return SearchPressureMode::Tactical;
-        }
-
-        SearchPressureMode::Quiet
+        let weights = context.weights;
+        let mode = if obligations >= 4 || context.is_in_check_cached(self, color) {
+            SearchPressureMode::Panic
+        } else {
+            let opponent = color.opposite();
+            if self.royal_capture_available(opponent)
+                || self.royal_capture_setup_pressure_for_limited(opponent, &weights, 8) > 0
+            {
+                SearchPressureMode::Panic
+            } else if obligations >= 2
+                || self.royal_capture_available(color)
+                || self.royal_capture_setup_pressure_for_limited(color, &weights, 8) > 0
+            {
+                SearchPressureMode::Tactical
+            } else {
+                SearchPressureMode::Quiet
+            }
+        };
+        context.pressure_cache.insert(cache_key, mode);
+        mode
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SearchPressureMode {
-    Panic,
-    Tactical,
-    Quiet,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

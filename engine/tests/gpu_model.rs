@@ -1937,7 +1937,7 @@ fn training_sample_split_groups_batches_and_hashes_match_browser_policy() {
     assert_eq!(uniform_weight, first_batch.len() as f32);
     assert!(skewed_weight > uniform_weight);
     assert!(first_batch.iter().any(|index| *index == 0 || *index == 1));
-    assert!(first_batch.iter().any(|index| *index == 2));
+    assert!(first_batch.contains(&2));
     let mut request = Vec::new();
     for value in [32_u32, 2, 3, 3, 1, 1234, 0, 2, 3, 0, 1, 2] {
         request.extend_from_slice(&value.to_le_bytes());
@@ -2287,10 +2287,7 @@ fn replay_retention_keeps_high_signal_samples_and_policy_supervision() {
     assert!(policy_retained
         .iter()
         .any(|sample| sample.position_key.as_deref() == Some("policy-search")));
-    assert_eq!(
-        replay_sample_priority(&policy_retained[0], 0, policy_retained.len()).is_finite(),
-        true
-    );
+    assert!(replay_sample_priority(&policy_retained[0], 0, policy_retained.len()).is_finite());
 }
 
 #[test]

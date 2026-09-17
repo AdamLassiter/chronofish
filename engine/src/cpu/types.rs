@@ -5,10 +5,10 @@ use super::*;
 // automation.
 pub(crate) const CHECKMATE_SCORE: i32 = 1_000_000;
 pub(crate) const MAX_TURN_PLANS: usize = 32;
-pub(crate) const MAX_ROOT_TURN_PLANS: usize = 16;
+pub(crate) const MAX_ROOT_TURN_PLANS: usize = 32;
 pub(crate) const MAX_CHILD_TURN_PLANS: usize = 8;
-pub(crate) const FAST_ROOT_TURN_PLANS: usize = 8;
-pub(crate) const FAST_CHILD_TURN_PLANS: usize = 3;
+pub(crate) const FAST_ROOT_TURN_PLANS: usize = 12;
+pub(crate) const FAST_CHILD_TURN_PLANS: usize = 4;
 pub(crate) const FAST_SEARCH_NODE_THRESHOLD: usize = 5_000;
 pub(crate) const MAX_MOVES_PER_NODE: usize = 24;
 #[allow(dead_code)]
@@ -16,6 +16,7 @@ pub(crate) const REQUIRED_MOVES_PER_BOARD: usize = 4;
 pub(crate) const MAX_QUIESCENCE_DEPTH: i32 = 1;
 pub(crate) const MAX_QUIESCENCE_MOVES: usize = 3;
 pub(crate) const ASPIRATION_WINDOW: i32 = 400;
+pub(crate) const INITIAL_ASPIRATION_WINDOW: i32 = 4_000;
 pub(crate) const LATE_MOVE_REDUCTION_AFTER: usize = 8;
 pub(crate) const HISTORY_BONUS: i32 = 32;
 
@@ -315,6 +316,9 @@ pub(crate) struct SearchContext {
     pub(crate) evaluation_cache: EvaluationCache,
     pub(crate) turn_plan_cache: std::collections::HashMap<u64, Vec<TurnPlan>>,
     pub(crate) attack_cache: std::collections::HashMap<u64, bool>,
+    pub(crate) check_cache: std::collections::HashMap<u64, bool>,
+    pub(crate) pressure_cache: std::collections::HashMap<u64, SearchPressureMode>,
+    pub(crate) root_verification_cache: std::collections::HashMap<u64, i32>,
     pub(crate) killers: Vec<[Option<MoveStep>; 2]>,
     pub(crate) history: std::collections::HashMap<u64, i32>,
     pub(crate) stats: SearchStats,
@@ -345,22 +349,22 @@ impl EvaluationLimits {
     pub(crate) fn for_nodes(max_nodes: usize) -> Self {
         if max_nodes <= FAST_SEARCH_NODE_THRESHOLD {
             Self {
-                turn_moves: 8,
-                completion_results: 2,
-                zugzwang_moves_per_board: 4,
-                setup_results: 4,
-                setup_probes: 96,
-                attack_checks: 256,
+                turn_moves: 4,
+                completion_results: 1,
+                zugzwang_moves_per_board: 2,
+                setup_results: 2,
+                setup_probes: 32,
+                attack_checks: 64,
                 deadline: None,
             }
         } else {
             Self {
-                turn_moves: 24,
-                completion_results: 4,
-                zugzwang_moves_per_board: 8,
-                setup_results: 8,
-                setup_probes: 256,
-                attack_checks: 16_384,
+                turn_moves: 6,
+                completion_results: 2,
+                zugzwang_moves_per_board: 4,
+                setup_results: 4,
+                setup_probes: 32,
+                attack_checks: 64,
                 deadline: None,
             }
         }
@@ -441,6 +445,13 @@ pub(crate) enum SearchBound {
     Upper,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SearchPressureMode {
+    Panic,
+    Tactical,
+    Quiet,
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct SearchOptions {
     pub(crate) tt_best_move: bool,
@@ -461,6 +472,9 @@ pub(crate) struct SearchStats {
     pub(crate) legal_move_attempts: usize,
     pub(crate) attack_queries: usize,
     pub(crate) attack_cache_hits: usize,
+    pub(crate) check_cache_hits: usize,
+    pub(crate) pressure_cache_hits: usize,
+    pub(crate) root_verification_cache_hits: usize,
     pub(crate) search_clones: usize,
     pub(crate) expensive_order_probes: usize,
     pub(crate) turn_plan_cache_hits: usize,

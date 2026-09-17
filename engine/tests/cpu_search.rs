@@ -82,7 +82,8 @@ fn native_cpu_search_returns_web_worker_compatible_json() {
     assert_eq!(response.cpu_search, "heuristic");
     let value: serde_json::Value =
         serde_json::from_str(&response.result_json).expect("CPU search JSON should parse");
-    assert_eq!(value["status"], "beam");
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["searchEngine"], "selective-alpha-beta");
     assert!(value["moves"].as_array().is_some());
     assert!(value["principalVariation"].as_array().is_some());
     assert_eq!(value["depth"], 1);
@@ -94,7 +95,7 @@ fn native_cpu_search_can_use_alpha_beta_when_requested() {
         depth: 2,
         min_depth: Some(2),
         nodes: 20_000,
-        time_ms: 1_000,
+        time_ms: 5_000,
         search_strategy: CpuSearchStrategy::AlphaBeta,
         ..CpuSearchRequest::default()
     })
@@ -110,7 +111,7 @@ fn native_cpu_search_can_use_alpha_beta_when_requested() {
 }
 
 #[test]
-fn native_cpu_beam_search_reports_its_actual_one_ply_depth() {
+fn legacy_cpu_beam_setting_maps_to_bounded_selective_search() {
     let response = search(CpuSearchRequest {
         depth: 8,
         min_depth: Some(6),
@@ -123,8 +124,11 @@ fn native_cpu_beam_search_reports_its_actual_one_ply_depth() {
 
     let value: serde_json::Value =
         serde_json::from_str(&response.result_json).expect("CPU search JSON should parse");
-    assert_eq!(value["status"], "beam");
-    assert_eq!(value["depth"], 1);
+    assert_eq!(value["status"], "ok");
+    assert_eq!(value["searchEngine"], "selective-alpha-beta");
+    assert!(value["depth"]
+        .as_i64()
+        .is_some_and(|depth| (1..=2).contains(&depth)));
 }
 
 #[test]

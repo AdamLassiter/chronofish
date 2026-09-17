@@ -1,204 +1,6 @@
 use super::*;
 
 impl Game {
-    pub(crate) fn immediate_check_escape_plan(
-        &self,
-        context: &mut SearchContext,
-    ) -> Option<TurnPlan> {
-        let color = self.turn;
-        if !self.is_in_check(color) {
-            return None;
-        }
-
-        let royal_positions = self.royal_piece_positions(color);
-        let candidate_moves = self.local_royal_escape_moves(&royal_positions, &context.weights);
-        if candidate_moves.is_empty() {
-            return None;
-        }
-
-        let mut best: Option<TurnPlan> = None;
-        for movement in candidate_moves.into_iter().take(MAX_MOVES_PER_NODE) {
-            if context.exhausted() {
-                break;
-            }
-            if !context.charge_clone() {
-                break;
-            }
-
-            let mut next = self.clone_for_search();
-            if !next.apply_move_for_search(movement.from, movement.to) {
-                continue;
-            }
-            let mut moves = vec![movement];
-            if !next.complete_present_turn_greedily(color, &mut moves, context.deadline)
-                || !next.submit_turn_for_search()
-            {
-                continue;
-            }
-
-            let score_hint =
-                self.check_escape_pre_score(movement, &context.weights) - moves.len() as i32;
-            let plan = TurnPlan { moves, score_hint };
-            let replace = best.as_ref().is_none_or(|current| {
-                plan.score_hint > current.score_hint
-                    || plan.score_hint == current.score_hint
-                        && Self::turn_plan_cmp(&plan, current).is_lt()
-            });
-            if replace {
-                best = Some(plan);
-            }
-        }
-
-        best
-    }
-
-    pub(crate) fn complete_present_turn_greedily(
-        &mut self,
-        color: Color,
-        moves: &mut Vec<MoveStep>,
-        deadline: Option<SearchInstant>,
-    ) -> bool {
-        let max_steps = self
-            .timelines
-            .iter()
-            .filter(|timeline| self.is_active_timeline(timeline.id))
-            .count()
-            + 2;
-        while self.has_pending_present_board(color) {
-            if moves.len() >= max_steps || deadline_expired(deadline) {
-                return false;
-            }
-            let Some(movement) = self.first_present_legal_move(color, deadline) else {
-                return false;
-            };
-            if !self.apply_move_for_search(movement.from, movement.to) {
-                return false;
-            }
-            moves.push(movement);
-        }
-        true
-    }
-
-    pub(crate) fn first_present_legal_move(
-        &self,
-        color: Color,
-        deadline: Option<SearchInstant>,
-    ) -> Option<MoveStep> {
-        let present_time = self.present_time()?;
-        for timeline in &self.timelines {
-            if !self.is_active_timeline(timeline.id) {
-                continue;
-            }
-            let Some(board) = timeline
-                .boards
-                .last()
-                .filter(|board| board.time == present_time && board.side_to_move == color)
-            else {
-                continue;
-            };
-            for y in 0..8 {
-                for x in 0..8 {
-                    let from = Position {
-                        timeline_id: timeline.id,
-                        time: board.time,
-                        x,
-                        y,
-                    };
-                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == color)
-                    else {
-                        continue;
-                    };
-                    let mut found = None;
-                    self.for_each_piece_candidate_destination(from, piece, |to| {
-                        if deadline_expired(deadline) {
-                            return false;
-                        }
-                        let Some((piece, move_kind)) = self.legal_move_kind(from, to) else {
-                            return true;
-                        };
-                        if self.allows_search_move(from, to, piece, move_kind) {
-                            found = Some(MoveStep { from, to });
-                            return false;
-                        }
-                        true
-                    });
-                    if found.is_some() || deadline_expired(deadline) {
-                        return found;
-                    }
-                }
-            }
-        }
-        None
-    }
-
-    pub(crate) fn local_royal_escape_moves(
-        &self,
-        positions: &[Position],
-        weights: &EvalWeights,
-    ) -> Vec<MoveStep> {
-        let mut moves = Vec::new();
-        for from in positions {
-            if !self.is_active_timeline(from.timeline_id) {
-                continue;
-            }
-            if !self
-                .piece_at(*from)
-                .is_some_and(|piece| piece.piece_type == PieceType::King)
-            {
-                continue;
-            }
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    if dx == 0 && dy == 0 {
-                        continue;
-                    }
-                    let to = Position {
-                        timeline_id: from.timeline_id,
-                        time: from.time,
-                        x: from.x + dx,
-                        y: from.y + dy,
-                    };
-                    if self
-                        .piece_at(to)
-                        .is_some_and(|piece| piece.color != self.turn)
-                        && self.can_move_to(*from, to)
-                    {
-                        moves.push(MoveStep { from: *from, to });
-                    }
-                }
-            }
-        }
-        moves.sort_by(|left, right| {
-            self.check_escape_pre_score(*right, weights)
-                .cmp(&self.check_escape_pre_score(*left, weights))
-                .then_with(|| Self::move_cmp(left, right))
-        });
-        moves
-    }
-
-    pub(crate) fn check_escape_pre_score(&self, movement: MoveStep, weights: &EvalWeights) -> i32 {
-        let mut score = 0;
-        if let Some(piece) = self.piece_at(movement.from) {
-            if Self::is_royal_piece(piece.piece_type) {
-                score += CHECKMATE_SCORE / 4;
-            }
-        }
-        if let Some(piece) = self.piece_at(movement.to) {
-            score += weights.piece_value(piece.piece_type) * 16;
-            if Self::is_royal_piece(piece.piece_type) {
-                score += CHECKMATE_SCORE / 2;
-            }
-        }
-        if movement.from.timeline_id == movement.to.timeline_id
-            && movement.from.time == movement.to.time
-        {
-            score += weights.present_progress;
-        } else {
-            score -= weights.branch_penalty;
-        }
-        score
-    }
-
     pub(crate) fn legal_turn_plans_with_context(
         &self,
         context: &mut SearchContext,
@@ -346,7 +148,7 @@ impl Game {
             context,
             soft_limit.max(1),
         );
-        if self.is_in_check(color) {
+        if context.is_in_check_cached(self, color) {
             let evasions = self.check_evasion_moves(
                 timeline_id,
                 time,
@@ -504,9 +306,9 @@ impl Game {
         &self,
         movement: MoveStep,
         depth: i32,
-        context: &SearchContext,
+        context: &mut SearchContext,
     ) -> bool {
-        if depth <= 1 || self.is_in_check(self.turn) {
+        if depth <= 1 {
             return false;
         }
         if movement.from.timeline_id == movement.to.timeline_id
@@ -527,6 +329,9 @@ impl Game {
             return false;
         }
         if context.move_is_search_suggested(movement, self.search_key(context.root_color)) {
+            return false;
+        }
+        if context.is_in_check_cached(self, self.turn) {
             return false;
         }
         self.cheap_move_order_score(&movement, &context.weights) <= 0

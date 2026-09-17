@@ -113,7 +113,7 @@
           Minimum depth
           <input id="custom-cpu-min-depth" type="number" min="1" max="16" step="1" value="2"
             aria-describedby="custom-cpu-min-depth-help">
-          <span id="custom-cpu-min-depth-help" class="field-help">Depth the bot should complete before honoring the time limit. Depth 2 lets it consider an opponent reply.</span>
+          <span id="custom-cpu-min-depth-help" class="field-help">Depth prioritized before optional deeper iterations. The wall-clock limit remains authoritative.</span>
         </label>
         <label>
           Nodes
@@ -123,17 +123,16 @@
         </label>
         <label>
           Time ms
-          <input id="custom-cpu-time-ms" type="number" min="1" max="600000" step="1000" value="50000"
+          <input id="custom-cpu-time-ms" type="number" min="1" max="600000" step="1000" value="5000"
             aria-describedby="custom-cpu-time-help">
-          <span id="custom-cpu-time-help" class="field-help">Nominal wall-clock budget per turn in milliseconds. Minimum depth can overrun this if needed.</span>
+          <span id="custom-cpu-time-help" class="field-help">Wall-clock budget per turn in milliseconds.</span>
         </label>
         <label>
           Search strategy
           <select id="custom-cpu-search-strategy" aria-describedby="custom-cpu-search-strategy-help">
-            <option value="beam" selected>Beam</option>
-            <option value="alpha-beta">Alpha-beta</option>
+            <option value="alpha-beta" selected>Selective alpha-beta</option>
           </select>
-          <span id="custom-cpu-search-strategy-help" class="field-help">Beam quickly ranks promising complete turns. Alpha-beta searches deeper tactical replies.</span>
+          <span id="custom-cpu-search-strategy-help" class="field-help">Iterative selective search with tactical extensions and a legal timeout fallback.</span>
         </label>
         <div class="custom-cpu-actions">
           <button class="custom-cpu-button custom-cpu-button-primary" id="save-custom-cpu" type="button">Save settings</button>

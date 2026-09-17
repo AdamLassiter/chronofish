@@ -6,6 +6,7 @@ use super::*;
 impl EvalWeights {
     pub(crate) fn default_tuned() -> Self {
         serde_json::from_str(&active_parameters_json())
+            .map(Self::constrained)
             .expect("runtime AI parameters or built-in defaults should be valid JSON")
     }
 
@@ -16,7 +17,9 @@ impl EvalWeights {
     }
 
     pub(crate) fn set_active_from_json(json: &str) -> Result<(), String> {
-        let weights: Self = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let weights = serde_json::from_str::<Self>(json)
+            .map(Self::constrained)
+            .map_err(|error| error.to_string())?;
         ACTIVE_EVAL_WEIGHTS.with(|active| {
             *active.borrow_mut() = Some(weights);
         });
@@ -38,6 +41,41 @@ impl EvalWeights {
             PieceType::Pawn => self.pawn,
             PieceType::Brawn => self.brawn,
         }
+    }
+
+    /// Keep training from learning obviously losing material arithmetic. The
+    /// search may still prefer a sacrifice when tactics justify it, but static
+    /// positional terms cannot redefine a pawn as more valuable than a rook.
+    pub(crate) fn constrained(mut self) -> Self {
+        self.king = 20_000;
+        self.royal_queen = 20_500;
+        self.pawn = self.pawn.clamp(80, 200);
+        self.brawn = self.brawn.clamp(80, 240);
+
+        let minor_floor = self.pawn.saturating_mul(2);
+        let minor_ceiling = self.pawn.saturating_mul(5);
+        self.knight = self.knight.clamp(minor_floor, minor_ceiling);
+        self.bishop = self.bishop.clamp(minor_floor, minor_ceiling);
+        self.rook = self
+            .rook
+            .clamp(self.knight.max(self.bishop) + self.pawn, self.pawn * 8);
+        self.queen = self
+            .queen
+            .clamp(self.rook + self.pawn, self.pawn.saturating_mul(14));
+
+        self.common_king = self.common_king.clamp(minor_floor, self.rook);
+        self.princess = self
+            .princess
+            .clamp(self.knight.max(self.bishop), self.queen);
+        self.unicorn = self.unicorn.clamp(minor_floor, self.queen);
+        self.dragon = self.dragon.clamp(minor_floor, self.queen);
+
+        self.mobility = self.mobility.clamp(0, (self.pawn / 10).max(1));
+        self.centrality = self.centrality.clamp(0, (self.pawn / 10).max(1));
+        self.advancement = self.advancement.clamp(0, (self.pawn / 5).max(1));
+        self.development = self.development.clamp(0, (self.pawn / 4).max(1));
+        self.check_penalty = self.check_penalty.clamp(self.pawn, self.queen * 2);
+        self
     }
 }
 

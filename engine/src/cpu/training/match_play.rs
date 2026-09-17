@@ -16,6 +16,9 @@ pub(crate) fn play_match_until(
     // Full-match scoring keeps the objective aligned with real game outcomes
     // rather than stopping at a fixed ply horizon.
     let mut game = start;
+    // Adjudication must not use the candidate's own weights: otherwise a
+    // genome can win training by exaggerating the positions it already likes.
+    let adjudication_weights = EvalWeights::default_tuned();
     let mut score = 0;
     let mut stable_advantage = 0;
     let mut plies_played = 0;
@@ -144,8 +147,12 @@ pub(crate) fn play_match_until(
                 blunder: false,
             };
         }
-        let eval =
-            game.evaluate_heuristic_for_nodes_until(color, &weights, config.nodes, turn_deadline);
+        let eval = game.evaluate_heuristic_for_nodes_until(
+            color,
+            &adjudication_weights,
+            config.nodes,
+            turn_deadline,
+        );
         score += eval / 20;
         stable_advantage = if eval.abs() > 4_000 {
             stable_advantage + eval.signum()
@@ -179,7 +186,7 @@ pub(crate) fn play_match_until(
     let final_score = score
         + game.evaluate_heuristic_for_nodes_until(
             color,
-            &weights,
+            &adjudication_weights,
             config.nodes,
             earliest_deadline(deadline, match_deadline),
         ) / 4;

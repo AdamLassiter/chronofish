@@ -7,7 +7,11 @@ export interface CpuAiResult {
   moves: Move[];
   score?: number;
   depth?: number;
+  completedDepth?: number;
   nodes?: number;
+  elapsedMs?: number;
+  timedOut?: boolean;
+  searchEngine?: "selective-alpha-beta";
   terminal?: boolean;
   resultReason?: "royal-capture" | "threefold-repetition" | "stalemate" | null;
   principalVariation?: Move[][];

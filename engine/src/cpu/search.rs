@@ -3,8 +3,10 @@ use std::{
     collections::{BTreeMap, BTreeSet},
 };
 
+#[cfg(test)]
+use crate::cpu::{AiSearchResult, SearchContext, SearchOptions};
 use crate::{
-    cpu::{AiSearchResult, EvalWeights, SearchContext, SearchOptions},
+    cpu::{EvalWeights, SearchInstant},
     wasm_api::parse_game_snapshot,
     Game,
     Position,
@@ -291,17 +293,43 @@ pub(crate) fn search_game_json(
     let depth = depth.max(1);
     let nodes = nodes.max(1);
     let time_ms = time_ms.max(1);
-    match search_strategy {
+    let started = SearchInstant::now();
+    let result = match search_strategy {
         CpuSearchStrategy::AlphaBeta => match min_depth {
             Some(min_depth) => {
                 game.ai_turn_timed_min_depth_json(depth, min_depth.max(1), nodes, time_ms)
             }
             None => game.ai_turn_timed_json(depth, nodes, time_ms),
         },
-        CpuSearchStrategy::Beam => beam_search_result(game, nodes).to_json(),
+        // `beam` remains accepted for old saved settings and CLI scripts, but
+        // now selects the bounded fast policy instead of the tactically blind
+        // one-ply evaluator.
+        CpuSearchStrategy::Beam => {
+            game.ai_turn_timed_min_depth_json(depth.min(2), 1, nodes, time_ms)
+        }
+    };
+    let elapsed_ms = SearchInstant::now().duration_since(started).as_secs_f64() * 1_000.0;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&result) else {
+        return result;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "searchEngine".to_string(),
+            serde_json::Value::String("selective-alpha-beta".to_string()),
+        );
+        object.insert("elapsedMs".to_string(), serde_json::json!(elapsed_ms));
+        object.insert(
+            "timedOut".to_string(),
+            serde_json::Value::Bool(elapsed_ms >= f64::from(time_ms)),
+        );
+        if let Some(completed_depth) = object.get("depth").cloned() {
+            object.insert("completedDepth".to_string(), completed_depth);
+        }
     }
+    serde_json::to_string(&value).unwrap_or(result)
 }
 
+#[cfg(test)]
 pub(crate) fn beam_search_result(game: &Game, nodes: i32) -> AiSearchResult {
     let nodes = nodes.max(1) as usize;
     let weights = EvalWeights::active_tuned();

@@ -229,6 +229,31 @@ impl Game {
             .map(|kind| (piece, kind))
     }
 
+    /// Geometry and destination validation for search generators that have
+    /// already proved the source is active, latest, present, and owned by the
+    /// side to move.
+    pub(crate) fn legal_move_kind_from_valid_source(
+        &self,
+        from: Position,
+        to: Position,
+        piece: Piece,
+    ) -> Option<MoveKind> {
+        if !Self::in_bounds(to.x, to.y) {
+            return None;
+        }
+        let target_board = self.board(to.timeline_id, to.time)?;
+        let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
+        if !same_board && target_board.side_to_move != piece.color {
+            return None;
+        }
+        if target_board.board[to.y as usize][to.x as usize]
+            .is_some_and(|target| target.color == piece.color)
+        {
+            return None;
+        }
+        self.move_kind_for(piece, from, to)
+    }
+
     #[allow(dead_code)]
     pub(crate) fn legal_targets_json(&self, from: Position) -> String {
         let mut targets = Vec::new();
@@ -719,9 +744,10 @@ impl Game {
     pub(crate) fn present_board(&self) -> Option<&BoardSnapshot> {
         // The present line is the earliest latest-board among active timelines.
         // Inactive timelines do not hold the turn hostage.
+        let active_distance = self.active_timeline_distance();
         self.timelines
             .iter()
-            .filter(|timeline| self.is_active_timeline(timeline.id))
+            .filter(|timeline| Self::timeline_is_active(timeline, active_distance))
             .filter_map(|timeline| timeline.boards.last())
             .min_by_key(|board| board.time)
     }
@@ -731,10 +757,11 @@ impl Game {
     }
 
     pub(crate) fn has_pending_present_board(&self, color: Color) -> bool {
+        let active_distance = self.active_timeline_distance();
         let mut present_time = None;
         let mut pending = false;
         for timeline in &self.timelines {
-            if !self.is_active_timeline(timeline.id) {
+            if !Self::timeline_is_active(timeline, active_distance) {
                 continue;
             }
             let Some(board) = timeline.boards.last() else {
@@ -762,13 +789,10 @@ impl Game {
         let Some(timeline) = self.timeline(timeline_id) else {
             return false;
         };
-        if timeline.owner == TimelineOwner::Neutral {
-            return true;
-        }
+        Self::timeline_is_active(timeline, self.active_timeline_distance())
+    }
 
-        // Active timelines are balanced by distance from T0, not by owner rank.
-        // If one side has branched farther than the other, only the outermost
-        // timelines on that side go inactive.
+    pub(crate) fn active_timeline_distance(&self) -> i32 {
         let min_timeline = self
             .timelines
             .iter()
@@ -781,8 +805,10 @@ impl Game {
             .map(|timeline| timeline.id)
             .max()
             .unwrap_or(0);
-        let active_distance = (-min_timeline).min(max_timeline).max(0) + 1;
+        (-min_timeline).min(max_timeline).max(0) + 1
+    }
 
-        timeline.id.abs() <= active_distance
+    pub(crate) fn timeline_is_active(timeline: &Timeline, active_distance: i32) -> bool {
+        timeline.owner == TimelineOwner::Neutral || timeline.id.abs() <= active_distance
     }
 }

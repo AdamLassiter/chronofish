@@ -7,6 +7,7 @@ use std::{
 use crate::{
     cpu::{
         search::beam_search_result,
+        training::turn_plan_notation,
         AiSearchResult,
         EvalWeights,
         EvaluationLimits,
@@ -14,6 +15,7 @@ use crate::{
         SearchContext,
         SearchOptions,
         SearchStats,
+        TurnPlan,
         CHECKMATE_SCORE,
     },
     *,
@@ -298,6 +300,44 @@ fn perf_shallow_search_stats() {
 }
 
 #[test]
+#[ignore = "deep-search pruning diagnostics; run with --ignored --nocapture"]
+fn perf_deep_search_stats() {
+    let game = Game::new();
+    let (result, sample) = game.best_ai_turn_with_options_min_depth(
+        6,
+        1,
+        200_000,
+        None,
+        SearchOptions::optimized(),
+        Some("perf_deep_search"),
+    );
+    println!(
+        "deep search result status={} depth={} score={} moves={} notation={} nodes={}",
+        result.status,
+        result.depth,
+        result.score,
+        result.moves.len(),
+        turn_plan_notation(
+            &game,
+            &TurnPlan {
+                moves: result.moves.clone(),
+                score_hint: 0,
+            },
+        ),
+        result.nodes,
+    );
+    if let Some(sample) = sample {
+        println!(
+            "search_perf elapsed_us={} nodes={} nps={:.0}",
+            sample.elapsed_micros,
+            sample.nodes,
+            rate_per_second(sample.nodes, sample.elapsed_micros),
+        );
+        print_search_stats("deep_search", result.score, sample.nodes, &sample.stats);
+    }
+}
+
+#[test]
 #[ignore = "playing-strength diagnostics; run with --ignored --nocapture"]
 fn perf_alpha_beta_quality_against_beam() {
     let positions = fixture_positions();
@@ -393,6 +433,21 @@ fn fixture_positions() -> Vec<NamedPosition> {
         game: tactical,
     });
 
+    let mut branched = Game::new();
+    branched
+        .load_notation(
+            "1. T0L0e2Pe4\n\
+             2. T1L0g7pg6\n\
+             3. T2L0d1Qg4\n\
+             4. T3L0f7pf5\n\
+             5. T4L0g4QT0L0e4>L1",
+        )
+        .expect("branched fixture should replay");
+    positions.push(NamedPosition {
+        name: "branched_multiverse".to_string(),
+        game: branched,
+    });
+
     positions.extend(replay_legacy_log_positions(COMPLEX_LOG, 11));
     positions
 }
@@ -406,6 +461,12 @@ fn representative_positions() -> Vec<NamedPosition> {
     if let Some(position) = positions
         .iter()
         .find(|position| position.name == "tactical_midgame")
+    {
+        representative.push(position.clone());
+    }
+    if let Some(position) = positions
+        .iter()
+        .find(|position| position.name == "branched_multiverse")
     {
         representative.push(position.clone());
     }
@@ -651,7 +712,7 @@ fn print_counts(label: &str, stats: &CountStats) {
 
 fn print_search_stats(label: &str, score: i32, nodes: usize, stats: &SearchStats) {
     println!(
-        "{label} score={} nodes={} generated_moves={} generated_plans={} candidate_destinations={} legal_move_attempts={} attack_queries={} attack_cache_hits={} search_clones={} turn_plan_cache_hits={} tt_hits={} beta_cutoffs={} reduced_searches={} aspiration_researches={} expensive_order_probes={} evaluation_calls={} evaluation_cache_hits={} evaluated_turn_moves={} evaluation_setup_probes={} evaluation_attack_checks={} evaluation_attack_caps={} evaluation_clones={}",
+        "{label} score={} nodes={} generated_moves={} generated_plans={} candidate_destinations={} legal_move_attempts={} attack_queries={} attack_cache_hits={} check_cache_hits={} pressure_cache_hits={} root_verification_cache_hits={} search_clones={} turn_plan_cache_hits={} tt_hits={} beta_cutoffs={} reduced_searches={} aspiration_researches={} expensive_order_probes={} evaluation_calls={} evaluation_cache_hits={} evaluated_turn_moves={} evaluation_setup_probes={} evaluation_attack_checks={} evaluation_attack_caps={} evaluation_clones={}",
         score,
         nodes,
         stats.generated_moves,
@@ -660,6 +721,9 @@ fn print_search_stats(label: &str, score: i32, nodes: usize, stats: &SearchStats
         stats.legal_move_attempts,
         stats.attack_queries,
         stats.attack_cache_hits,
+        stats.check_cache_hits,
+        stats.pressure_cache_hits,
+        stats.root_verification_cache_hits,
         stats.search_clones,
         stats.turn_plan_cache_hits,
         stats.tt_hits,

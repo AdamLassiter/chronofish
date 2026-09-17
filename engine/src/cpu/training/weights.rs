@@ -7,7 +7,9 @@ impl EvalWeights {
     }
 
     pub(crate) fn from_json(value: &str) -> Result<Self, String> {
-        serde_json::from_str(value).map_err(|error| error.to_string())
+        serde_json::from_str(value)
+            .map(Self::constrained)
+            .map_err(|error| error.to_string())
     }
 }
 
