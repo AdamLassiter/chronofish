@@ -1,6 +1,10 @@
-target/
-logs/
-.git/
-.gitignore
-*.bak
-*.tmp
+.git
+.github
+.gitea
+target
+chronofish.sqlite3
+chronofish.sqlite3-shm
+chronofish.sqlite3-wal
+models/training
+*.log
+.env

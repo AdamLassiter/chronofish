@@ -1,0 +1,18 @@
+[package]
+name = "chronofish-trainer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Self-play training and arena evaluation for Chronofish AlphaZero"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+chronofish-alphazero = { path = "../alphazero" }
+chronofish-core = { path = "../core" }
+chronofish-neural = { path = "../neural", features = ["training", "vulkan"] }
+rand = "0.9"
+rand_chacha = "0.9"
+rayon = "1"
+
+[lints]
+workspace = true

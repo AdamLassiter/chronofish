@@ -1,0 +1,36 @@
+name: chronofish
+
+services:
+  server:
+    image: ${CHRONOFISH_IMAGE:-chronofish:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${CHRONOFISH_PORT:-3000}:3000"
+    environment:
+      CHRONOFISH_ADDR: 0.0.0.0:3000
+      CHRONOFISH_DATABASE: /data/chronofish.sqlite3
+      CHRONOFISH_AZ_SIMULATIONS: ${CHRONOFISH_AZ_SIMULATIONS:-48}
+      RUST_LOG: ${RUST_LOG:-info}
+      # To use trained CPU/GPU models, uncomment these and the bind mounts below.
+      # CHRONOFISH_AZ_MODEL: /models/chronofish-cpu-best-v2.json
+      # CHRONOFISH_GPU_MODEL: /models/chronofish-gpu-best-v2.json
+    volumes:
+      - chronofish-data:/data
+      # - ./models/training/best-v2.json:/models/chronofish-cpu-best-v2.json:ro
+      # - ./models/training-gpu/best-v2.json:/models/chronofish-gpu-best-v2.json:ro
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  chronofish-data:

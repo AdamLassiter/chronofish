@@ -1,25 +1,11 @@
 {
   "name": "chronofish-web",
-  "version": "0.3.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "check": "node scripts/check.mjs && npm run typecheck",
-    "gpu:smoke": "node scripts/gpu-frontier-smoke.mjs",
-    "model:initialize": "node scripts/initialize-value-model.mjs",
-    "training:benchmark": "node scripts/gpu-frontier-smoke.mjs --training-benchmark gpu",
-    "training:benchmark:cpu": "node scripts/gpu-frontier-smoke.mjs --training-benchmark cpu",
-    "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test \"tests/**/*.test.js\""
+    "build": "tsc --project tsconfig.build.json",
+    "check": "tsc --project tsconfig.json"
   },
   "devDependencies": {
-    "@eslint/js": "^10.0.1",
-    "esbuild": "^0.28.0",
-    "esbuild-plugin-glsl": "^1.4.1",
-    "eslint": "^10.4.1",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.60.1"
+    "typescript": "5.9.3"
   }
 }

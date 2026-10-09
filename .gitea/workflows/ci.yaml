@@ -1,0 +1,180 @@
+name: CI and container
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Format, lint, and test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Check and build web client
+        working-directory: web
+        run: npm run check && npm run build && git diff --exit-code -- app.js
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Run release throughput regression check
+        run: cargo run --release --locked -p chronofish-benchmarks -- --check
+
+  trainer-artifacts:
+    name: Trainer artifact (${{ matrix.platform }})
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Linux x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: chronofish-trainer-linux-x86_64
+          - platform: Windows x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: chronofish-trainer-windows-x86_64
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release trainer
+        run: cargo build --locked --release -p chronofish-trainer --target ${{ matrix.target }}
+
+      - name: Package Linux trainer
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          mkdir -p "dist/${ARTIFACT}"
+          cp "target/${TARGET}/release/chronofish-trainer" "dist/${ARTIFACT}/"
+          cp README.md RULES.md "dist/${ARTIFACT}/"
+          tar -C dist -czf "dist/${ARTIFACT}.tar.gz" "${ARTIFACT}"
+          (cd dist && sha256sum "${ARTIFACT}.tar.gz" > "${ARTIFACT}.tar.gz.sha256")
+
+      - name: Package Windows trainer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          $bundle = Join-Path dist $env:ARTIFACT
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+          Copy-Item "target/$env:TARGET/release/chronofish-trainer.exe" $bundle
+          Copy-Item README.md,RULES.md $bundle
+          $archive = "dist/$env:ARTIFACT.zip"
+          Compress-Archive -Path "$bundle/*" -DestinationPath $archive -Force
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  $env:ARTIFACT.zip" | Set-Content "$archive.sha256"
+
+      - name: Upload trainer artifact
+        uses: https://github.com/christopherhx/gitea-upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}.*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  container:
+    name: Build and publish container
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Gitea registry coordinates
+        id: registry
+        shell: bash
+        run: |
+          registry="${GITHUB_SERVER_URL#http://}"
+          registry="${registry#https://}"
+          registry="${registry%%/*}"
+          repository="${GITHUB_REPOSITORY,,}"
+          echo "registry=${registry}" >> "${GITHUB_OUTPUT}"
+          echo "image=${registry}/${repository}" >> "${GITHUB_OUTPUT}"
+
+      - name: Log in to the Gitea container registry
+        if: gitea.event_name == 'push'
+        shell: bash
+        env:
+          GITEA_TOKEN: ${{ secrets.GITEA_TOKEN }}
+          REGISTRY: ${{ steps.registry.outputs.registry }}
+        run: |
+          printf '%s' "${GITEA_TOKEN}" | docker login \
+            "${REGISTRY}" \
+            --username "${GITHUB_ACTOR}" \
+            --password-stdin
+
+      - name: Build image
+        id: build
+        shell: bash
+        env:
+          IMAGE: ${{ steps.registry.outputs.image }}
+        run: |
+          short_sha="${GITHUB_SHA:0:12}"
+          docker build \
+            --label "org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "${IMAGE}:sha-${short_sha}" \
+            .
+          echo "sha_tag=${IMAGE}:sha-${short_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Tag and publish image
+        if: gitea.event_name == 'push'
+        shell: bash
+        env:
+          IMAGE: ${{ steps.registry.outputs.image }}
+          SHA_TAG: ${{ steps.build.outputs.sha_tag }}
+        run: |
+          docker push "${SHA_TAG}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            docker tag "${SHA_TAG}" "${IMAGE}:${version}"
+            docker push "${IMAGE}:${version}"
+          fi
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            docker tag "${SHA_TAG}" "${IMAGE}:latest"
+            docker push "${IMAGE}:latest"
+          fi

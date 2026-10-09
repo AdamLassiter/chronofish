@@ -1,5 +1,15 @@
 # Rules
 
+## Rulesets and armies
+
+Chronofish supports three deliberately separate rulesets:
+
+* **Standard Chess** uses ordinary chess on one 8×8 board with the orthodox army.
+* **5D Chess** uses the multiverse rules below with the orthodox army: rook, knight, bishop, queen, king, bishop, knight, rook, with pawns in front.
+* **5D Variant Chess** uses princess, unicorn, dragon, royal queen, common king, dragon, unicorn, princess, with brawns in front.
+
+In the variant army, the royal queen replaces the king as the piece that must be protected. The common king is not royal. A common king castles with a princess in the same spatial arrangement that an orthodox king castles with a rook.
+
 ## Dimensions
 
 To understand the game it is important to understand how the board operates. The board consists of 4 playable dimensions:
@@ -13,7 +23,7 @@ Of these four dimensions, x and y are spatial dimensions, while T and L are temp
 
 Spatial dimensions are constrained to a board itself. For example, an 8x8 board remains 8x8 regardless of how many turns have been played.
 
-Temporal dimensions grow as moves are made. As the game progresses, the number of boards in the past increases. A given (T, L) coordinate corresponds to two boards: one for White's turn and one for Black's.
+Temporal dimensions grow as moves are made. As the game progresses, the number of boards in the past increases. Chronofish numbers every successive board: even `T` boards are White-to-move positions and odd `T` boards are Black-to-move positions. One unit of movement along the turn axis therefore changes the stored `T` coordinate by two and lands on another board of the moving colour.
 
 ## Pieces
 
@@ -87,6 +97,14 @@ If a piece is moved to a different board, either across time, timelines, or both
 
 If a piece is moved to a historical board (a board where a move has already been made), the game does not create a new board overlapping the original new board; instead, it creates that new board on a new timeline.
 
+A player may have to make more than one move in a 5D turn. The turn can be submitted only when every required active board at the Present has advanced to the opponent's colour. Intermediate moves are staged and may temporarily leave a royal piece in check; the complete turn may not be submitted in that state.
+
+### Special moves
+
+Castling and en passant are local to one spatial board; neither move crosses time or timelines. Castling may not begin in check, cross an attacked square, or finish in check. Castling rights and the one-move en-passant window follow each resulting board history independently.
+
+An orthodox pawn reaching its final spatial rank promotes to queen, rook, bishop, or knight. A brawn reaching its final spatial rank promotes to royal queen, princess, dragon, or unicorn.
+
 ## Timelines
 
 When a player moves a piece to a historical board (there are boards after it in the same timeline), a new timeline is added above or below all current timelines.
@@ -111,3 +129,5 @@ Check can be moved into (in a way that would allow the opponent to capture the k
 ### Checkmate
 
 Mate occurs when there is no sequence of legal moves that leaves the Present on the opponent's color and none of the active player's kings (or royal queens) in check. If one of the active player's royal pieces is in check, it is checkmate; otherwise, it is stalemate.
+
+In a 5D game, directly capturing any royal piece ends the game immediately. In Standard Chess the king is never captured: checkmate ends the game first. Standard Chess also implements threefold repetition, the fifty-move rule, and insufficient-material draws.

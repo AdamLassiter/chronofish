@@ -8,6 +8,8 @@
 .*
 !.github/
 !.github/**
+!.gitea/
+!.gitea/**
 !.dockerignore
 
 # Ignore backup models

@@ -1,50 +1,37 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1.7
 
-FROM node:22-bookworm-slim AS web-builder
+FROM rust:1.92-bookworm AS builder
 
-WORKDIR /app
-
-COPY web/package.json web/package.json
-COPY web/package-lock.json web/package-lock.json
-COPY web/scripts web/scripts
-COPY web/src web/src
-
-RUN npm --prefix web ci
-RUN npm --prefix web run build
-
-FROM rust:1-bookworm AS builder
-
-WORKDIR /app
-
-RUN rustup target add wasm32-unknown-unknown
-
-COPY Cargo.toml Cargo.lock ./
-COPY logo.svg logo.svg
-COPY engine/Cargo.toml engine/Cargo.toml
-COPY server/Cargo.toml server/Cargo.toml
-COPY engine/src engine/src
-COPY server/src server/src
-
-RUN cargo build --release --manifest-path engine/Cargo.toml --target wasm32-unknown-unknown
-RUN cargo build --release -p chronofish-server
+WORKDIR /src
+COPY . .
+RUN cargo build --locked --release -p chronofish-server
 
 FROM debian:bookworm-slim AS runtime
 
-WORKDIR /app
+LABEL org.opencontainers.image.title="Chronofish" \
+      org.opencontainers.image.description="Standard and five-dimensional chess server" \
+      org.opencontainers.image.licenses="MIT"
 
-ENV HOST=0.0.0.0
-ENV PORT=5173
-ENV CHRONOFISH_CPU_MODEL_DIR=/app/engine/models/cpu-v1
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 chronofish \
+    && useradd --uid 10001 --gid chronofish --no-create-home --shell /usr/sbin/nologin chronofish \
+    && install --directory --owner chronofish --group chronofish /data
 
-COPY --from=builder /app/target/release/chronofish-server /usr/local/bin/chronofish-server
-COPY --from=builder /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm /app/target/wasm32-unknown-unknown/release/chronofish_engine.wasm
-COPY --from=web-builder /app/web/dist /app/web/dist
-RUN mkdir -p /app/engine/models/gpu-v1 /app/engine/models/cpu-v1
-COPY engine/models/gpu-v1/effort.json /app/engine/models/gpu-v1/effort.json
-COPY engine/models/gpu-v1/value-model.cfnn /app/engine/models/gpu-v1/value-model.cfnn
+COPY --from=builder /src/target/release/chronofish-server /usr/local/bin/chronofish-server
 
-VOLUME ["/app/engine/models/gpu-v1", "/app/engine/models/cpu-v1"]
+USER chronofish:chronofish
+WORKDIR /data
 
-EXPOSE 5173
+ENV CHRONOFISH_ADDR=0.0.0.0:3000 \
+    CHRONOFISH_DATABASE=/data/chronofish.sqlite3 \
+    RUST_LOG=info
 
-CMD ["chronofish-server"]
+VOLUME ["/data"]
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl --fail --silent --show-error http://127.0.0.1:3000/api/health >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/chronofish-server"]

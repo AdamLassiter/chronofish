@@ -1,0 +1,15 @@
+[package]
+name = "chronofish-benchmarks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Repeatable release-mode throughput regression checks for Chronofish"
+
+[dependencies]
+chronofish-alphazero = { path = "../alphazero" }
+chronofish-core = { path = "../core" }
+rand_chacha = "0.9"
+
+[lints]
+workspace = true

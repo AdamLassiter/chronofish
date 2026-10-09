@@ -1,0 +1,23 @@
+[package]
+name = "chronofish-alphazero"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Neural policy/value search and self-play support for Chronofish"
+
+[dependencies]
+chronofish-core = { path = "../core" }
+chronofish-neural = { path = "../neural" }
+rand = "0.9"
+rand_chacha = "0.9"
+rand_distr = "0.5"
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+zstd = "0.13"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

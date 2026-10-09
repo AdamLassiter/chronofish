@@ -1,0 +1,69 @@
+use chronofish_core::{AiDecision, AiPlayer, AiProfile, Game};
+
+/// A tiny deterministic baseline used to prove the pluggable-AI boundary.
+pub struct RavenBot {
+    state: u64,
+}
+
+impl Default for RavenBot {
+    fn default() -> Self {
+        Self {
+            state: 0x6875_6769_6e6e,
+        }
+    }
+}
+
+impl RavenBot {
+    #[must_use]
+    pub const fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_index(&mut self, length: usize) -> usize {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        usize::try_from(self.state % u64::try_from(length).expect("length fits in u64"))
+            .expect("modulo result fits in usize")
+    }
+}
+
+impl AiPlayer for RavenBot {
+    fn profile(&self) -> AiProfile {
+        AiProfile {
+            username: "bot-raven",
+            display_name: "Raven (baseline)",
+        }
+    }
+
+    fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String> {
+        let actions = game.legal_actions();
+        let Some(action) = actions.get(self.next_index(actions.len().max(1))).copied() else {
+            return Err("no legal action is available".to_owned());
+        };
+        Ok(AiDecision {
+            action,
+            principal_variation: vec![action],
+            root_value: None,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chronofish_core::{Game, Ruleset};
+
+    use super::*;
+
+    #[test]
+    fn bot_returns_an_authoritatively_legal_opening() {
+        let game = Game::new(Ruleset::Standard);
+        let mut bot = RavenBot::default();
+        let chronofish_core::PlayerAction::Move { movement } =
+            bot.choose_action(&game).expect("bot action").action
+        else {
+            panic!("standard opening cannot be a submission");
+        };
+        game.validate_move(movement).expect("legal bot move");
+    }
+}
