@@ -2,9 +2,9 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": false,
-    "outDir": ".",
+    "outDir": "dist",
     "rootDir": "src",
     "removeComments": false
   },
-  "exclude": ["app.js", "node_modules"]
+  "exclude": ["dist", "node_modules"]
 }

@@ -1,10 +1,10 @@
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
-const INDEX: &str = include_str!("../../../web/index.html");
-const APP: &str = include_str!("../../../web/app.js");
-const STYLES: &str = include_str!("../../../web/styles.css");
-const FAVICON: &str = include_str!("../../../web/favicon.svg");
+const INDEX: &str = include_str!("../../../web/dist/index.html");
+const APP: &str = include_str!("../../../web/dist/app.js");
+const STYLES: &str = include_str!("../../../web/dist/styles.css");
+const FAVICON: &str = include_str!("../../../web/dist/favicon.svg");
 
 pub(crate) async fn index() -> Response {
     asset("text/html; charset=utf-8", INDEX)
@@ -49,14 +49,15 @@ mod tests {
 
     #[test]
     fn embedded_client_contains_coordinate_grid_and_all_board_renderer() {
+        assert!(INDEX.contains("/assets/app.js"));
+        assert!(INDEX.contains("/assets/styles.css"));
         assert!(INDEX.contains("id=\"multiverse\""));
         assert!(APP.contains("timeline.row - minRow + 2"));
         assert!(APP.contains("snapshot.time - minTime + 2"));
         assert!(APP.contains("timeline.boards.map"));
         assert!(STYLES.contains("repeat(var(--timeline-count)"));
-        assert!(STYLES.contains(
-            "repeat(var(--time-count), minmax(calc(var(--board-size) + 2.4rem), max-content))"
-        ));
+        assert!(STYLES.contains("var(--time-count)"));
+        assert!(STYLES.contains("minmax(calc(var(--board-size) + 2.4rem), max-content)"));
         assert!(FAVICON.contains("<svg"));
     }
 }

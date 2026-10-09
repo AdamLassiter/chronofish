@@ -1,9 +1,18 @@
 # syntax=docker/dockerfile:1.7
 
+FROM node:24-bookworm-slim AS frontend
+
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
 FROM rust:1.92-bookworm AS builder
 
 WORKDIR /src
 COPY . .
+COPY --from=frontend /src/web/dist ./web/dist
 RUN cargo build --locked --release -p chronofish-server
 
 FROM debian:bookworm-slim AS runtime

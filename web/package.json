@@ -2,7 +2,7 @@
   "name": "chronofish-web",
   "private": true,
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
+    "build": "node scripts/prepare-dist.mjs && tsc --project tsconfig.build.json",
     "check": "tsc --project tsconfig.json"
   },
   "devDependencies": {

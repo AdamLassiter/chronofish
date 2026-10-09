@@ -103,9 +103,10 @@ impl AppState {
 pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(web::index))
-        .route("/app.js", get(web::app))
-        .route("/styles.css", get(web::styles))
-        .route("/favicon.svg", get(web::favicon))
+        .route("/app", get(web::index))
+        .route("/assets/app.js", get(web::app))
+        .route("/assets/styles.css", get(web::styles))
+        .route("/assets/favicon.svg", get(web::favicon))
         .route("/api/health", get(health))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -553,6 +554,46 @@ mod tests {
             .expect("body");
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    #[tokio::test]
+    async fn serves_the_built_frontend_and_assets() {
+        let state =
+            AppState::new(Database::in_memory().expect("database"), Vec::new()).expect("state");
+        let app = router(state);
+
+        for (uri, content_type) in [
+            ("/app", "text/html; charset=utf-8"),
+            ("/assets/app.js", "text/javascript; charset=utf-8"),
+            ("/assets/styles.css", "text/css; charset=utf-8"),
+            ("/assets/favicon.svg", "image/svg+xml"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .expect("content type"),
+                content_type,
+                "{uri}"
+            );
+            assert!(
+                !to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .expect("body")
+                    .is_empty()
+            );
+        }
     }
 
     #[tokio::test]

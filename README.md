@@ -44,10 +44,14 @@ Built-in server opponents are exposed as **Chronofish CPU** and **Chronofish GPU
 ## Web server
 
 ```sh
+cd web
+npm ci
+npm run build
+cd ..
 cargo run --release -p chronofish-server
 ```
 
-The server listens on `127.0.0.1:3000` by default and stores accounts, games, history, and Elo in `chronofish.sqlite3`. Configure it with `CHRONOFISH_ADDR`, `CHRONOFISH_DATABASE`, `CHRONOFISH_AZ_MODEL`, `CHRONOFISH_GPU_MODEL`, and `CHRONOFISH_AZ_SIMULATIONS`.
+The server listens on `127.0.0.1:3000` by default and serves the built browser client at `http://127.0.0.1:3000/app` (and `/`). Static client assets are embedded from `web/dist` under `/assets`. It stores accounts, games, history, and Elo in `chronofish.sqlite3`. Configure it with `CHRONOFISH_ADDR`, `CHRONOFISH_DATABASE`, `CHRONOFISH_AZ_MODEL`, `CHRONOFISH_GPU_MODEL`, and `CHRONOFISH_AZ_SIMULATIONS`.
 
 The browser client is server-authoritative. It renders every board in the multiverse, highlights legal planning moves, and records a bot's principal variation with its move for post-game review.
 

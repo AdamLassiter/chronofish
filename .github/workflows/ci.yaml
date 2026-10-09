@@ -35,7 +35,7 @@ jobs:
 
       - name: Check and build web client
         working-directory: web
-        run: npm run check && npm run build && git diff --exit-code -- app.js
+        run: npm run check && npm run build && git diff --exit-code -- dist
 
       - name: Check formatting
         run: cargo fmt --all -- --check

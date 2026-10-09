@@ -1,8 +1,8 @@
 # Ignore build artifacts and temporary files
 /target
 */target
-/web/dist
 /web/node_modules
+/web/dist
 
 # Ignore hidden files and directories
 .*
