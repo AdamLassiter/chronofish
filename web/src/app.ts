@@ -366,6 +366,125 @@ function formatMove(move: Movement): string {
   return `${formatPosition(move.from)} → ${formatPosition(move.to)}${move.promotion ? `=${move.promotion}` : ""}`;
 }
 
+type BoardStatus = "Inactive" | "Future" | "Latest" | "Past";
+type SquareHighlight = "arrived" | "move-source" | "move-target" | "check";
+type HighlightMap = Map<string, Set<SquareHighlight>>;
+
+interface Point {
+  x: number;
+  y: number;
+}
+
+interface MoveArrow {
+  from: Position;
+  to: Position;
+}
+
+function latestTime(timeline: Timeline): number | undefined {
+  return timeline.boards.reduce<number | undefined>(
+    (latest, board) =>
+      latest === undefined || board.time > latest ? board.time : latest,
+    undefined,
+  );
+}
+
+function currentPresentTime(game: GameView): number {
+  if (game.presentTime !== null) return game.presentTime;
+  const activeTimes = game.timelines
+    .filter((timeline) => game.activeTimelines.includes(timeline.id))
+    .map(latestTime)
+    .filter((time): time is number => time !== undefined);
+  return activeTimes.length > 0 ? Math.min(...activeTimes) : 0;
+}
+
+function boardStatus(
+  game: GameView,
+  timeline: Timeline,
+  snapshot: BoardSnapshot,
+  presentTime: number,
+): BoardStatus {
+  if (!game.activeTimelines.includes(timeline.id)) return "Inactive";
+  if (snapshot.time > presentTime) return "Future";
+  return snapshot.time === latestTime(timeline) ? "Latest" : "Past";
+}
+
+function highlightKey(position: Position): string {
+  return `${position.timelineId}:${position.time}:${position.x}:${position.y}`;
+}
+
+function addHighlight(
+  highlights: HighlightMap,
+  position: Position,
+  type: SquareHighlight,
+): void {
+  const key = highlightKey(position);
+  const existing = highlights.get(key) ?? new Set<SquareHighlight>();
+  existing.add(type);
+  highlights.set(key, existing);
+}
+
+function samePiece(left: Piece | null, right: Piece | null): boolean {
+  if (!left || !right) return left === right;
+  return left.color === right.color && left.type === right.type;
+}
+
+function addArrivalHighlights(
+  highlights: HighlightMap,
+  timeline: Timeline,
+  snapshot: BoardSnapshot,
+): void {
+  const previous = timeline.boards.find(
+    (candidate) => candidate.time === snapshot.time - 1,
+  );
+  if (!previous) {
+    if (
+      snapshot.origin.type === "move" &&
+      snapshot.origin.move_type !== "source-advance"
+    )
+      addHighlight(highlights, snapshot.origin.to, "arrived");
+    return;
+  }
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      const piece = snapshot.board[y]?.[x] ?? null;
+      if (piece && !samePiece(piece, previous.board[y]?.[x] ?? null)) {
+        addHighlight(
+          highlights,
+          { timelineId: timeline.id, time: snapshot.time, x, y },
+          "arrived",
+        );
+      }
+    }
+  }
+}
+
+function movementVisuals(game: GameView): {
+  highlights: HighlightMap;
+  arrows: MoveArrow[];
+} {
+  const highlights: HighlightMap = new Map();
+  const arrows: MoveArrow[] = [];
+  for (const timeline of game.timelines) {
+    for (const snapshot of timeline.boards) {
+      addArrivalHighlights(highlights, timeline, snapshot);
+      if (
+        snapshot.origin.type === "move" &&
+        snapshot.origin.move_type !== "source-advance"
+      ) {
+        addHighlight(highlights, snapshot.origin.from, "move-source");
+        addHighlight(highlights, snapshot.origin.to, "move-target");
+        arrows.push({
+          from: snapshot.origin.from,
+          to: snapshot.origin.to,
+        });
+      }
+    }
+  }
+  for (const position of game.checkedRoyals)
+    addHighlight(highlights, position, "check");
+  return { highlights, arrows };
+}
+
 function renderGame(): void {
   const { summary, game, viewerSide, history } = currentGame();
   element("#game-title").textContent =
@@ -376,45 +495,41 @@ function renderGame(): void {
   const mine = viewerSide === game.turn;
   element<HTMLButtonElement>("#submit-turn").disabled =
     !mine || !game.canSubmit;
-  const snapshots = game.timelines.flatMap((timeline) =>
-    timeline.boards.map((snapshot) => ({ timeline, snapshot })),
+  const presentTime = currentPresentTime(game);
+  const maxTime = Math.max(
+    presentTime,
+    0,
+    ...game.timelines.flatMap((timeline) =>
+      timeline.boards.map((snapshot) => snapshot.time),
+    ),
   );
-  const times = snapshots.map(({ snapshot }) => snapshot.time).concat(0);
-  const rows = game.timelines.map((timeline) => timeline.row).concat(0);
-  const [minTime, maxTime, minRow, maxRow] = [
-    Math.min(...times),
-    Math.max(...times),
-    Math.min(...rows),
-    Math.max(...rows),
-  ];
-  const stage = element("#multiverse");
-  stage.style.setProperty("--timeline-count", String(maxRow - minRow + 1));
-  stage.style.setProperty("--time-count", String(maxTime - minTime + 1));
-  const children: HTMLElement[] = [];
-  for (let row = minRow; row <= maxRow; row += 1) {
-    const label = document.createElement("div");
-    label.className = "axis-label timeline";
-    label.style.gridColumn = String(row - minRow + 2);
-    label.style.gridRow = "1";
-    label.textContent = `L${row}`;
-    children.push(label);
-  }
-  for (let time = minTime; time <= maxTime; time += 1) {
-    const label = document.createElement("div");
-    label.className = "axis-label time";
-    label.style.gridColumn = "1";
-    label.style.gridRow = String(time - minTime + 2);
-    label.textContent = `T${time}`;
-    children.push(label);
-  }
-  for (const item of snapshots)
-    children.push(renderBoard(item, minRow, minTime, mine));
-  stage.replaceChildren(...children);
+  const { highlights, arrows } = movementVisuals(game);
+  const grid = element("#timeline-grid");
+  const targets = state.selected
+    ? legalTargets(state.selected).map((move) => move.to)
+    : [];
+  const timelines = [...game.timelines].sort(
+    (left, right) => left.row - right.row || left.id - right.id,
+  );
+  grid.replaceChildren(
+    ...timelines.map((timeline) =>
+      renderTimeline(
+        game,
+        timeline,
+        maxTime,
+        presentTime,
+        targets,
+        highlights,
+      ),
+    ),
+  );
   element<HTMLOListElement>("#move-history").replaceChildren(
     ...history.map(renderHistory),
   );
   requestAnimationFrame(() => {
-    const origin = stage.querySelector<HTMLElement>('[data-board="0:0"]');
+    renderMoveArrows(grid, arrows);
+    const stage = element("#multiverse");
+    const origin = grid.querySelector<HTMLElement>('[data-board="0:0"]');
     if (origin && !stage.dataset.positioned) {
       origin.scrollIntoView({ block: "center", inline: "start" });
       stage.dataset.positioned = "true";
@@ -422,31 +537,64 @@ function renderGame(): void {
   });
 }
 
-function renderBoard(
-  item: { timeline: Timeline; snapshot: BoardSnapshot },
-  minRow: number,
-  minTime: number,
-  mine: boolean,
+function renderTimeline(
+  game: GameView,
+  timeline: Timeline,
+  maxTime: number,
+  presentTime: number,
+  targets: Position[],
+  highlights: HighlightMap,
 ): HTMLElement {
-  const { timeline, snapshot } = item;
-  const game = currentGame().game;
-  const latestTime = timeline.boards.at(-1)?.time;
-  const active = game.activeTimelines.includes(timeline.id);
-  const playable =
-    latestTime === snapshot.time &&
-    snapshot.time === game.presentTime &&
-    snapshot.sideToMove === game.turn;
+  const row = document.createElement("div");
+  row.className = "timeline-row";
+  row.dataset.owner = timeline.owner;
+  row.dataset.active = String(game.activeTimelines.includes(timeline.id));
+  row.style.setProperty("--time-columns", String(maxTime + 1));
+
+  const label = document.createElement("div");
+  label.className = "timeline-label";
+  label.textContent = `L${timeline.id}`;
+  row.append(label);
+
+  const marker = document.createElement("div");
+  marker.className = "present-line";
+  marker.style.gridColumn = String(presentTime + 2);
+  row.append(marker);
+
+  const snapshots = [...timeline.boards].sort(
+    (left, right) => left.time - right.time,
+  );
+  for (const snapshot of snapshots) {
+    const board = renderBoard(
+      game,
+      timeline,
+      snapshot,
+      presentTime,
+      targets,
+      highlights,
+    );
+    board.style.gridColumn = String(snapshot.time + 2);
+    row.append(board);
+  }
+  return row;
+}
+
+function renderBoard(
+  game: GameView,
+  timeline: Timeline,
+  snapshot: BoardSnapshot,
+  presentTime: number,
+  targets: Position[],
+  highlights: HighlightMap,
+): HTMLElement {
   const card = document.createElement("article");
-  card.className = `board-card${snapshot.time === latestTime ? " latest" : ""}${playable && mine ? " playable" : ""}${active ? "" : " inactive"}`;
-  card.style.gridColumn = String(timeline.row - minRow + 2);
-  card.style.gridRow = String(snapshot.time - minTime + 2);
+  card.className = "board-card";
+  card.dataset.turn = snapshot.sideToMove;
+  card.dataset.latest = String(snapshot.time === latestTime(timeline));
+  card.dataset.present = String(snapshot.time === presentTime);
   card.dataset.board = `${timeline.id}:${snapshot.time}`;
-  const caption = document.createElement("div");
-  caption.className = "board-caption";
-  caption.innerHTML = `<strong>T${snapshot.time}L${timeline.id}</strong><span>${snapshot.time === latestTime ? "front" : "history"}${active ? "" : " · inactive"}</span>`;
   const board = document.createElement("div");
-  board.className = "board";
-  const legalMoves = moves();
+  board.className = "chessboard";
   for (let y = 7; y >= 0; y -= 1) {
     for (let x = 0; x < 8; x += 1) {
       const position: Position = {
@@ -456,47 +604,138 @@ function renderBoard(
         y,
       };
       const square = document.createElement("button");
-      square.className = `square ${(x + y) % 2 ? "dark" : ""}`;
-      const piece = snapshot.board[y]?.[x];
-      if (piece)
-        square.innerHTML = `<span class="piece ${piece.color}">${pieceGlyph(piece.type)}</span>`;
-      if (legalMoves.some((move) => samePosition(move.from, position)))
-        square.classList.add("source");
+      const piece = snapshot.board[y]?.[x] ?? null;
+      const squareHighlights = highlights.get(highlightKey(position));
+      square.type = "button";
+      square.className = "square";
+      square.dataset.light = String((x + y) % 2 === 1);
+      square.dataset.positionKey = highlightKey(position);
+      square.ariaLabel = `${String.fromCharCode(97 + x)}${y + 1}`;
+      if (piece) {
+        square.textContent = pieceGlyph(piece);
+        square.dataset.pieceColor = piece.color;
+      }
       if (state.selected && samePosition(state.selected, position))
-        square.classList.add("selected");
-      if (
-        state.selected &&
-        legalTargets(state.selected).some((move) =>
-          samePosition(move.to, position),
-        )
-      )
-        square.classList.add("target");
+        square.classList.add("is-selected");
+      if (targets.some((target) => samePosition(target, position)))
+        square.classList.add("is-target");
+      if (squareHighlights?.has("move-source"))
+        square.classList.add("was-move-source");
+      if (squareHighlights?.has("arrived"))
+        square.classList.add("was-arrival");
+      if (squareHighlights?.has("move-target"))
+        square.classList.add("was-move-target");
+      if (squareHighlights?.has("check")) square.classList.add("is-check");
       square.title = `${formatPosition(position)}${piece ? ` ${piece.color} ${piece.type}` : ""}`;
       square.onclick = () => chooseSquare(position);
       board.append(square);
     }
   }
-  card.append(caption, board);
+  const footer = document.createElement("footer");
+  footer.className = "board-footer";
+  footer.innerHTML = `
+    <span>${boardStatus(game, timeline, snapshot, presentTime)}</span>
+    <span class="board-side-to-move">${snapshot.sideToMove}</span>
+    <strong>T${snapshot.time} L${timeline.id}</strong>
+  `;
+  card.append(board, footer);
   return card;
 }
 
-const PIECE_GLYPHS: Record<PieceType, string> = {
-  king: "♚",
-  commonKing: "♔",
-  queen: "♛",
-  royalQueen: "♕",
-  rook: "♜",
-  princess: "♖",
-  bishop: "♝",
-  dragon: "◆",
-  knight: "♞",
-  unicorn: "◇",
-  pawn: "♟",
-  brawn: "♙",
+function measureSquareCenters(grid: HTMLElement): Map<string, Point> {
+  const gridRect = grid.getBoundingClientRect();
+  const centers = new Map<string, Point>();
+  for (const square of grid.querySelectorAll<HTMLElement>(
+    "[data-position-key]",
+  )) {
+    const key = square.dataset.positionKey;
+    if (!key || centers.has(key)) continue;
+    const squareRect = square.getBoundingClientRect();
+    centers.set(key, {
+      x: squareRect.left - gridRect.left + squareRect.width / 2,
+      y: squareRect.top - gridRect.top + squareRect.height / 2,
+    });
+  }
+  return centers;
+}
+
+function arrowPath(from: Point, to: Point): string {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const distance = Math.hypot(dx, dy);
+  if (distance === 0) return "";
+  const inset = Math.min(18, distance / 3);
+  return `M ${(from.x + (dx / distance) * inset).toFixed(1)} ${(from.y + (dy / distance) * inset).toFixed(1)} L ${(to.x - (dx / distance) * inset).toFixed(1)} ${(to.y - (dy / distance) * inset).toFixed(1)}`;
+}
+
+function renderMoveArrows(grid: HTMLElement, arrows: MoveArrow[]): void {
+  const oldOverlay = grid.querySelector(".move-arrows");
+  oldOverlay?.remove();
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "move-arrows");
+  svg.setAttribute("width", String(grid.scrollWidth));
+  svg.setAttribute("height", String(grid.scrollHeight));
+  svg.setAttribute("viewBox", `0 0 ${grid.scrollWidth} ${grid.scrollHeight}`);
+  svg.setAttribute("aria-hidden", "true");
+  svg.innerHTML = `
+    <defs>
+      <marker id="move-arrow-head" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="3" markerHeight="3" orient="auto-start-reverse">
+        <path d="M 0 0 L 10 5 L 0 10 z"></path>
+      </marker>
+    </defs>
+  `;
+  const centers = measureSquareCenters(grid);
+  for (const arrow of arrows) {
+    const from = centers.get(highlightKey(arrow.from));
+    const to = centers.get(highlightKey(arrow.to));
+    if (!from || !to) continue;
+    const pathData = arrowPath(from, to);
+    if (!pathData) continue;
+    const path = document.createElementNS(
+      "http://www.w3.org/2000/svg",
+      "path",
+    );
+    path.setAttribute("class", "move-arrow");
+    path.setAttribute("d", pathData);
+    path.setAttribute("marker-end", "url(#move-arrow-head)");
+    svg.append(path);
+  }
+  grid.append(svg);
+}
+
+const PIECE_GLYPHS: Record<Side, Record<PieceType, string>> = {
+  white: {
+    king: "♔",
+    commonKing: "♔",
+    queen: "♕",
+    royalQueen: "♕",
+    princess: "♖",
+    rook: "♖",
+    bishop: "♗",
+    unicorn: "♘",
+    dragon: "♗",
+    knight: "♘",
+    pawn: "♙",
+    brawn: "♙",
+  },
+  black: {
+    king: "♚",
+    commonKing: "♚",
+    queen: "♛",
+    royalQueen: "♛",
+    princess: "♜",
+    rook: "♜",
+    bishop: "♝",
+    unicorn: "♞",
+    dragon: "♝",
+    knight: "♞",
+    pawn: "♟",
+    brawn: "♟",
+  },
 };
 
-function pieceGlyph(type: PieceType): string {
-  return PIECE_GLYPHS[type];
+function pieceGlyph(piece: Piece): string {
+  return PIECE_GLYPHS[piece.color][piece.type];
 }
 
 function legalTargets(position: Position): Movement[] {

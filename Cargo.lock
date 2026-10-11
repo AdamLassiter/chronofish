@@ -1066,7 +1066,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-alphazero"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "chronofish-core",
  "chronofish-neural",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-benchmarks"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "chronofish-alphazero",
  "chronofish-core",
@@ -1091,7 +1091,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-core"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -1101,7 +1101,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-neural"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "burn",
@@ -1118,14 +1118,14 @@ dependencies = [
 
 [[package]]
 name = "chronofish-random-bot"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "chronofish-core",
 ]
 
 [[package]]
 name = "chronofish-server"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "argon2",
  "axum",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-trainer"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "chronofish-alphazero",
  "chronofish-core",
@@ -1159,7 +1159,7 @@ dependencies = [
 
 [[package]]
 name = "chronofish-tui"
-version = "0.2.0"
+version = "0.6.0"
 dependencies = [
  "chronofish-alphazero",
  "chronofish-core",

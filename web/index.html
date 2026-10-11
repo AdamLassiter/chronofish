@@ -112,9 +112,19 @@
           </div>
         </div>
         <p id="game-notice" class="notice" role="status"></p>
-        <div id="multiverse-scroll" class="multiverse-scroll">
-          <div id="multiverse" class="multiverse"></div>
-        </div>
+        <section class="legend" aria-label="Timeline legend">
+          <span><i class="swatch selected"></i>Selected piece</span>
+          <span><i class="swatch target"></i>Legal target</span>
+          <span><i class="swatch present-line-swatch"></i>Present line</span>
+          <span><i class="swatch move-source"></i>Move source</span>
+          <span><i class="swatch move-target"></i>Move target</span>
+          <span><i class="swatch arrived"></i>Piece arrived</span>
+          <span><i class="swatch check"></i>Royal in check</span>
+        </section>
+        <!-- Preserve the horizontal timeline play surface established in aa6a9bea. -->
+        <section id="multiverse" class="multiverse" aria-label="5D chess multiverse">
+          <div id="timeline-grid" class="timeline-grid"></div>
+        </section>
         <article class="panel history-panel">
           <h2>History</h2>
           <ol id="move-history"></ol>

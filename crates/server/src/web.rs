@@ -48,16 +48,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn embedded_client_contains_coordinate_grid_and_all_board_renderer() {
+    fn embedded_client_preserves_the_horizontal_timeline_game_view() {
         assert!(INDEX.contains("/assets/app.js"));
         assert!(INDEX.contains("/assets/styles.css"));
         assert!(INDEX.contains("id=\"multiverse\""));
-        assert!(APP.contains("timeline.row - minRow + 2"));
-        assert!(APP.contains("snapshot.time - minTime + 2"));
-        assert!(APP.contains("timeline.boards.map"));
-        assert!(STYLES.contains("repeat(var(--timeline-count)"));
-        assert!(STYLES.contains("var(--time-count)"));
-        assert!(STYLES.contains("minmax(calc(var(--board-size) + 2.4rem), max-content)"));
+        assert!(INDEX.contains("id=\"timeline-grid\""));
+        assert!(APP.contains("timeline-row"));
+        assert!(APP.contains("present-line"));
+        assert!(APP.contains("move-arrows"));
+        assert!(APP.contains("snapshot.time + 2"));
+        assert!(STYLES.contains("--board-width: 282px"));
+        assert!(STYLES.contains("repeat(var(--time-columns), var(--board-width))"));
+        assert!(STYLES.contains("min-height: 352px"));
         assert!(FAVICON.contains("<svg"));
     }
 }

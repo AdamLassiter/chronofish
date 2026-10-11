@@ -2,8 +2,6 @@
 
 Chronofish is a Rust engine for standard chess and chess played across time and branching timelines. It provides one authoritative rules crate, AlphaZero-style CPU and Vulkan/WGPU bots, self-play training, a debug terminal client, and a persistent web server.
 
-The implementation is a clean break from Chronofish's former alpha-beta, Stockfish curriculum, WASM, and browser-training stack. Old checkpoints are intentionally incompatible with the new neural representation.
-
 ## Rulesets
 
 - `standard`: ordinary 8×8 chess, including check, checkmate, stalemate, castling, en passant, promotion, repetition, the fifty-move rule, and insufficient material.
@@ -37,7 +35,7 @@ Vulkan training (including AMD GPUs through the installed Vulkan driver):
 .\chronofish-trainer.exe --work-dir models\training-gpu --ruleset all --training-device vulkan
 ```
 
-Use `--check-training-device` to initialize and verify the selected device without beginning a run. The trainer prints the resolved adapter, fitting and inference backends, parallelism, memory budgets, and phase timings at startup. CPU and Vulkan checkpoints share the same architecture and file format, but old pre-rewrite models do not.
+Use `--check-training-device` to initialize and verify the selected device without beginning a run. The trainer prints the resolved adapter, fitting and inference backends, parallelism, memory budgets, and phase timings at startup. CPU and Vulkan checkpoints share the same architecture and file format.
 
 Built-in server opponents are exposed as **Chronofish CPU** and **Chronofish GPU**. The GPU name describes the checkpoint/training path; inference uses the backend selected by the executable and its feature set.
 
