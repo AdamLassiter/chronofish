@@ -339,11 +339,12 @@ async fn retry_ai(
     Json(body): Json<VersionBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
     let user = authenticated_user(&state, &headers)?;
-    let stored = load_participating_game(&state, id, user.id)?;
+    let mut stored = load_participating_game(&state, id, user.id)?;
     ensure_current_active(&stored, body.version)?;
     if !stored.side_user(stored.game.turn()).is_bot {
         return Err(ApiError::conflict("the current player is not an AI"));
     }
+    repair_failed_bot_turn(&state, &mut stored)?;
     let stored = advance_bots(&state, stored)?;
     Ok(Json(game_detail(&state, &stored, user.id)?))
 }
@@ -439,6 +440,32 @@ fn advance_bots(state: &AppState, mut stored: StoredGame) -> Result<StoredGame, 
         .game_by_id(stored.id)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found("game disappeared"))
+}
+
+fn repair_failed_bot_turn(state: &AppState, stored: &mut StoredGame) -> Result<(), ApiError> {
+    // Games saved by older builds may contain one or more staged AI moves that
+    // left the turn in check with no legal continuation. Explicit retry walks
+    // those moves back until the bot has an authoritative action to search.
+    for _ in 0..512 {
+        if !stored.game.has_staged_moves() || !stored.game.legal_actions().is_empty() {
+            return Ok(());
+        }
+        let actor = stored.side_user(stored.game.turn()).clone();
+        stored.game.undo_staged_move().map_err(ApiError::internal)?;
+        stored.version = state
+            .database
+            .save_action(
+                stored.id,
+                stored.version,
+                actor.id,
+                &json!({ "type": "undoFailedAiAction" }).to_string(),
+                &stored.game,
+            )
+            .map_err(ApiError::internal)?;
+    }
+    Err(ApiError::internal(
+        "failed AI turn exceeded the staged-action recovery limit",
+    ))
 }
 
 fn reload_and_advance_bots(state: &AppState, id: i64) -> Result<StoredGame, ApiError> {

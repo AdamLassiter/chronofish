@@ -532,9 +532,19 @@ label {
   break-inside: avoid;
   margin-bottom: 0.45rem;
 }
-.history-panel small {
-  display: block;
+.ai-analysis {
+  margin: 0.35rem 0 0 1.2rem;
   color: var(--cyan);
+  font-size: 0.82rem;
+}
+.ai-analysis summary {
+  cursor: pointer;
+}
+.ai-analysis ol {
+  columns: 1;
+  margin: 0.4rem 0 0;
+  padding-left: 1.4rem;
+  color: var(--muted);
 }
 
 @media (max-width: 920px) {

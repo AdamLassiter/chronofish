@@ -57,6 +57,8 @@ mod tests {
         assert!(APP.contains("present-line"));
         assert!(APP.contains("move-arrows"));
         assert!(APP.contains("snapshot.time + 2"));
+        assert!(APP.contains("groupHistory"));
+        assert!(APP.contains("AI analysis"));
         assert!(STYLES.contains("--board-width: 282px"));
         assert!(STYLES.contains("repeat(var(--time-columns), var(--board-width))"));
         assert!(STYLES.contains("min-height: 352px"));

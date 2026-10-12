@@ -200,9 +200,7 @@ impl Game {
                                 to,
                                 promotion,
                             };
-                            if self.ruleset != Ruleset::Standard
-                                || self.move_preserves_royal_safety(movement)
-                            {
+                            if self.move_preserves_turn_legality(movement) {
                                 actions.push(PlayerAction::Move { movement });
                             }
                         }
@@ -244,13 +242,16 @@ impl Game {
         actions
     }
 
-    fn move_preserves_royal_safety(&self, movement: Move) -> bool {
+    fn move_preserves_turn_legality(&self, movement: Move) -> bool {
         let mut probe = self.clone_for_search();
         let mover = probe.turn;
         if probe.apply_move_coords(movement.from, movement.to) == 0 {
             return false;
         }
-        !probe.is_in_check(mover)
+        if self.ruleset == Ruleset::Standard {
+            return !probe.is_in_check(mover);
+        }
+        probe.staged_royal_capture_by == Some(mover) || probe.has_legal_turn_completion(mover)
     }
 
     fn requires_promotion(piece: Piece, to: Position) -> bool {
@@ -301,7 +302,12 @@ impl Game {
         if self.apply_move_coords(movement.from, movement.to) == 0 {
             return Err(MoveError::IllegalMove);
         }
-        if self.ruleset == Ruleset::Standard && self.is_in_check(mover) {
+        let preserves_turn_legality = if self.ruleset == Ruleset::Standard {
+            !self.is_in_check(mover)
+        } else {
+            self.staged_royal_capture_by == Some(mover) || self.has_legal_turn_completion(mover)
+        };
+        if !preserves_turn_legality {
             let _ = self.staged_turn.pop();
             self.restore(checkpoint);
             return Err(MoveError::IllegalMove);
@@ -1373,6 +1379,57 @@ mod tests {
         assert!(loaded.can_submit());
         loaded.submit_turn().expect("submit persisted turn");
         assert_eq!(loaded.turn(), Color::Black);
+    }
+
+    #[test]
+    fn five_d_legal_actions_do_not_allow_a_checked_turn_to_dead_end() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        for (time, from, to) in [
+            (0, "e2", "e4"),
+            (1, "h7", "h6"),
+            (2, "e4", "e5"),
+            (3, "h8", "h7"),
+            (4, "e5", "e6"),
+            (5, "b7", "b6"),
+            (6, "e6", "f7"),
+        ] {
+            play(&mut game, time, from, to);
+            game.submit_turn().expect("turn complete");
+        }
+
+        assert_eq!(game.turn(), Color::Black);
+        assert!(game.is_in_check(Color::Black));
+        assert!(game.has_legal_turn_completion(Color::Black));
+        let dead_end = Move::new(position(7, 0, "h7"), position(7, 0, "h8"));
+        assert!(
+            !game
+                .legal_actions()
+                .contains(&PlayerAction::Move { movement: dead_end })
+        );
+        assert_eq!(game.apply_move(dead_end), Err(MoveError::IllegalMove));
+        assert!(!game.has_staged_moves());
+        assert_eq!(game.present_time(), Some(7));
+        assert_eq!(
+            game.piece_at(position(7, 0, "h7")),
+            Some(Piece {
+                color: Color::Black,
+                piece_type: PieceType::Rook,
+            })
+        );
+        assert!(!game.legal_actions().is_empty());
+
+        // Recreate the persisted state produced by pre-fix builds and prove
+        // that the retry path can restore the last valid turn checkpoint.
+        assert_eq!(
+            game.apply_move_coords(dead_end.from, dead_end.to),
+            1,
+            "legacy builds accepted this pseudo-legal move"
+        );
+        assert!(game.has_staged_moves());
+        assert!(game.legal_actions().is_empty());
+        game.undo_staged_move().expect("recover legacy dead end");
+        assert!(!game.has_staged_moves());
+        assert!(!game.legal_actions().is_empty());
     }
 
     #[test]

@@ -44,6 +44,10 @@ interface ConcedeAction {
   type: "concede";
 }
 
+interface UndoFailedAiAction {
+  type: "undoFailedAiAction";
+}
+
 interface AiDecision {
   action: PlayerAction;
   principalVariation: PlayerAction[];
@@ -137,8 +141,13 @@ interface GameSummary {
 interface MoveRecord {
   sequence: number;
   actor: User;
-  action: PlayerAction | ConcedeAction | AiDecision;
+  action: PlayerAction | ConcedeAction | UndoFailedAiAction | AiDecision;
   createdAt: number;
+}
+
+interface HistoryTurn {
+  actor: User;
+  entries: MoveRecord[];
 }
 
 interface GameDetail {
@@ -538,7 +547,7 @@ function renderGame(): void {
     ),
   );
   element<HTMLOListElement>("#move-history").replaceChildren(
-    ...history.map(renderHistory),
+    ...groupHistory(history).map(renderHistoryTurn),
   );
   requestAnimationFrame(() => {
     renderMoveArrows(grid, arrows);
@@ -866,37 +875,82 @@ async function abandonGame(): Promise<void> {
 }
 
 function isAiDecision(
-  action: PlayerAction | ConcedeAction | AiDecision,
+  action: PlayerAction | ConcedeAction | UndoFailedAiAction | AiDecision,
 ): action is AiDecision {
   return "action" in action;
 }
 
-function renderHistory(entry: MoveRecord): HTMLLIElement {
-  const item = document.createElement("li");
-  let decision: AiDecision | null;
-  let action: PlayerAction | ConcedeAction;
-  if (isAiDecision(entry.action)) {
-    decision = entry.action;
-    action = entry.action.action;
-  } else {
-    decision = null;
-    action = entry.action;
+function recordedAction(
+  entry: MoveRecord,
+): PlayerAction | ConcedeAction | UndoFailedAiAction {
+  return isAiDecision(entry.action) ? entry.action.action : entry.action;
+}
+
+function groupHistory(entries: MoveRecord[]): HistoryTurn[] {
+  const turns: HistoryTurn[] = [];
+  let current: HistoryTurn | null = null;
+  for (const entry of entries) {
+    const action = recordedAction(entry);
+    if (action.type === "undoFailedAiAction") {
+      if (current?.actor.id === entry.actor.id) {
+        current.entries.pop();
+        if (current.entries.length === 0) {
+          turns.pop();
+          current = null;
+        }
+      }
+      continue;
+    }
+    if (!current || current.actor.id !== entry.actor.id) {
+      current = { actor: entry.actor, entries: [] };
+      turns.push(current);
+    }
+    current.entries.push(entry);
+    if (action.type === "submitTurn" || action.type === "concede")
+      current = null;
   }
-  const text =
-    action.type === "concede"
-      ? "abandoned the game"
-      : action.type === "submitTurn"
-      ? "submitted turn"
-      : formatMove(action.movement);
-  item.textContent = `${entry.sequence}. ${entry.actor.displayName}: ${text}`;
-  if (decision && decision.principalVariation.length > 0) {
-    const analysis = document.createElement("small");
-    analysis.textContent = ` PV: ${decision.principalVariation
-      .map((step) =>
-        step.type === "submitTurn" ? "submit" : formatMove(step.movement),
-      )
-      .join(" · ")}`;
-    item.append(analysis);
+  return turns;
+}
+
+function renderHistoryTurn(turn: HistoryTurn): HTMLLIElement {
+  const item = document.createElement("li");
+  const actions = turn.entries.map(recordedAction);
+  const moves = actions
+    .filter(
+      (action): action is Extract<PlayerAction, { type: "move" }> =>
+        action.type === "move",
+    )
+    .map((action) => formatMove(action.movement));
+  const description = actions.some((action) => action.type === "concede")
+    ? "abandoned the game"
+    : moves.length > 0
+      ? moves.join(" · ")
+      : "submitted turn";
+  item.textContent = `${turn.actor.displayName}: ${description}`;
+
+  const decisions = turn.entries
+    .map((entry) => (isAiDecision(entry.action) ? entry.action : null))
+    .filter(
+      (decision): decision is AiDecision =>
+        decision !== null && decision.principalVariation.length > 0,
+    );
+  if (decisions.length > 0) {
+    const details = document.createElement("details");
+    details.className = "ai-analysis";
+    const summary = document.createElement("summary");
+    summary.textContent = `AI analysis (${decisions.length})`;
+    const lines = document.createElement("ol");
+    for (const decision of decisions) {
+      const line = document.createElement("li");
+      line.textContent = decision.principalVariation
+        .map((step) =>
+          step.type === "submitTurn" ? "submit" : formatMove(step.movement),
+        )
+        .join(" · ");
+      lines.append(line);
+    }
+    details.append(summary, lines);
+    item.append(details);
   }
   return item;
 }
