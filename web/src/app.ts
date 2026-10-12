@@ -40,6 +40,10 @@ type PlayerAction =
   | { type: "move"; movement: Movement }
   | { type: "submitTurn" };
 
+interface ConcedeAction {
+  type: "concede";
+}
+
 interface AiDecision {
   action: PlayerAction;
   principalVariation: PlayerAction[];
@@ -133,7 +137,7 @@ interface GameSummary {
 interface MoveRecord {
   sequence: number;
   actor: User;
-  action: PlayerAction | AiDecision;
+  action: PlayerAction | ConcedeAction | AiDecision;
   createdAt: number;
 }
 
@@ -493,8 +497,18 @@ function renderGame(): void {
     ? `${game.outcome.winner ?? "Nobody"} · ${game.outcome.reason}`
     : `${game.turn} to move · ${game.message}`;
   const mine = viewerSide === game.turn;
+  const finished = game.outcome !== null;
+  const currentPlayer =
+    game.turn === "white" ? summary.white : summary.black;
   element<HTMLButtonElement>("#submit-turn").disabled =
-    !mine || !game.canSubmit;
+    finished || !mine || !game.canSubmit;
+  const retryAi = element<HTMLButtonElement>("#retry-ai");
+  retryAi.disabled = finished || !currentPlayer.isBot;
+  retryAi.title = currentPlayer.isBot
+    ? "Ask the server to try the AI turn again"
+    : "The current player is not an AI";
+  element<HTMLButtonElement>("#abandon-game").disabled = finished;
+  if (finished) stopPolling();
   const presentTime = currentPresentTime(game);
   const maxTime = Math.max(
     presentTime,
@@ -784,18 +798,83 @@ async function playMove(movement: Movement): Promise<void> {
     notice("Move accepted.");
     renderGame();
   } catch (error) {
-    notice(errorMessage(error), true);
+    await recoverGameAfterFailedAction(error);
   }
 }
 
-function isAiDecision(action: PlayerAction | AiDecision): action is AiDecision {
+async function recoverGameAfterFailedAction(error: unknown): Promise<void> {
+  const message = errorMessage(error);
+  const current = state.current;
+  if (current) {
+    try {
+      state.current = await api<GameDetail>(
+        `/api/games/${current.summary.id}`,
+      );
+      state.selected = null;
+      renderGame();
+    } catch {
+      // Preserve the original, more useful action failure below.
+    }
+  }
+  notice(message, true);
+}
+
+async function retryAiMove(): Promise<void> {
+  const button = element<HTMLButtonElement>("#retry-ai");
+  button.disabled = true;
+  notice("Requesting another AI attempt…");
+  try {
+    const current = currentGame();
+    state.current = await api<GameDetail>(
+      `/api/games/${current.summary.id}/retry-ai`,
+      {
+        method: "POST",
+        body: { version: current.summary.version },
+      },
+    );
+    state.selected = null;
+    renderGame();
+    notice("The AI move was accepted.");
+  } catch (error) {
+    await recoverGameAfterFailedAction(error);
+  }
+}
+
+async function abandonGame(): Promise<void> {
+  const current = currentGame();
+  if (
+    !confirm(
+      "Abandon this game? This immediately ends the game and counts as a loss.",
+    )
+  )
+    return;
+  element<HTMLButtonElement>("#abandon-game").disabled = true;
+  try {
+    state.current = await api<GameDetail>(
+      `/api/games/${current.summary.id}/abandon`,
+      {
+        method: "POST",
+        body: { version: current.summary.version },
+      },
+    );
+    state.selected = null;
+    renderGame();
+    notice("Game abandoned. The result has been recorded as a loss.");
+  } catch (error) {
+    await recoverGameAfterFailedAction(error);
+  }
+}
+
+function isAiDecision(
+  action: PlayerAction | ConcedeAction | AiDecision,
+): action is AiDecision {
   return "action" in action;
 }
 
 function renderHistory(entry: MoveRecord): HTMLLIElement {
   const item = document.createElement("li");
   let decision: AiDecision | null;
-  let action: PlayerAction;
+  let action: PlayerAction | ConcedeAction;
   if (isAiDecision(entry.action)) {
     decision = entry.action;
     action = entry.action.action;
@@ -804,7 +883,9 @@ function renderHistory(entry: MoveRecord): HTMLLIElement {
     action = entry.action;
   }
   const text =
-    action.type === "submitTurn"
+    action.type === "concede"
+      ? "abandoned the game"
+      : action.type === "submitTurn"
       ? "submitted turn"
       : formatMove(action.movement);
   item.textContent = `${entry.sequence}. ${entry.actor.displayName}: ${text}`;
@@ -904,6 +985,8 @@ element<HTMLButtonElement>("#back-to-lobby").onclick = () => {
 };
 element<HTMLButtonElement>("#refresh-game").onclick = () =>
   void openGame(currentGame().summary.id);
+element<HTMLButtonElement>("#retry-ai").onclick = () => void retryAiMove();
+element<HTMLButtonElement>("#abandon-game").onclick = () => void abandonGame();
 element<HTMLButtonElement>("#submit-turn").onclick = () => {
   void (async () => {
     try {
@@ -918,7 +1001,7 @@ element<HTMLButtonElement>("#submit-turn").onclick = () => {
       state.selected = null;
       renderGame();
     } catch (error) {
-      notice(errorMessage(error), true);
+      await recoverGameAfterFailedAction(error);
     }
   })();
 };

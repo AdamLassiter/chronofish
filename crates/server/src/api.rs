@@ -118,6 +118,8 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/games/{id}", get(get_game))
         .route("/api/games/{id}/moves", post(play_move))
         .route("/api/games/{id}/submit", post(submit_turn))
+        .route("/api/games/{id}/retry-ai", post(retry_ai))
+        .route("/api/games/{id}/abandon", post(abandon_game))
         .fallback(web::not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -330,13 +332,70 @@ async fn submit_turn(
     Ok(Json(game_detail(&state, &stored, user.id)?))
 }
 
-fn ensure_actor(stored: &StoredGame, user: &UserRecord, version: i64) -> Result<(), ApiError> {
+async fn retry_ai(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<VersionBody>,
+) -> Result<Json<GameDetail>, ApiError> {
+    let user = authenticated_user(&state, &headers)?;
+    let stored = load_participating_game(&state, id, user.id)?;
+    ensure_current_active(&stored, body.version)?;
+    if !stored.side_user(stored.game.turn()).is_bot {
+        return Err(ApiError::conflict("the current player is not an AI"));
+    }
+    let stored = advance_bots(&state, stored)?;
+    Ok(Json(game_detail(&state, &stored, user.id)?))
+}
+
+async fn abandon_game(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<VersionBody>,
+) -> Result<Json<GameDetail>, ApiError> {
+    let user = authenticated_user(&state, &headers)?;
+    let mut stored = load_participating_game(&state, id, user.id)?;
+    ensure_current_active(&stored, body.version)?;
+    let side = if stored.attacker.id == user.id {
+        Side::White
+    } else {
+        Side::Black
+    };
+    stored
+        .game
+        .concede(side)
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    stored.version = state
+        .database
+        .save_action(
+            stored.id,
+            stored.version,
+            user.id,
+            &json!({ "type": "concede" }).to_string(),
+            &stored.game,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
+    let stored = state
+        .database
+        .game_by_id(stored.id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("game disappeared"))?;
+    Ok(Json(game_detail(&state, &stored, user.id)?))
+}
+
+fn ensure_current_active(stored: &StoredGame, version: i64) -> Result<(), ApiError> {
     if stored.version != version {
-        return Err(ApiError::conflict("game changed; reload before moving"));
+        return Err(ApiError::conflict("game changed; reload before acting"));
     }
     if stored.status != "active" || stored.game.outcome().is_some() {
         return Err(ApiError::conflict("the game is already finished"));
     }
+    Ok(())
+}
+
+fn ensure_actor(stored: &StoredGame, user: &UserRecord, version: i64) -> Result<(), ApiError> {
+    ensure_current_active(stored, version)?;
     if stored.side_user(stored.game.turn()).id != user.id {
         return Err(ApiError::forbidden("it is not your turn"));
     }
@@ -526,7 +585,38 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use chronofish_core::{AiDecision, AiProfile, Game};
     use chronofish_random_bot::RavenBot;
+
+    struct FailsOnceBot {
+        failed: bool,
+    }
+
+    impl AiPlayer for FailsOnceBot {
+        fn profile(&self) -> AiProfile {
+            AiProfile {
+                username: "bot-flaky",
+                display_name: "Flaky Bot",
+            }
+        }
+
+        fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String> {
+            if !self.failed {
+                self.failed = true;
+                return Err("temporary search failure".to_owned());
+            }
+            let action = game
+                .legal_actions()
+                .into_iter()
+                .next()
+                .ok_or_else(|| "no legal action".to_owned())?;
+            Ok(AiDecision {
+                action,
+                principal_variation: Vec::new(),
+                root_value: None,
+            })
+        }
+    }
 
     async fn request(
         app: &Router,
@@ -660,6 +750,157 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(stale_response["error"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_ai_turn_can_be_retried_by_a_player() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![Box::new(FailsOnceBot { failed: false })],
+        )
+        .expect("state");
+        let app = router(state);
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({ "username": "retry-user", "password": "retry-password" })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+        let (_, created) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(json!({
+                "opponent": "bot-flaky",
+                "ruleset": "standard",
+                "playAs": "white"
+            })),
+        )
+        .await;
+        let game_id = created["summary"]["id"].as_i64().expect("game id");
+        let movement = created["game"]["legalActions"][0]["movement"].clone();
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/moves"),
+            Some(token),
+            Some(json!({ "version": 0, "movement": movement })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+        let (_, waiting) = request(
+            &app,
+            "GET",
+            &format!("/api/games/{game_id}"),
+            Some(token),
+            None,
+        )
+        .await;
+        assert_eq!(waiting["summary"]["version"], 1);
+        assert_eq!(waiting["game"]["turn"], "black");
+
+        let (status, retried) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/retry-ai"),
+            Some(token),
+            Some(json!({ "version": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(retried["summary"]["version"], 2);
+        assert_eq!(retried["game"]["turn"], "white");
+        assert_eq!(retried["history"].as_array().expect("history").len(), 2);
+
+        let (status, response) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/retry-ai"),
+            Some(token),
+            Some(json!({ "version": 2 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(response["error"], "the current player is not an AI");
+    }
+
+    #[tokio::test]
+    async fn abandoning_a_game_records_a_rated_concession_loss() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![Box::new(RavenBot::default())],
+        )
+        .expect("state");
+        let app = router(state);
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({ "username": "resigner", "password": "resign-password" })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+        let (_, created) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(json!({
+                "opponent": "bot-raven",
+                "ruleset": "standard",
+                "playAs": "white"
+            })),
+        )
+        .await;
+        let game_id = created["summary"]["id"].as_i64().expect("game id");
+        let winner_id = created["summary"]["black"]["id"].clone();
+
+        let (status, abandoned) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/abandon"),
+            Some(token),
+            Some(json!({ "version": 0 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(abandoned["summary"]["status"], "finished");
+        assert_eq!(abandoned["summary"]["winnerId"], winner_id);
+        assert_eq!(abandoned["game"]["outcome"]["winner"], "black");
+        assert_eq!(abandoned["game"]["outcome"]["reason"], "concession");
+        assert_eq!(abandoned["history"][0]["action"]["type"], "concede");
+
+        let (_, leaders) = request(&app, "GET", "/api/leaderboard", None, None).await;
+        let users = leaders.as_array().expect("leaderboard");
+        let resigner = users
+            .iter()
+            .find(|user| user["username"] == "resigner")
+            .expect("resigner");
+        let bot = users
+            .iter()
+            .find(|user| user["username"] == "bot-raven")
+            .expect("bot");
+        assert_eq!(resigner["rating"], 1484);
+        assert_eq!(resigner["gamesPlayed"], 1);
+        assert_eq!(bot["rating"], 1516);
+        assert_eq!(bot["gamesPlayed"], 1);
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/abandon"),
+            Some(token),
+            Some(json!({ "version": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
     }
 
     #[tokio::test]

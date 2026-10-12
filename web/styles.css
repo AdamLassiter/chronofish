@@ -242,6 +242,15 @@ label {
 .toolbar-actions {
   display: flex;
   gap: 0.5rem;
+  flex-wrap: wrap;
+}
+#retry-ai {
+  background: #7db7ff;
+  color: #071421;
+}
+#abandon-game {
+  background: #ff7a70;
+  color: #240807;
 }
 .notice {
   min-height: 1.5em;
