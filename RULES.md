@@ -97,13 +97,13 @@ If a piece is moved to a different board, either across time, timelines, or both
 
 If a piece is moved to a historical board (a board where a move has already been made), the game does not create a new board overlapping the original new board; instead, it creates that new board on a new timeline.
 
-A player may have to make more than one move in a 5D turn. The turn can be submitted only when every required active board at the Present has advanced to the opponent's colour. Intermediate moves are staged and may temporarily leave a royal piece in check; the complete turn may not be submitted in that state.
+A player may have to make more than one move in a 5D turn. The turn can be submitted only when every required active board at the Present has advanced to the opponent's colour. Intermediate moves are staged until the whole turn is submitted.
 
 An active latest board with no pieces belonging to its side to move is dormant: it does not hold the Present or require a move. It can become relevant again if a piece later arrives from another board. In particular, moving a king or royal queen away from its source board does not create a stalemate merely because that board no longer contains a royal piece.
 
 ### Special moves
 
-Castling and en passant are local to one spatial board; neither move crosses time or timelines. Castling may not begin in check, cross an attacked square, or finish in check. Castling rights and the one-move en-passant window follow each resulting board history independently.
+Castling and en passant are local to one spatial board; neither move crosses time or timelines. In Standard Chess, castling may not begin in check, cross an attacked square, or finish in check. Check does not restrict castling in either 5D ruleset. Castling rights and the one-move en-passant window follow each resulting board history independently.
 
 An orthodox pawn reaching its final spatial rank promotes to queen, rook, bishop, or knight. A brawn reaching its final spatial rank promotes to royal queen, princess, dragon, or unicorn.
 
@@ -121,15 +121,16 @@ Such timelines are functionally optional, as shifting the Present does not deman
 
 Timelines are inactive when the player that created them has branched too much.
 Boards on inactive timelines (referred to as "inactive boards") do not affect the location of the Present and thus, usually no moves need be made on them.
+The opposing player may accept an inactive timeline at any point when its latest board is theirs to move. They may make a move from that board without waiting for it to reach the Present; the move permanently marks the timeline accepted and active. Moving onto the latest board of an inactive opposing timeline also accepts it. A player cannot accept their own inactive timeline.
 The existence of inactive timelines is a game balance concession to prevent one player from continuously branching, and also causes having timeline advantage (having less timelines created than your opponent) to be worth slightly more than a queen.
 
 ## Check
 
 Check occurs when a royal piece (a king or a royal queen) is under threat of capture.
-Check can be moved into (in a way that would allow the opponent to capture the king on their next move), but the game does not allow the submission of moves that leave the king in check.
+In 5D Chess and 5D Variant Chess, check is informational: players may move into check, make moves that do not answer check, and submit a turn while a royal piece remains attacked. The game continues until a royal piece is actually captured.
 
 ### Checkmate
 
-Mate occurs when there is no sequence of legal moves that leaves the Present on the opponent's color and none of the active player's kings (or royal queens) in check. If one of the active player's royal pieces is in check, it is checkmate; otherwise, it is stalemate.
+Checkmate and stalemate adjudication apply only to Standard Chess. Its king cannot be captured, and it also implements threefold repetition, the fifty-move rule, and insufficient-material draws.
 
-In a 5D game, directly capturing any royal piece ends the game immediately. In Standard Chess the king is never captured: checkmate ends the game first. Standard Chess also implements threefold repetition, the fifty-move rule, and insufficient-material draws.
+In a 5D game, directly capturing any royal piece ends the game immediately. Checkmate, stalemate, repetition, and move-count draws do not end a 5D game before that capture.

@@ -100,6 +100,7 @@ interface Timeline {
   row: number;
   label: string;
   owner: "neutral" | Side;
+  accepted: boolean;
   boards: BoardSnapshot[];
 }
 
@@ -164,6 +165,11 @@ interface GameDetail {
   game: GameView;
   viewerSide: Side | null;
   history: MoveRecord[];
+}
+
+interface BugReportReceipt {
+  id: number;
+  status: "unresolved" | "closed";
 }
 
 interface Session {
@@ -388,7 +394,7 @@ function formatMove(move: Movement): string {
   return `${formatPosition(move.from)} → ${formatPosition(move.to)}${move.promotion ? `=${move.promotion}` : ""}`;
 }
 
-type BoardStatus = "Inactive" | "Future" | "Latest" | "Past";
+type BoardStatus = "Acceptable" | "Inactive" | "Future" | "Latest" | "Past";
 type SquareHighlight = "arrived" | "move-source" | "move-target" | "check";
 type HighlightMap = Map<string, Set<SquareHighlight>>;
 
@@ -426,7 +432,20 @@ function boardStatus(
   snapshot: BoardSnapshot,
   presentTime: number,
 ): BoardStatus {
-  if (!game.activeTimelines.includes(timeline.id)) return "Inactive";
+  if (!game.activeTimelines.includes(timeline.id)) {
+    const opposingOwner =
+      timeline.owner !== "neutral" && timeline.owner !== game.turn;
+    if (
+      opposingOwner &&
+      snapshot.time === latestTime(timeline) &&
+      snapshot.sideToMove === game.turn &&
+      snapshot.board.some((rank) =>
+        rank.some((piece) => piece?.color === game.turn),
+      )
+    )
+      return "Acceptable";
+    return "Inactive";
+  }
   if (snapshot.time > presentTime) return "Future";
   return snapshot.time === latestTime(timeline) ? "Latest" : "Past";
 }
@@ -579,11 +598,17 @@ function renderTimeline(
   row.className = "timeline-row";
   row.dataset.owner = timeline.owner;
   row.dataset.active = String(game.activeTimelines.includes(timeline.id));
+  row.dataset.accepted = String(timeline.accepted);
   row.style.setProperty("--time-columns", String(maxTime + 1));
 
   const label = document.createElement("div");
   label.className = "timeline-label";
   label.textContent = `L${timeline.id}`;
+  if (timeline.accepted) {
+    const accepted = document.createElement("small");
+    accepted.textContent = "Accepted";
+    label.append(accepted);
+  }
   row.append(label);
 
   const marker = document.createElement("div");
@@ -895,6 +920,49 @@ async function abandonGame(): Promise<void> {
   }
 }
 
+function openBugReport(): void {
+  const form = element<HTMLFormElement>("#bug-report-form");
+  form.reset();
+  element("#bug-report-error").textContent = "";
+  const dialog = element<HTMLDialogElement>("#bug-report-dialog");
+  dialog.showModal();
+  element<HTMLTextAreaElement>(
+    '#bug-report-form textarea[name="expectedBehavior"]',
+  ).focus();
+}
+
+function closeBugReport(): void {
+  element<HTMLDialogElement>("#bug-report-dialog").close();
+}
+
+async function submitBugReport(form: HTMLFormElement): Promise<void> {
+  const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+  if (!submit) throw new Error("Bug report submit button is missing");
+  submit.disabled = true;
+  element("#bug-report-error").textContent = "";
+  try {
+    const current = currentGame();
+    const fields = new FormData(form);
+    const report = await api<BugReportReceipt>(
+      `/api/games/${current.summary.id}/bugs`,
+      {
+        method: "POST",
+        body: {
+          version: current.summary.version,
+          expectedBehavior: formString(fields, "expectedBehavior"),
+          actualBehavior: formString(fields, "actualBehavior"),
+        },
+      },
+    );
+    closeBugReport();
+    notice(`Bug report #${report.id} submitted. Thank you.`);
+  } catch (error) {
+    element("#bug-report-error").textContent = errorMessage(error);
+  } finally {
+    submit.disabled = false;
+  }
+}
+
 function isAiDecision(
   action:
     | PlayerAction
@@ -1070,6 +1138,7 @@ element<HTMLButtonElement>("#retry-ai").onclick = () => void retryAiMove();
 element<HTMLButtonElement>("#undo-staged-move").onclick = () =>
   void undoStagedMove();
 element<HTMLButtonElement>("#abandon-game").onclick = () => void abandonGame();
+element<HTMLButtonElement>("#raise-bug").onclick = openBugReport;
 element<HTMLButtonElement>("#submit-turn").onclick = () => {
   void (async () => {
     try {
@@ -1088,6 +1157,19 @@ element<HTMLButtonElement>("#submit-turn").onclick = () => {
     }
   })();
 };
+
+const bugReportDialog = element<HTMLDialogElement>("#bug-report-dialog");
+const bugReportForm = element<HTMLFormElement>("#bug-report-form");
+bugReportForm.onsubmit = (event) => {
+  event.preventDefault();
+  void submitBugReport(bugReportForm);
+};
+bugReportDialog.onclose = () => {
+  bugReportForm.reset();
+  element("#bug-report-error").textContent = "";
+};
+element<HTMLButtonElement>("#close-bug-report").onclick = closeBugReport;
+element<HTMLButtonElement>("#cancel-bug-report").onclick = closeBugReport;
 
 void (async () => {
   if (!state.token) {

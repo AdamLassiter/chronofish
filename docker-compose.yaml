@@ -13,6 +13,7 @@ services:
       CHRONOFISH_ADDR: 0.0.0.0:3000
       CHRONOFISH_DATABASE: /data/chronofish.sqlite3
       CHRONOFISH_AZ_SIMULATIONS: ${CHRONOFISH_AZ_SIMULATIONS:-48}
+      CHRONOFISH_BUG_ADMIN_TOKEN: ${CHRONOFISH_BUG_ADMIN_TOKEN:-}
       RUST_LOG: ${RUST_LOG:-info}
       # To use trained CPU/GPU models, uncomment these and the bind mounts below.
       # CHRONOFISH_AZ_MODEL: /models/chronofish-cpu-best-v2.json

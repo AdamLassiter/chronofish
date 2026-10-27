@@ -69,6 +69,34 @@ pub(crate) struct MoveRecord {
     pub created_at: i64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticMoveRecord {
+    sequence: i64,
+    actor: UserRecord,
+    action: serde_json::Value,
+    state: serde_json::Value,
+    created_at: i64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BugReport {
+    pub id: i64,
+    pub game_id: i64,
+    pub reporter: UserRecord,
+    pub game_version: i64,
+    pub expected_behavior: String,
+    pub actual_behavior: String,
+    pub game_summary: serde_json::Value,
+    pub game_state: serde_json::Value,
+    pub history: serde_json::Value,
+    pub server_version: String,
+    pub status: String,
+    pub created_at: i64,
+    pub closed_at: Option<i64>,
+}
+
 impl Database {
     pub fn open(path: impl AsRef<Path>) -> rusqlite::Result<Self> {
         let connection = Connection::open(path)?;
@@ -132,8 +160,24 @@ impl Database {
                 created_at INTEGER NOT NULL,
                 UNIQUE(game_id, sequence)
             );
+            CREATE TABLE IF NOT EXISTS bug_reports (
+                id INTEGER PRIMARY KEY,
+                game_id INTEGER NOT NULL REFERENCES games(id),
+                reporter_id INTEGER NOT NULL REFERENCES users(id),
+                game_version INTEGER NOT NULL,
+                expected_behavior TEXT NOT NULL,
+                actual_behavior TEXT NOT NULL,
+                game_summary_json TEXT NOT NULL,
+                game_state_json TEXT NOT NULL,
+                history_json TEXT NOT NULL,
+                server_version TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'unresolved',
+                created_at INTEGER NOT NULL,
+                closed_at INTEGER
+            );
             CREATE INDEX IF NOT EXISTS games_players ON games(attacker_id, defender_id, updated_at);
             CREATE INDEX IF NOT EXISTS moves_game ON moves(game_id, sequence);
+            CREATE INDEX IF NOT EXISTS bug_reports_status ON bug_reports(status, created_at);
             ",
             )
     }
@@ -356,6 +400,13 @@ impl Database {
         game_id: i64,
     ) -> Result<Vec<MoveRecord>, Box<dyn std::error::Error>> {
         let connection = self.connection.lock().expect("database mutex poisoned");
+        Self::moves_for_game_on(&connection, game_id)
+    }
+
+    fn moves_for_game_on(
+        connection: &Connection,
+        game_id: i64,
+    ) -> Result<Vec<MoveRecord>, Box<dyn std::error::Error>> {
         let mut statement = connection.prepare(
             "SELECT sequence, actor_id, action_json, created_at FROM moves
              WHERE game_id = ?1 ORDER BY sequence",
@@ -369,13 +420,183 @@ impl Database {
             .map(|(sequence, actor_id, action_json, created_at)| {
                 Ok(MoveRecord {
                     sequence,
-                    actor: Self::user_by_id_on(&connection, actor_id)?
+                    actor: Self::user_by_id_on(connection, actor_id)?
                         .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
                     action: serde_json::from_str(&action_json)?,
                     created_at,
                 })
             })
             .collect()
+    }
+
+    pub fn create_bug_report(
+        &self,
+        game_id: i64,
+        reporter_id: i64,
+        expected_version: i64,
+        expected_behavior: &str,
+        actual_behavior: &str,
+        server_version: &str,
+    ) -> Result<Option<BugReport>, Box<dyn std::error::Error>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let game = Self::game_by_id_on(&connection, game_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if game.version != expected_version {
+            return Ok(None);
+        }
+        let history = Self::diagnostic_history_for_game_on(&connection, game_id)?;
+        let timestamp = now();
+        connection.execute(
+            "INSERT INTO bug_reports
+             (game_id, reporter_id, game_version, expected_behavior, actual_behavior,
+              game_summary_json, game_state_json, history_json, server_version, status,
+              created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'unresolved', ?10)",
+            params![
+                game_id,
+                reporter_id,
+                game.version,
+                expected_behavior,
+                actual_behavior,
+                serde_json::to_string(&game.summary())?,
+                serde_json::to_string(&game.game)?,
+                serde_json::to_string(&history)?,
+                server_version,
+                timestamp,
+            ],
+        )?;
+        Self::bug_report_by_id_on(&connection, connection.last_insert_rowid())
+    }
+
+    fn diagnostic_history_for_game_on(
+        connection: &Connection,
+        game_id: i64,
+    ) -> Result<Vec<DiagnosticMoveRecord>, Box<dyn std::error::Error>> {
+        let mut statement = connection.prepare(
+            "SELECT sequence, actor_id, action_json, state_json, created_at FROM moves
+             WHERE game_id = ?1 ORDER BY sequence",
+        )?;
+        let raw: Vec<(i64, i64, String, String, i64)> = statement
+            .query_map([game_id], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })?
+            .collect::<Result<_, _>>()?;
+        raw.into_iter()
+            .map(
+                |(sequence, actor_id, action_json, state_json, created_at)| {
+                    Ok(DiagnosticMoveRecord {
+                        sequence,
+                        actor: Self::user_by_id_on(connection, actor_id)?
+                            .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+                        action: serde_json::from_str(&action_json)?,
+                        state: serde_json::from_str(&state_json)?,
+                        created_at,
+                    })
+                },
+            )
+            .collect()
+    }
+
+    pub fn unresolved_bug_reports(&self) -> Result<Vec<BugReport>, Box<dyn std::error::Error>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT id FROM bug_reports WHERE status = 'unresolved' ORDER BY created_at, id",
+        )?;
+        let ids: Vec<i64> = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        ids.into_iter()
+            .map(|id| {
+                Self::bug_report_by_id_on(&connection, id)?
+                    .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows.into())
+            })
+            .collect()
+    }
+
+    pub fn close_bug_report(
+        &self,
+        id: i64,
+    ) -> Result<Option<BugReport>, Box<dyn std::error::Error>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let changed = connection.execute(
+            "UPDATE bug_reports SET status = 'closed', closed_at = COALESCE(closed_at, ?1)
+             WHERE id = ?2",
+            params![now(), id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        Self::bug_report_by_id_on(&connection, id)
+    }
+
+    fn bug_report_by_id_on(
+        connection: &Connection,
+        id: i64,
+    ) -> Result<Option<BugReport>, Box<dyn std::error::Error>> {
+        type RawBugReport = (
+            i64,
+            i64,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<i64>,
+        );
+        let raw: Option<RawBugReport> = connection
+            .query_row(
+                "SELECT id, game_id, reporter_id, game_version, expected_behavior,
+                        actual_behavior, game_summary_json, game_state_json, history_json,
+                        server_version, status, created_at, closed_at
+                 FROM bug_reports WHERE id = ?1",
+                [id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                        row.get(10)?,
+                        row.get(11)?,
+                        row.get(12)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some(raw) = raw else { return Ok(None) };
+        Ok(Some(BugReport {
+            id: raw.0,
+            game_id: raw.1,
+            reporter: Self::user_by_id_on(connection, raw.2)?
+                .ok_or(rusqlite::Error::QueryReturnedNoRows)?,
+            game_version: raw.3,
+            expected_behavior: raw.4,
+            actual_behavior: raw.5,
+            game_summary: serde_json::from_str(&raw.6)?,
+            game_state: serde_json::from_str(&raw.7)?,
+            history: serde_json::from_str(&raw.8)?,
+            server_version: raw.9,
+            status: raw.10,
+            created_at: raw.11,
+            closed_at: raw.12,
+        }))
     }
 
     pub fn save_action(

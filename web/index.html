@@ -111,6 +111,7 @@
             <button id="submit-turn" type="button">Submit turn</button>
             <button id="retry-ai" type="button">Retry AI move</button>
             <button id="refresh-game" type="button">Refresh</button>
+            <button id="raise-bug" type="button">Raise a bug</button>
             <button id="abandon-game" type="button">Abandon game</button>
           </div>
         </div>
@@ -138,6 +139,53 @@
         </article>
       </section>
     </main>
+    <dialog id="bug-report-dialog" aria-labelledby="bug-report-title">
+      <form id="bug-report-form" class="bug-report-form">
+        <div class="bug-report-heading">
+          <div>
+            <p class="eyebrow">Diagnostic capture</p>
+            <h2 id="bug-report-title">Raise a bug</h2>
+          </div>
+          <button
+            id="close-bug-report"
+            class="dialog-close"
+            type="button"
+            aria-label="Close bug report"
+          >
+            ×
+          </button>
+        </div>
+        <p class="bug-report-explainer">
+          The current game state and complete move history will be attached so
+          the problem can be reproduced.
+        </p>
+        <label
+          >Expected behaviour
+          <textarea
+            name="expectedBehavior"
+            rows="6"
+            maxlength="20000"
+            required
+            placeholder="What did you expect to happen?"
+          ></textarea>
+        </label>
+        <label
+          >Actual behaviour
+          <textarea
+            name="actualBehavior"
+            rows="6"
+            maxlength="20000"
+            required
+            placeholder="What happened instead?"
+          ></textarea>
+        </label>
+        <p id="bug-report-error" class="error" role="alert"></p>
+        <div class="bug-report-actions">
+          <button id="cancel-bug-report" type="button">Cancel</button>
+          <button class="primary" type="submit">Submit bug report</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="/assets/app.js"></script>
   </body>
 </html>

@@ -16,7 +16,7 @@ use serde_json::json;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::db::{Database, GameSummary, MoveRecord, StoredGame, UserRecord};
+use crate::db::{BugReport, Database, GameSummary, MoveRecord, StoredGame, UserRecord};
 use crate::web;
 
 type BotMap = HashMap<i64, Box<dyn AiPlayer>>;
@@ -25,6 +25,7 @@ type BotMap = HashMap<i64, Box<dyn AiPlayer>>;
 pub struct AppState {
     database: Database,
     bots: Arc<Mutex<BotMap>>,
+    bug_admin_token: Option<String>,
 }
 
 #[derive(Debug)]
@@ -73,6 +74,21 @@ struct VersionBody {
     version: i64,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BugReportBody {
+    version: i64,
+    expected_behavior: String,
+    actual_behavior: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BugReportReceipt {
+    id: i64,
+    status: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GameDetail {
@@ -96,7 +112,17 @@ impl AppState {
         Ok(Self {
             database,
             bots: Arc::new(Mutex::new(bots)),
+            bug_admin_token: std::env::var("CHRONOFISH_BUG_ADMIN_TOKEN")
+                .ok()
+                .map(|token| token.trim().to_owned())
+                .filter(|token| !token.is_empty()),
         })
+    }
+
+    #[cfg(test)]
+    fn with_bug_admin_token(mut self, token: &str) -> Self {
+        self.bug_admin_token = Some(token.to_owned());
+        self
     }
 }
 
@@ -121,6 +147,9 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/games/{id}/submit", post(submit_turn))
         .route("/api/games/{id}/retry-ai", post(retry_ai))
         .route("/api/games/{id}/abandon", post(abandon_game))
+        .route("/api/games/{id}/bugs", post(create_bug_report))
+        .route("/api/admin/bugs", get(unresolved_bug_reports))
+        .route("/api/admin/bugs/{id}/close", post(close_bug_report))
         .fallback(web::not_found)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -415,6 +444,105 @@ async fn abandon_game(
     Ok(Json(game_detail(&state, &stored, user.id)?))
 }
 
+async fn create_bug_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<BugReportBody>,
+) -> Result<(StatusCode, Json<BugReportReceipt>), ApiError> {
+    let user = authenticated_user(&state, &headers)?;
+    let stored = load_participating_game(&state, id, user.id)?;
+    if stored.version != body.version {
+        return Err(ApiError::conflict(
+            "game changed; wait for it to refresh, then submit the preserved report again",
+        ));
+    }
+    let expected_behavior =
+        validate_bug_description("expected behaviour", &body.expected_behavior)?;
+    let actual_behavior = validate_bug_description("actual behaviour", &body.actual_behavior)?;
+    let report = state
+        .database
+        .create_bug_report(
+            id,
+            user.id,
+            body.version,
+            &expected_behavior,
+            &actual_behavior,
+            env!("CARGO_PKG_VERSION"),
+        )
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| {
+            ApiError::conflict(
+                "game changed; wait for it to refresh, then submit the preserved report again",
+            )
+        })?;
+    Ok((
+        StatusCode::CREATED,
+        Json(BugReportReceipt {
+            id: report.id,
+            status: report.status,
+        }),
+    ))
+}
+
+async fn unresolved_bug_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<BugReport>>, ApiError> {
+    require_bug_admin(&state, &headers)?;
+    Ok(Json(
+        state
+            .database
+            .unresolved_bug_reports()
+            .map_err(ApiError::internal)?,
+    ))
+}
+
+async fn close_bug_report(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<BugReport>, ApiError> {
+    require_bug_admin(&state, &headers)?;
+    let report = state
+        .database
+        .close_bug_report(id)
+        .map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::not_found("bug report not found"))?;
+    Ok(Json(report))
+}
+
+fn validate_bug_description(label: &str, value: &str) -> Result<String, ApiError> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(ApiError::bad_request(format!("{label} is required")));
+    }
+    if value.chars().count() > 20_000 {
+        return Err(ApiError::bad_request(format!(
+            "{label} must be at most 20,000 characters"
+        )));
+    }
+    Ok(value.to_owned())
+}
+
+fn require_bug_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let configured = state.bug_admin_token.as_deref().ok_or_else(|| {
+        ApiError::service_unavailable("bug report administration is not configured")
+    })?;
+    let supplied = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| ApiError::unauthorized("bug administration token is required"))?;
+    if supplied != configured {
+        return Err(ApiError::unauthorized(
+            "bug administration token is invalid",
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_current_active(stored: &StoredGame, version: i64) -> Result<(), ApiError> {
     if stored.version != version {
         return Err(ApiError::conflict("game changed; reload before acting"));
@@ -622,6 +750,10 @@ impl ApiError {
         Self::new(StatusCode::CONFLICT, message)
     }
 
+    fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, message)
+    }
+
     fn internal(error: impl Display) -> Self {
         tracing::error!(%error, "request failed");
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error")
@@ -701,6 +833,35 @@ mod tests {
             .expect("body");
         let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, value)
+    }
+
+    fn assert_bug_report_capture(
+        report: &Value,
+        game_id: i64,
+        version: i64,
+        played: &Value,
+    ) -> i64 {
+        assert_eq!(report["gameId"], game_id);
+        assert_eq!(report["gameVersion"], version);
+        assert_eq!(
+            report["expectedBehavior"],
+            "The rook should remain visible."
+        );
+        assert_eq!(report["actualBehavior"], "The rook disappeared.");
+        assert_eq!(report["reporter"]["username"], "bug-reporter");
+        assert_eq!(report["status"], "unresolved");
+        assert_eq!(report["serverVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(report["gameSummary"]["version"], version);
+        assert!(report["gameState"].is_object());
+        assert_eq!(
+            report["history"]
+                .as_array()
+                .expect("captured history")
+                .len(),
+            played["history"].as_array().expect("live history").len()
+        );
+        assert!(report["history"][0]["state"].is_object());
+        report["id"].as_i64().expect("report id")
     }
 
     #[tokio::test]
@@ -1028,6 +1189,111 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn bug_reports_capture_the_game_and_require_admin_token_to_manage() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![Box::new(RavenBot::default())],
+        )
+        .expect("state")
+        .with_bug_admin_token("test-bug-admin-secret");
+        let app = router(state);
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({
+                "username": "bug-reporter",
+                "displayName": "Bug Reporter",
+                "password": "reporter-password"
+            })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+        let (_, created) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(json!({
+                "opponent": "bot-raven",
+                "ruleset": "standard",
+                "playAs": "white"
+            })),
+        )
+        .await;
+        let game_id = created["summary"]["id"].as_i64().expect("game id");
+        let movement = created["game"]["legalActions"][0]["movement"].clone();
+        let (_, played) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/moves"),
+            Some(token),
+            Some(json!({ "version": 0, "movement": movement })),
+        )
+        .await;
+        let version = played["summary"]["version"].as_i64().expect("version");
+
+        let (status, report) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/bugs"),
+            Some(token),
+            Some(json!({
+                "version": version,
+                "expectedBehavior": "  The rook should remain visible.  ",
+                "actualBehavior": "The rook disappeared."
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let report_id = report["id"].as_i64().expect("report id");
+        assert_eq!(report["status"], "unresolved");
+
+        let (status, _) = request(&app, "GET", "/api/admin/bugs", None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = request(&app, "GET", "/api/admin/bugs", Some("wrong-secret"), None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+        let (status, unresolved) = request(
+            &app,
+            "GET",
+            "/api/admin/bugs",
+            Some("test-bug-admin-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unresolved.as_array().expect("reports").len(), 1);
+        assert_eq!(
+            assert_bug_report_capture(&unresolved[0], game_id, version, &played),
+            report_id
+        );
+
+        let (status, closed) = request(
+            &app,
+            "POST",
+            &format!("/api/admin/bugs/{report_id}/close"),
+            Some("test-bug-admin-secret"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(closed["status"], "closed");
+        assert!(closed["closedAt"].is_number());
+
+        let (_, unresolved) = request(
+            &app,
+            "GET",
+            "/api/admin/bugs",
+            Some("test-bug-admin-secret"),
+            None,
+        )
+        .await;
+        assert!(unresolved.as_array().expect("reports").is_empty());
     }
 
     #[tokio::test]

@@ -114,6 +114,8 @@ pub struct Timeline {
     pub row: i32,
     pub label: String,
     pub owner: TimelineOwner,
+    #[serde(default)]
+    pub accepted: bool,
     pub boards: Vec<BoardSnapshot>,
 }
 
@@ -252,6 +254,8 @@ pub(crate) struct SearchUndo {
     pub(crate) next_timeline_id: i32,
     pub(crate) next_black_timeline_id: i32,
     pub(crate) staged_royal_capture_by: Option<Color>,
+    pub(crate) source_timeline_accepted: bool,
+    pub(crate) target_timeline_accepted: Option<(i32, bool)>,
     pub(crate) position_hash: u64,
 }
 

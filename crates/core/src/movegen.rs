@@ -229,8 +229,9 @@ impl Game {
         color: Color,
         deadline: Option<SearchInstant>,
     ) -> bool {
-        // Escaping check may require a whole-turn sequence, not just one move, so
-        // mate search follows staged moves until the present line changes color.
+        // Standard mate search follows moves until the turn changes color. In
+        // multiverse rules this helper only checks whether Present obligations
+        // can advance; check itself is informational.
         let max_depth = self
             .timelines
             .iter()
@@ -260,7 +261,7 @@ impl Game {
         deadline: Option<SearchInstant>,
     ) -> bool {
         if !self.has_pending_present_board(color) {
-            return !self.is_in_check(color);
+            return self.ruleset != Ruleset::Standard || !self.is_in_check(color);
         }
 
         if depth >= max_depth || deadline_expired(deadline) {
@@ -664,6 +665,13 @@ impl Game {
             next_timeline_id: self.next_timeline_id,
             next_black_timeline_id: self.next_black_timeline_id,
             staged_royal_capture_by: self.staged_royal_capture_by,
+            source_timeline_accepted: self.timeline(movement.from.timeline_id)?.accepted,
+            target_timeline_accepted: (movement.to.timeline_id != movement.from.timeline_id)
+                .then(|| {
+                    self.timeline(movement.to.timeline_id)
+                        .map(|timeline| (timeline.id, timeline.accepted))
+                })
+                .flatten(),
             position_hash: self.position_hash,
         };
         self.apply_legal_move_for_search(movement.from, movement.to, piece, move_kind);
@@ -678,6 +686,14 @@ impl Game {
         if let Some((id, len)) = undo.target_board_len {
             if let Some(timeline) = self.timeline_mut(id) {
                 timeline.boards.truncate(len);
+            }
+        }
+        if let Some(timeline) = self.timeline_mut(undo.source_board_len.0) {
+            timeline.accepted = undo.source_timeline_accepted;
+        }
+        if let Some((id, accepted)) = undo.target_timeline_accepted {
+            if let Some(timeline) = self.timeline_mut(id) {
+                timeline.accepted = accepted;
             }
         }
         self.next_timeline_id = undo.next_timeline_id;

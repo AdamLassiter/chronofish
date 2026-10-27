@@ -21,7 +21,12 @@ pub(crate) fn timeline_position_hash(timeline: &Timeline) -> u64 {
         TimelineOwner::White => 1,
         TimelineOwner::Black => 2,
     };
-    position_token(1, timeline.id as u64, timeline.row as u64, owner)
+    position_token(
+        1,
+        timeline.id as u64,
+        timeline.row as u64,
+        owner | (u64::from(timeline.accepted) << 8),
+    )
 }
 
 pub(crate) fn board_position_hash(timeline_id: i32, board: &BoardSnapshot) -> u64 {

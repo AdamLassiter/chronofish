@@ -68,6 +68,7 @@ impl Game {
                 row: 0,
                 label: "Sacred T0".to_string(),
                 owner: TimelineOwner::Neutral,
+                accepted: false,
                 boards: vec![BoardSnapshot {
                     time: 0,
                     side_to_move: Color::White,
@@ -128,7 +129,6 @@ impl Game {
         self.ruleset != Ruleset::Standard
             && !self.staged_turn.is_empty()
             && !self.has_pending_present_board(self.turn)
-            && !self.is_in_check(self.turn)
     }
 
     /// Returns the complete authoritative action set for the current turn.
@@ -139,13 +139,20 @@ impl Game {
         }
         let mut actions = Vec::new();
         for timeline in &self.timelines {
-            if !self.is_active_timeline(timeline.id) {
-                continue;
-            }
             let Some(board) = timeline.boards.last() else {
                 continue;
             };
-            if board.side_to_move != self.turn || self.present_time() != Some(board.time) {
+            let source = Position {
+                timeline_id: timeline.id,
+                time: board.time,
+                x: 0,
+                y: 0,
+            };
+            let accepts_timeline = self.can_accept_inactive_board(source, self.turn);
+            if (!self.is_active_timeline(timeline.id) && !accepts_timeline)
+                || board.side_to_move != self.turn
+                || (!accepts_timeline && self.present_time() != Some(board.time))
+            {
                 continue;
             }
             for y in 0..BOARD_SIZE_I32 {
@@ -200,7 +207,9 @@ impl Game {
                                 to,
                                 promotion,
                             };
-                            if self.move_preserves_turn_legality(movement) {
+                            if self.ruleset != Ruleset::Standard
+                                || self.move_preserves_turn_legality(movement)
+                            {
                                 actions.push(PlayerAction::Move { movement });
                             }
                         }
@@ -243,15 +252,13 @@ impl Game {
     }
 
     fn move_preserves_turn_legality(&self, movement: Move) -> bool {
+        debug_assert_eq!(self.ruleset, Ruleset::Standard);
         let mut probe = self.clone_for_search();
         let mover = probe.turn;
         if probe.apply_move_coords(movement.from, movement.to) == 0 {
             return false;
         }
-        if self.ruleset == Ruleset::Standard {
-            return !probe.is_in_check(mover);
-        }
-        probe.staged_royal_capture_by == Some(mover) || probe.has_legal_turn_completion(mover)
+        !probe.is_in_check(mover)
     }
 
     fn requires_promotion(piece: Piece, to: Position) -> bool {
@@ -297,19 +304,14 @@ impl Game {
         {
             return Err(MoveError::IllegalMove);
         }
-        let checkpoint = self.checkpoint();
+        let checkpoint = (self.ruleset == Ruleset::Standard).then(|| self.checkpoint());
         let mover = self.turn;
         if self.apply_move_coords(movement.from, movement.to) == 0 {
             return Err(MoveError::IllegalMove);
         }
-        let preserves_turn_legality = if self.ruleset == Ruleset::Standard {
-            !self.is_in_check(mover)
-        } else {
-            self.staged_royal_capture_by == Some(mover) || self.has_legal_turn_completion(mover)
-        };
-        if !preserves_turn_legality {
+        if self.ruleset == Ruleset::Standard && self.is_in_check(mover) {
             let _ = self.staged_turn.pop();
-            self.restore(checkpoint);
+            self.restore(checkpoint.expect("standard move saved a checkpoint"));
             return Err(MoveError::IllegalMove);
         }
         if let Some(promoted) = movement.promotion {
@@ -471,7 +473,9 @@ impl Game {
         piece: Piece,
         move_kind: MoveKind,
     ) -> bool {
-        if !self.is_active_timeline(from.timeline_id) {
+        if !self.is_active_timeline(from.timeline_id)
+            && !self.can_accept_inactive_board(from, piece.color)
+        {
             return false;
         }
 
@@ -484,6 +488,40 @@ impl Game {
                 || Self::is_royal_piece(piece.piece_type);
         }
 
+        true
+    }
+
+    pub(crate) fn can_accept_inactive_board(&self, position: Position, color: Color) -> bool {
+        if self.ruleset == Ruleset::Standard
+            || !self.is_latest_board(position.timeline_id, position.time)
+        {
+            return false;
+        }
+        let Some(timeline) = self.timeline(position.timeline_id) else {
+            return false;
+        };
+        !self.is_active_timeline(timeline.id)
+            && timeline.owner == TimelineOwner::from_color(color.opposite())
+            && timeline
+                .boards
+                .last()
+                .is_some_and(|board| board.side_to_move == color)
+    }
+
+    fn accept_inactive_board(&mut self, position: Position, color: Color) -> bool {
+        if !self.can_accept_inactive_board(position, color) {
+            return false;
+        }
+        let Some(index) = self
+            .timelines
+            .iter()
+            .position(|timeline| timeline.id == position.timeline_id)
+        else {
+            return false;
+        };
+        self.position_hash ^= timeline_position_hash(&self.timelines[index]);
+        self.timelines[index].accepted = true;
+        self.position_hash ^= timeline_position_hash(&self.timelines[index]);
         true
     }
 
@@ -508,8 +546,9 @@ impl Game {
     }
 
     // Shared legality gate for UI highlighting, user moves, and AI search. It
-    // checks turn ownership, latest-board source rules, destination turn rules
-    // for time travel, and friendly occupancy before piece geometry runs.
+    // checks turn ownership, latest-board source rules, optional acceptance of
+    // an opposing inactive timeline, destination turn rules for time travel,
+    // and friendly occupancy before piece geometry runs.
     pub(crate) fn legal_move_kind(
         &self,
         from: Position,
@@ -523,8 +562,10 @@ impl Game {
         let target_board = self.board(to.timeline_id, to.time)?;
         let piece = self.piece_at(from)?;
         let same_board = from.timeline_id == to.timeline_id && from.time == to.time;
+        let accepts_timeline = self.can_accept_inactive_board(from, piece.color);
 
-        if !self.is_present_source_board(from)
+        if (!accepts_timeline
+            && (!self.is_active_timeline(from.timeline_id) || !self.is_present_source_board(from)))
             || !self.is_latest_board(from.timeline_id, from.time)
             || source_board.side_to_move != self.turn
             || piece.color != self.turn
@@ -604,7 +645,9 @@ impl Game {
             .board(from.timeline_id, from.time)
             .and_then(|board| {
                 let piece = self.piece_at(from)?;
-                (self.is_present_source_board(from)
+                ((self.can_accept_inactive_board(from, piece.color)
+                    || (self.is_active_timeline(from.timeline_id)
+                        && self.is_present_source_board(from)))
                     && self.is_latest_board(from.timeline_id, from.time)
                     && board.side_to_move == self.turn
                     && piece.color == self.turn)
@@ -743,7 +786,7 @@ impl Game {
             return 0;
         }
 
-        if self.is_in_check(self.turn) {
+        if self.ruleset == Ruleset::Standard && self.is_in_check(self.turn) {
             self.last_message =
                 "The turn cannot be submitted while a royal piece is in check.".to_string();
             return 0;
@@ -754,9 +797,11 @@ impl Game {
         self.staged_notation.clear();
         self.staged_royal_capture_by = None;
 
-        self.repetition_history.push(self.position_hash);
+        if self.ruleset == Ruleset::Standard {
+            self.repetition_history.push(self.position_hash);
+        }
 
-        if self.is_checkmate(self.turn) {
+        if self.ruleset == Ruleset::Standard && self.is_checkmate(self.turn) {
             let winner = self.turn.opposite();
             self.result = Some(GameResult {
                 winner: Some(winner),
@@ -788,7 +833,7 @@ impl Game {
             return 1;
         }
 
-        if self.has_threefold_repetition() {
+        if self.ruleset == Ruleset::Standard && self.has_threefold_repetition() {
             self.result = Some(GameResult {
                 winner: None,
                 reason: GameResultReason::ThreefoldRepetition,
@@ -797,7 +842,7 @@ impl Game {
             return 1;
         }
 
-        if self.is_standard_stalemate(self.turn) {
+        if self.ruleset == Ruleset::Standard && self.is_standard_stalemate(self.turn) {
             self.result = Some(GameResult {
                 winner: None,
                 reason: GameResultReason::Stalemate,
@@ -992,6 +1037,11 @@ impl Game {
                 source_board.halfmove_clock.saturating_add(1)
             };
 
+        self.accept_inactive_board(from, piece.color);
+        if to.timeline_id != from.timeline_id {
+            self.accept_inactive_board(to, piece.color);
+        }
+
         if !is_branch {
             // Same-board moves append one successor snapshot and carry forward
             // transient state such as castling rights and en-passant eligibility.
@@ -1125,6 +1175,7 @@ impl Game {
                 id
             ),
             owner: TimelineOwner::from_color(owner),
+            accepted: false,
             boards: Vec::new(),
         };
         self.position_hash ^= timeline_position_hash(&timeline);
@@ -1246,7 +1297,9 @@ impl Game {
     }
 
     pub(crate) fn timeline_is_active(timeline: &Timeline, active_distance: i32) -> bool {
-        timeline.owner == TimelineOwner::Neutral || timeline.id.abs() <= active_distance
+        timeline.accepted
+            || timeline.owner == TimelineOwner::Neutral
+            || timeline.id.abs() <= active_distance
     }
 }
 
@@ -1408,6 +1461,127 @@ mod tests {
     }
 
     #[test]
+    fn opponent_can_accept_an_inactive_timeline_outside_the_present() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        let mut active_board = game.timelines[0].boards[0].clone();
+        active_board.time = 6;
+        active_board.side_to_move = Color::Black;
+        active_board.board = [[None; BOARD_SIZE]; BOARD_SIZE];
+        active_board.board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        active_board.board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        active_board.board[7][1] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Knight,
+        });
+        active_board.castling = CastlingRights {
+            white_kingside: false,
+            white_queenside: false,
+            black_kingside: false,
+            black_queenside: false,
+        };
+        game.timelines[0].boards = vec![active_board.clone()];
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            accepted: false,
+            boards: vec![active_board.clone()],
+        });
+        let mut inactive_board = active_board;
+        inactive_board.time = 4;
+        inactive_board.board[7][1] = None;
+        game.timelines.push(Timeline {
+            id: 2,
+            row: 2,
+            label: "White T2".to_string(),
+            owner: TimelineOwner::White,
+            accepted: false,
+            boards: vec![inactive_board],
+        });
+        game.next_timeline_id = 3;
+        game.turn = Color::Black;
+        game.position_hash = game.recompute_position_hash();
+
+        assert!(game.is_active_timeline(1));
+        assert!(!game.is_active_timeline(2));
+        assert_eq!(game.present_time(), Some(6));
+        let acceptance = Move::new(position(4, 2, "e8"), position(4, 2, "e7"));
+        assert!(game.legal_actions().contains(&PlayerAction::Move {
+            movement: acceptance
+        }));
+
+        let mut arrival_game = game.clone();
+        let arrival = Move::new(position(6, 0, "b8"), position(4, 2, "b8"));
+        assert!(
+            arrival_game
+                .legal_actions()
+                .contains(&PlayerAction::Move { movement: arrival })
+        );
+        arrival_game
+            .apply_move(arrival)
+            .expect("arriving on an inactive opposing timeline accepts it");
+        assert!(arrival_game.timeline(2).expect("target timeline").accepted);
+        assert!(arrival_game.is_active_timeline(2));
+        assert_eq!(
+            arrival_game.position_hash,
+            arrival_game.recompute_position_hash()
+        );
+
+        let mut owner_attempt = game.clone();
+        owner_attempt.turn = Color::White;
+        for timeline in &mut owner_attempt.timelines {
+            timeline
+                .boards
+                .last_mut()
+                .expect("latest board")
+                .side_to_move = Color::White;
+        }
+        owner_attempt.position_hash = owner_attempt.recompute_position_hash();
+        assert!(
+            !owner_attempt
+                .legal_actions()
+                .iter()
+                .any(|action| matches!(action, PlayerAction::Move { movement } if movement.from.timeline_id == 2)),
+            "White cannot accept its own inactive timeline"
+        );
+
+        game.apply_move(acceptance)
+            .expect("Black accepts White's inactive timeline");
+        let accepted = game.timeline(2).expect("accepted timeline");
+        assert_eq!(accepted.owner, TimelineOwner::White);
+        assert!(accepted.accepted);
+        assert!(game.is_active_timeline(2));
+        assert_eq!(game.present_time(), Some(5));
+        assert_eq!(game.submitted_present_time(), Some(6));
+        assert_eq!(game.position_hash, game.recompute_position_hash());
+        assert!(game.can_submit());
+
+        let persisted = serde_json::to_string(&game).expect("serialize accepted timeline");
+        let loaded: Game = serde_json::from_str(&persisted).expect("deserialize accepted timeline");
+        assert!(loaded.timeline(2).expect("loaded timeline").accepted);
+        assert!(loaded.is_active_timeline(2));
+
+        game.undo_staged_move().expect("undo timeline acceptance");
+        assert!(!game.timeline(2).expect("restored timeline").accepted);
+        assert!(!game.is_active_timeline(2));
+        assert_eq!(game.present_time(), Some(6));
+        assert_eq!(game.position_hash, game.recompute_position_hash());
+
+        game.apply_move(acceptance).expect("accept timeline again");
+        game.submit_turn().expect("accepted timeline enters play");
+        assert_eq!(game.turn(), Color::White);
+        assert!(game.is_active_timeline(2));
+        assert_eq!(game.outcome(), None);
+    }
+
+    #[test]
     fn staged_temporal_move_keeps_the_submitted_present_until_submission() {
         let mut game = Game::new(Ruleset::Multiverse);
         play(&mut game, 0, "g1", "f3");
@@ -1468,6 +1642,7 @@ mod tests {
             row: 1,
             label: "White T1".to_string(),
             owner: TimelineOwner::White,
+            accepted: false,
             boards: vec![parallel],
         });
         game.next_timeline_id = 2;
@@ -1498,6 +1673,91 @@ mod tests {
     }
 
     #[test]
+    fn multiverse_check_is_informational_until_the_royal_is_captured() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        let board = game.timelines[0].boards.last_mut().expect("initial board");
+        board.board = [[None; BOARD_SIZE]; BOARD_SIZE];
+        board.board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        board.board[1][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Pawn,
+        });
+        board.board[0][7] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::Rook,
+        });
+        board.board[7][0] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        board.board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::Rook,
+        });
+        board.castling = CastlingRights {
+            white_kingside: true,
+            white_queenside: false,
+            black_kingside: false,
+            black_queenside: false,
+        };
+        game.position_hash = game.recompute_position_hash();
+
+        assert!(game.is_in_check(Color::White));
+        let castle_from_check = Move::new(position(0, 0, "e1"), position(0, 0, "g1"));
+        assert!(game.legal_actions().contains(&PlayerAction::Move {
+            movement: castle_from_check
+        }));
+        let non_evasion = Move::new(position(0, 0, "a2"), position(0, 0, "a3"));
+        assert!(game.legal_actions().contains(&PlayerAction::Move {
+            movement: non_evasion
+        }));
+        game.apply_move(non_evasion)
+            .expect("a checked player may make a non-evasion");
+        assert!(game.is_in_check(Color::White));
+        assert!(game.can_submit());
+        game.submit_turn()
+            .expect("check does not prevent submission");
+        assert_eq!(game.turn(), Color::Black);
+        assert_eq!(game.outcome(), None);
+
+        game.apply_move(Move::new(position(1, 0, "e8"), position(1, 0, "e1")))
+            .expect("black captures the exposed king");
+        assert_eq!(
+            game.outcome(),
+            Some(GameOutcome {
+                winner: Some(Color::Black),
+                reason: OutcomeReason::RoyalCapture,
+            })
+        );
+    }
+
+    #[test]
+    fn multiverse_repetition_does_not_end_before_a_royal_capture() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        for (time, from, to) in [
+            (0, "g1", "f3"),
+            (1, "g8", "f6"),
+            (2, "f3", "g1"),
+            (3, "f6", "g8"),
+            (4, "g1", "f3"),
+            (5, "g8", "f6"),
+            (6, "f3", "g1"),
+            (7, "f6", "g8"),
+        ] {
+            play(&mut game, time, from, to);
+            game.submit_turn().expect("repeated turn remains playable");
+        }
+
+        assert!(game.has_threefold_repetition());
+        assert_eq!(game.outcome(), None);
+        assert_eq!(game.turn(), Color::White);
+        assert!(!game.legal_actions().is_empty());
+    }
+
+    #[test]
     fn staged_five_d_turn_survives_persistence() {
         let mut game = Game::new(Ruleset::Multiverse);
         play(&mut game, 0, "e2", "e4");
@@ -1510,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn five_d_legal_actions_do_not_allow_a_checked_turn_to_dead_end() {
+    fn five_d_check_does_not_filter_unrelated_moves_or_submission() {
         let mut game = Game::new(Ruleset::Multiverse);
         for (time, from, to) in [
             (0, "e2", "e4"),
@@ -1528,36 +1788,29 @@ mod tests {
         assert_eq!(game.turn(), Color::Black);
         assert!(game.is_in_check(Color::Black));
         assert!(game.has_legal_turn_completion(Color::Black));
-        let dead_end = Move::new(position(7, 0, "h7"), position(7, 0, "h8"));
-        assert!(
-            !game
-                .legal_actions()
-                .contains(&PlayerAction::Move { movement: dead_end })
-        );
-        assert_eq!(game.apply_move(dead_end), Err(MoveError::IllegalMove));
-        assert!(!game.has_staged_moves());
-        assert_eq!(game.present_time(), Some(7));
+        let non_evasion = Move::new(position(7, 0, "h7"), position(7, 0, "h8"));
+        assert!(game.legal_actions().contains(&PlayerAction::Move {
+            movement: non_evasion
+        }));
+        game.apply_move(non_evasion)
+            .expect("moves unrelated to check remain legal");
+        assert!(game.has_staged_moves());
+        assert!(game.can_submit());
+        assert!(game.legal_actions().contains(&PlayerAction::SubmitTurn));
         assert_eq!(
-            game.piece_at(position(7, 0, "h7")),
+            game.piece_at(position(8, 0, "h8")),
             Some(Piece {
                 color: Color::Black,
                 piece_type: PieceType::Rook,
             })
         );
-        assert!(!game.legal_actions().is_empty());
-
-        // Recreate the persisted state produced by pre-fix builds and prove
-        // that the retry path can restore the last valid turn checkpoint.
-        assert_eq!(
-            game.apply_move_coords(dead_end.from, dead_end.to),
-            1,
-            "legacy builds accepted this pseudo-legal move"
-        );
-        assert!(game.has_staged_moves());
-        assert!(game.legal_actions().is_empty());
-        game.undo_staged_move().expect("recover legacy dead end");
+        game.undo_staged_move()
+            .expect("non-evasion remains undoable");
         assert!(!game.has_staged_moves());
-        assert!(!game.legal_actions().is_empty());
+        game.apply_move(non_evasion).expect("replay non-evasion");
+        game.submit_turn().expect("check does not block submission");
+        assert_eq!(game.outcome(), None);
+        assert_eq!(game.turn(), Color::White);
     }
 
     #[test]

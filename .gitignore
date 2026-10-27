@@ -21,3 +21,6 @@
 
 # Ignore log files
 /logs
+
+# Models are too heavyweight to be stored in the repository, maybe needs LFS
+/models

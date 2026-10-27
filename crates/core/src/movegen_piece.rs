@@ -397,15 +397,16 @@ impl Game {
             return None;
         }
         let step_x = delta.x.signum();
-        if self.is_square_attacked(from, piece.color.opposite())
-            || self.is_square_attacked(
-                Position {
-                    x: from.x + step_x,
-                    ..from
-                },
-                piece.color.opposite(),
-            )
-            || self.is_square_attacked(to, piece.color.opposite())
+        if self.ruleset == Ruleset::Standard
+            && (self.is_square_attacked(from, piece.color.opposite())
+                || self.is_square_attacked(
+                    Position {
+                        x: from.x + step_x,
+                        ..from
+                    },
+                    piece.color.opposite(),
+                )
+                || self.is_square_attacked(to, piece.color.opposite()))
         {
             return None;
         }
