@@ -99,6 +99,8 @@ If a piece is moved to a historical board (a board where a move has already been
 
 A player may have to make more than one move in a 5D turn. The turn can be submitted only when every required active board at the Present has advanced to the opponent's colour. Intermediate moves are staged and may temporarily leave a royal piece in check; the complete turn may not be submitted in that state.
 
+An active latest board with no pieces belonging to its side to move is dormant: it does not hold the Present or require a move. It can become relevant again if a piece later arrives from another board. In particular, moving a king or royal queen away from its source board does not create a stalemate merely because that board no longer contains a royal piece.
+
 ### Special moves
 
 Castling and en passant are local to one spatial board; neither move crosses time or timelines. Castling may not begin in check, cross an attacked square, or finish in check. Castling rights and the one-move en-passant window follow each resulting board history independently.

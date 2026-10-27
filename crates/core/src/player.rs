@@ -14,6 +14,7 @@ pub struct GameView {
     pub can_submit: bool,
     pub has_staged_moves: bool,
     pub present_time: Option<i32>,
+    pub submitted_present_time: Option<i32>,
     pub active_timelines: Vec<i32>,
     pub checked_royals: Vec<Position>,
 }
@@ -31,6 +32,7 @@ impl GameView {
             can_submit: game.can_submit(),
             has_staged_moves: game.has_staged_moves(),
             present_time: game.present_time(),
+            submitted_present_time: game.submitted_present_time(),
             active_timelines: game
                 .timelines()
                 .iter()

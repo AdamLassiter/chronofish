@@ -37,8 +37,7 @@ interface Movement {
 }
 
 type PlayerAction =
-  | { type: "move"; movement: Movement }
-  | { type: "submitTurn" };
+  { type: "move"; movement: Movement } | { type: "submitTurn" };
 
 interface ConcedeAction {
   type: "concede";
@@ -46,6 +45,10 @@ interface ConcedeAction {
 
 interface UndoFailedAiAction {
   type: "undoFailedAiAction";
+}
+
+interface UndoStagedMoveAction {
+  type: "undoStagedMove";
 }
 
 interface AiDecision {
@@ -120,6 +123,7 @@ interface GameView {
   canSubmit: boolean;
   hasStagedMoves: boolean;
   presentTime: number | null;
+  submittedPresentTime: number | null;
   activeTimelines: number[];
   checkedRoyals: Position[];
 }
@@ -141,7 +145,12 @@ interface GameSummary {
 interface MoveRecord {
   sequence: number;
   actor: User;
-  action: PlayerAction | ConcedeAction | UndoFailedAiAction | AiDecision;
+  action:
+    | PlayerAction
+    | ConcedeAction
+    | UndoFailedAiAction
+    | UndoStagedMoveAction
+    | AiDecision;
   createdAt: number;
 }
 
@@ -402,6 +411,7 @@ function latestTime(timeline: Timeline): number | undefined {
 }
 
 function currentPresentTime(game: GameView): number {
+  if (game.submittedPresentTime !== null) return game.submittedPresentTime;
   if (game.presentTime !== null) return game.presentTime;
   const activeTimes = game.timelines
     .filter((timeline) => game.activeTimelines.includes(timeline.id))
@@ -507,10 +517,14 @@ function renderGame(): void {
     : `${game.turn} to move · ${game.message}`;
   const mine = viewerSide === game.turn;
   const finished = game.outcome !== null;
-  const currentPlayer =
-    game.turn === "white" ? summary.white : summary.black;
+  const currentPlayer = game.turn === "white" ? summary.white : summary.black;
   element<HTMLButtonElement>("#submit-turn").disabled =
     finished || !mine || !game.canSubmit;
+  const undo = element<HTMLButtonElement>("#undo-staged-move");
+  undo.disabled = finished || !mine || !game.hasStagedMoves;
+  undo.title = game.hasStagedMoves
+    ? "Undo the most recent move in this unsubmitted turn"
+    : "There is no staged move to undo";
   const retryAi = element<HTMLButtonElement>("#retry-ai");
   retryAi.disabled = finished || !currentPlayer.isBot;
   retryAi.title = currentPlayer.isBot
@@ -536,14 +550,7 @@ function renderGame(): void {
   );
   grid.replaceChildren(
     ...timelines.map((timeline) =>
-      renderTimeline(
-        game,
-        timeline,
-        maxTime,
-        presentTime,
-        targets,
-        highlights,
-      ),
+      renderTimeline(game, timeline, maxTime, presentTime, targets, highlights),
     ),
   );
   element<HTMLOListElement>("#move-history").replaceChildren(
@@ -644,8 +651,7 @@ function renderBoard(
         square.classList.add("is-target");
       if (squareHighlights?.has("move-source"))
         square.classList.add("was-move-source");
-      if (squareHighlights?.has("arrived"))
-        square.classList.add("was-arrival");
+      if (squareHighlights?.has("arrived")) square.classList.add("was-arrival");
       if (squareHighlights?.has("move-target"))
         square.classList.add("was-move-target");
       if (squareHighlights?.has("check")) square.classList.add("is-check");
@@ -714,10 +720,7 @@ function renderMoveArrows(grid: HTMLElement, arrows: MoveArrow[]): void {
     if (!from || !to) continue;
     const pathData = arrowPath(from, to);
     if (!pathData) continue;
-    const path = document.createElementNS(
-      "http://www.w3.org/2000/svg",
-      "path",
-    );
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("class", "move-arrow");
     path.setAttribute("d", pathData);
     path.setAttribute("marker-end", "url(#move-arrow-head)");
@@ -811,14 +814,32 @@ async function playMove(movement: Movement): Promise<void> {
   }
 }
 
+async function undoStagedMove(): Promise<void> {
+  const button = element<HTMLButtonElement>("#undo-staged-move");
+  button.disabled = true;
+  try {
+    const current = currentGame();
+    state.current = await api<GameDetail>(
+      `/api/games/${current.summary.id}/undo`,
+      {
+        method: "POST",
+        body: { version: current.summary.version },
+      },
+    );
+    state.selected = null;
+    renderGame();
+    notice("Staged move undone.");
+  } catch (error) {
+    await recoverGameAfterFailedAction(error);
+  }
+}
+
 async function recoverGameAfterFailedAction(error: unknown): Promise<void> {
   const message = errorMessage(error);
   const current = state.current;
   if (current) {
     try {
-      state.current = await api<GameDetail>(
-        `/api/games/${current.summary.id}`,
-      );
+      state.current = await api<GameDetail>(`/api/games/${current.summary.id}`);
       state.selected = null;
       renderGame();
     } catch {
@@ -875,14 +896,19 @@ async function abandonGame(): Promise<void> {
 }
 
 function isAiDecision(
-  action: PlayerAction | ConcedeAction | UndoFailedAiAction | AiDecision,
+  action:
+    | PlayerAction
+    | ConcedeAction
+    | UndoFailedAiAction
+    | UndoStagedMoveAction
+    | AiDecision,
 ): action is AiDecision {
   return "action" in action;
 }
 
 function recordedAction(
   entry: MoveRecord,
-): PlayerAction | ConcedeAction | UndoFailedAiAction {
+): PlayerAction | ConcedeAction | UndoFailedAiAction | UndoStagedMoveAction {
   return isAiDecision(entry.action) ? entry.action.action : entry.action;
 }
 
@@ -891,7 +917,10 @@ function groupHistory(entries: MoveRecord[]): HistoryTurn[] {
   let current: HistoryTurn | null = null;
   for (const entry of entries) {
     const action = recordedAction(entry);
-    if (action.type === "undoFailedAiAction") {
+    if (
+      action.type === "undoFailedAiAction" ||
+      action.type === "undoStagedMove"
+    ) {
       if (current?.actor.id === entry.actor.id) {
         current.entries.pop();
         if (current.entries.length === 0) {
@@ -967,9 +996,7 @@ document
     button.onclick = () => {
       document
         .querySelectorAll<HTMLButtonElement>("[data-auth-mode]")
-        .forEach((other) =>
-          other.classList.toggle("active", other === button),
-        );
+        .forEach((other) => other.classList.toggle("active", other === button));
       const mode = button.dataset.authMode;
       if (mode !== "login" && mode !== "register") return;
       element<HTMLFormElement>("#auth-form").dataset.mode = mode;
@@ -1040,6 +1067,8 @@ element<HTMLButtonElement>("#back-to-lobby").onclick = () => {
 element<HTMLButtonElement>("#refresh-game").onclick = () =>
   void openGame(currentGame().summary.id);
 element<HTMLButtonElement>("#retry-ai").onclick = () => void retryAiMove();
+element<HTMLButtonElement>("#undo-staged-move").onclick = () =>
+  void undoStagedMove();
 element<HTMLButtonElement>("#abandon-game").onclick = () => void abandonGame();
 element<HTMLButtonElement>("#submit-turn").onclick = () => {
   void (async () => {

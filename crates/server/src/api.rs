@@ -117,6 +117,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/games", get(games).post(create_game))
         .route("/api/games/{id}", get(get_game))
         .route("/api/games/{id}/moves", post(play_move))
+        .route("/api/games/{id}/undo", post(undo_staged_move))
         .route("/api/games/{id}/submit", post(submit_turn))
         .route("/api/games/{id}/retry-ai", post(retry_ai))
         .route("/api/games/{id}/abandon", post(abandon_game))
@@ -329,6 +330,35 @@ async fn submit_turn(
         )
         .map_err(|error| ApiError::conflict(error.to_string()))?;
     let stored = reload_and_advance_bots(&state, stored.id)?;
+    Ok(Json(game_detail(&state, &stored, user.id)?))
+}
+
+async fn undo_staged_move(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(body): Json<VersionBody>,
+) -> Result<Json<GameDetail>, ApiError> {
+    let user = authenticated_user(&state, &headers)?;
+    let mut stored = load_participating_game(&state, id, user.id)?;
+    ensure_actor(&stored, &user, body.version)?;
+    if !stored.game.has_staged_moves() {
+        return Err(ApiError::bad_request("there is no staged move to undo"));
+    }
+    stored
+        .game
+        .undo_staged_move()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    stored.version = state
+        .database
+        .save_action(
+            stored.id,
+            stored.version,
+            user.id,
+            &json!({ "type": "undoStagedMove" }).to_string(),
+            &stored.game,
+        )
+        .map_err(|error| ApiError::conflict(error.to_string()))?;
     Ok(Json(game_detail(&state, &stored, user.id)?))
 }
 
@@ -855,6 +885,76 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(response["error"], "the current player is not an AI");
+    }
+
+    #[tokio::test]
+    async fn player_can_undo_a_staged_move_before_submitting() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![Box::new(RavenBot::default())],
+        )
+        .expect("state");
+        let app = router(state);
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({ "username": "undo-user", "password": "undo-password" })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+        let (_, created) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(json!({
+                "opponent": "bot-raven",
+                "ruleset": "multiverse",
+                "playAs": "white"
+            })),
+        )
+        .await;
+        let game_id = created["summary"]["id"].as_i64().expect("game id");
+        let movement = created["game"]["legalActions"][0]["movement"].clone();
+
+        let (status, staged) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/moves"),
+            Some(token),
+            Some(json!({ "version": 0, "movement": movement })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(staged["summary"]["version"], 1);
+        assert_eq!(staged["game"]["hasStagedMoves"], true);
+
+        let (status, undone) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/undo"),
+            Some(token),
+            Some(json!({ "version": 1 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(undone["summary"]["version"], 2);
+        assert_eq!(undone["game"]["hasStagedMoves"], false);
+        assert_eq!(undone["game"]["turn"], "white");
+        assert_eq!(undone["history"][1]["action"]["type"], "undoStagedMove");
+
+        let (status, response) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/undo"),
+            Some(token),
+            Some(json!({ "version": 2 })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error"], "there is no staged move to undo");
     }
 
     #[tokio::test]

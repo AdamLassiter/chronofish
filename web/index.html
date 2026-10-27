@@ -107,6 +107,7 @@
             <strong id="game-title"></strong><span id="game-status"></span>
           </div>
           <div class="toolbar-actions">
+            <button id="undo-staged-move" type="button">Undo move</button>
             <button id="submit-turn" type="button">Submit turn</button>
             <button id="retry-ai" type="button">Retry AI move</button>
             <button id="refresh-game" type="button">Refresh</button>
@@ -124,7 +125,11 @@
           <span><i class="swatch check"></i>Royal in check</span>
         </section>
         <!-- Preserve the horizontal timeline play surface established in aa6a9bea. -->
-        <section id="multiverse" class="multiverse" aria-label="5D chess multiverse">
+        <section
+          id="multiverse"
+          class="multiverse"
+          aria-label="5D chess multiverse"
+        >
           <div id="timeline-grid" class="timeline-grid"></div>
         </section>
         <article class="panel history-panel">

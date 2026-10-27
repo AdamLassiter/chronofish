@@ -248,6 +248,10 @@ label {
   background: #7db7ff;
   color: #071421;
 }
+#undo-staged-move {
+  background: #f1c56b;
+  color: #211502;
+}
 #abandon-game {
   background: #ff7a70;
   color: #240807;

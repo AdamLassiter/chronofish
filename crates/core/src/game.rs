@@ -1142,17 +1142,50 @@ impl Game {
 
     pub(crate) fn present_board(&self) -> Option<&BoardSnapshot> {
         // The present line is the earliest latest-board among active timelines.
-        // Inactive timelines do not hold the turn hostage.
+        // Inactive timelines and multiverse fronts with no piece available for
+        // their side to move do not hold the turn hostage. A dormant front can
+        // become actionable again if a piece later arrives from another board.
         let active_distance = self.active_timeline_distance();
         self.timelines
             .iter()
             .filter(|timeline| Self::timeline_is_active(timeline, active_distance))
             .filter_map(|timeline| timeline.boards.last())
+            .filter(|board| self.board_requires_move(board))
             .min_by_key(|board| board.time)
     }
 
     pub fn present_time(&self) -> Option<i32> {
         self.present_board().map(|board| board.time)
+    }
+
+    /// Returns the Present established by the last submitted turn. Staged
+    /// moves may temporarily change the rules-engine Present while the player
+    /// completes a multiboard turn, but clients should keep displaying this
+    /// committed boundary until submission succeeds.
+    pub fn submitted_present_time(&self) -> Option<i32> {
+        let timelines = self
+            .staged_turn
+            .first()
+            .map_or(self.timelines.as_slice(), |checkpoint| {
+                checkpoint.timelines.as_slice()
+            });
+        let active_distance = Self::active_timeline_distance_for(timelines);
+        timelines
+            .iter()
+            .filter(|timeline| Self::timeline_is_active(timeline, active_distance))
+            .filter_map(|timeline| timeline.boards.last())
+            .filter(|board| self.board_requires_move(board))
+            .map(|board| board.time)
+            .min()
+    }
+
+    fn board_requires_move(&self, board: &BoardSnapshot) -> bool {
+        self.ruleset == Ruleset::Standard
+            || board
+                .board
+                .iter()
+                .flatten()
+                .any(|piece| piece.is_some_and(|piece| piece.color == board.side_to_move))
     }
 
     pub(crate) fn has_pending_present_board(&self, color: Color) -> bool {
@@ -1166,6 +1199,9 @@ impl Game {
             let Some(board) = timeline.boards.last() else {
                 continue;
             };
+            if !self.board_requires_move(board) {
+                continue;
+            }
             match present_time {
                 None => {
                     present_time = Some(board.time);
@@ -1192,14 +1228,16 @@ impl Game {
     }
 
     pub(crate) fn active_timeline_distance(&self) -> i32 {
-        let min_timeline = self
-            .timelines
+        Self::active_timeline_distance_for(&self.timelines)
+    }
+
+    fn active_timeline_distance_for(timelines: &[Timeline]) -> i32 {
+        let min_timeline = timelines
             .iter()
             .map(|timeline| timeline.id)
             .min()
             .unwrap_or(0);
-        let max_timeline = self
-            .timelines
+        let max_timeline = timelines
             .iter()
             .map(|timeline| timeline.id)
             .max()
@@ -1367,6 +1405,96 @@ mod tests {
         let branch = game.timeline(1).expect("white branch");
         assert_eq!(branch.owner, TimelineOwner::White);
         assert_eq!(branch.boards.last().expect("branch board").time, 1);
+    }
+
+    #[test]
+    fn staged_temporal_move_keeps_the_submitted_present_until_submission() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        play(&mut game, 0, "g1", "f3");
+        game.submit_turn().expect("white turn complete");
+        play(&mut game, 1, "g8", "f6");
+        game.submit_turn().expect("black turn complete");
+        assert_eq!(game.present_time(), Some(2));
+        assert_eq!(game.submitted_present_time(), Some(2));
+
+        game.apply_move(Move::new(position(2, 0, "f3"), position(0, 0, "d3")))
+            .expect("temporal knight move");
+
+        assert_eq!(game.present_time(), Some(1));
+        assert_eq!(game.submitted_present_time(), Some(2));
+        let view = crate::GameView::from_game(&game);
+        assert_eq!(view.present_time, Some(1));
+        assert_eq!(view.submitted_present_time, Some(2));
+
+        game.submit_turn().expect("temporal turn complete");
+        assert_eq!(game.submitted_present_time(), game.present_time());
+        assert_eq!(game.submitted_present_time(), Some(1));
+    }
+
+    #[test]
+    fn kingless_source_front_does_not_cause_a_multiverse_stalemate() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        let mut source = game.timelines[0].boards[0].clone();
+        source.board = [[None; BOARD_SIZE]; BOARD_SIZE];
+        source.board[0][4] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        source.board[7][4] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        source.castling = CastlingRights {
+            white_kingside: false,
+            white_queenside: false,
+            black_kingside: false,
+            black_queenside: false,
+        };
+        game.timelines[0].boards = vec![source.clone()];
+
+        let mut parallel = source;
+        parallel.board[0][4] = None;
+        parallel.board[0][0] = Some(Piece {
+            color: Color::White,
+            piece_type: PieceType::King,
+        });
+        parallel.board[7][4] = None;
+        parallel.board[7][0] = Some(Piece {
+            color: Color::Black,
+            piece_type: PieceType::King,
+        });
+        game.timelines.push(Timeline {
+            id: 1,
+            row: 1,
+            label: "White T1".to_string(),
+            owner: TimelineOwner::White,
+            boards: vec![parallel],
+        });
+        game.next_timeline_id = 2;
+        game.position_hash = game.recompute_position_hash();
+
+        game.apply_move(Move::new(position(0, 0, "e1"), position(0, 1, "f1")))
+            .expect("white king crosses to the parallel timeline");
+        game.submit_turn().expect("white turn complete");
+
+        game.apply_move(Move::new(position(1, 0, "e8"), position(1, 0, "e7")))
+            .expect("black advances the source timeline");
+        game.apply_move(Move::new(position(1, 1, "a8"), position(1, 1, "a7")))
+            .expect("black advances the parallel timeline");
+        game.submit_turn().expect("black turn complete");
+
+        assert_eq!(game.outcome(), None);
+        assert_eq!(game.turn(), Color::White);
+        assert!(!game.is_standard_stalemate(Color::White));
+        assert!(!game.legal_actions().is_empty());
+
+        game.apply_move(Move::new(position(2, 1, "a1"), position(2, 1, "b1")))
+            .expect("white can move on the remaining actionable frontier");
+        assert!(game.can_submit());
+        game.submit_turn()
+            .expect("kingless source does not block submit");
+        assert_eq!(game.turn(), Color::Black);
+        assert_eq!(game.outcome(), None);
     }
 
     #[test]

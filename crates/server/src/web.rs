@@ -53,8 +53,11 @@ mod tests {
         assert!(INDEX.contains("/assets/styles.css"));
         assert!(INDEX.contains("id=\"multiverse\""));
         assert!(INDEX.contains("id=\"timeline-grid\""));
+        assert!(INDEX.contains("id=\"undo-staged-move\""));
         assert!(APP.contains("timeline-row"));
         assert!(APP.contains("present-line"));
+        assert!(APP.contains("submittedPresentTime"));
+        assert!(APP.contains("undoStagedMove"));
         assert!(APP.contains("move-arrows"));
         assert!(APP.contains("snapshot.time + 2"));
         assert!(APP.contains("groupHistory"));
