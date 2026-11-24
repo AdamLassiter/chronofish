@@ -37,6 +37,26 @@ Vulkan training (including AMD GPUs through the installed Vulkan driver):
 
 Use `--check-training-device` to initialize and verify the selected device without beginning a run. The trainer prints the resolved adapter, fitting and inference backends, parallelism, memory budgets, and phase timings at startup. CPU and Vulkan checkpoints share the same architecture and file format.
 
+Training keeps a persistent learner in `candidate-v2.json`, separate from the published `best-v2.json`. Every round and `--fit-only` run continues that learner, even after a failed promotion or a restart. Use `--reset-candidate` to start fitting from the incumbent again. A candidate older than the incumbent is automatically replaced by the incumbent.
+
+The default promotion screen plays six games (each ruleset once per colour), with 16 simulations per action and a 160-action limit. Self-play retains its independent 48-simulation, 400-action budget. This reduces the arena's maximum simulation budget from 76,800 to 15,360, though actual elapsed time depends on game complexity and hardware. Adjust `--arena-simulations`, `--arena-max-actions`, and `--arena-games` separately from self-play. Unfinished games count as draws.
+
+The default `--promotion-score 0.5` accepts tied scores so draw-heavy early training can advance. Promotion means passing this small screening match, not demonstrated strength improvement. Use `--promotion-score 0.55 --arena-games 12 --arena-simulations 48 --arena-max-actions 400` for a more expensive strict-improvement screen. Failed screens retain the incumbent without throwing away learner updates. `--arena-only` screens the saved candidate without fitting; `--arena-games 0` publishes without a screen.
+
+Use multiple iterations in one invocation to reuse validated replay trajectories. The first fit checks the full replay, validating independent games on the trainer’s worker pool. Later fits reconstruct only the positions needed for sampling. The trainer reports replay and checkpoint write times, inference batch occupancy, queue wait, and compute time. CPU fitting encodes each distinct board layout once per batch. The “Spatial boards” line totals the layouts encoded, real board occurrences, and padded board slots across optimizer updates. These counts show how much work repeated 5D history saves on your replay.
+
+Add `--persistent-adam` to experiment with retaining optimizer moments and update counts between fits. The candidate checkpoint stores the moments atomically alongside the weights and verifies their weight digest on load. Older candidates start with fresh moments. Fitting without the flag drops saved moments, and `--reset-candidate` starts a fresh optimizer from the incumbent.
+
+For an equal-time comparison, build the trainer and benchmarks in release mode and retain a copy of the baseline trainer before making changes. Point the experiment at a saved training directory containing the best model, candidate, and replay. Choose a new output directory outside the snapshot.
+
+```sh
+python3 scripts/strength_per_hour.py --baseline /path/to/baseline-trainer \
+  --trainer target/release/chronofish-trainer --benchmark target/release/chronofish-benchmarks \
+  --snapshot models/training --output /tmp/chronofish-strength-cpu --device cpu --model-size balanced
+```
+
+Each backend takes nine training hours plus evaluation. The script copies the starting data, runs three seeds for each training configuration, and evaluates the last saved candidate at the deadline. Each match uses six held-out openings per ruleset with colours reversed. Per-run files include trainer timings, game outcomes, and a bootstrap interval over opening pairs. Use `--device vulkan` on a discrete GPU for the Vulkan training comparison. Both use the same CPU match evaluator.
+
 Built-in server opponents are exposed as **Chronofish CPU** and **Chronofish GPU**. The GPU name describes the checkpoint/training path; inference uses the backend selected by the executable and its feature set.
 
 ## Web server

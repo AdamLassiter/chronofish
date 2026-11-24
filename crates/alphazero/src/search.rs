@@ -92,10 +92,7 @@ struct PendingSimulation {
 
 enum PendingEvaluation {
     Terminal(f32),
-    Network {
-        actions: Vec<PlayerAction>,
-        position: chronofish_neural::EncodedPosition,
-    },
+    Network { actions: Vec<PlayerAction> },
 }
 
 impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
@@ -130,15 +127,9 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
         let mut completed = 0;
         while completed < self.config.simulations {
             let count = batch_size.min(self.config.simulations - completed);
+            let mut positions = Vec::with_capacity(count);
             let pending = (0..count)
-                .map(|_| self.select(&mut root, game))
-                .collect::<Vec<_>>();
-            let positions = pending
-                .iter()
-                .filter_map(|simulation| match &simulation.evaluation {
-                    PendingEvaluation::Network { position, .. } => Some(position.clone()),
-                    PendingEvaluation::Terminal(_) => None,
-                })
+                .map(|_| self.select(&mut root, game, &mut positions))
                 .collect::<Vec<_>>();
             let mut predictions = self.network.predict_batch(&positions).into_iter();
             for simulation in pending {
@@ -188,27 +179,31 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
         }
     }
 
-    fn select(&self, root: &mut Node, game: &Game) -> PendingSimulation {
+    fn select(
+        &self,
+        root: &mut Node,
+        game: &Game,
+        positions: &mut Vec<chronofish_neural::EncodedPosition>,
+    ) -> PendingSimulation {
         let mut path = Vec::new();
-        let evaluation = self.select_from(root, game, &mut path);
+        let evaluation = self.select_from(root, &mut game.clone(), &mut path, positions);
         PendingSimulation { path, evaluation }
     }
 
     fn select_from(
         &self,
         node: &mut Node,
-        game: &Game,
+        game: &mut Game,
         path: &mut Vec<usize>,
+        positions: &mut Vec<chronofish_neural::EncodedPosition>,
     ) -> PendingEvaluation {
         if let Some(outcome) = game.outcome() {
             return PendingEvaluation::Terminal(outcome_value(outcome.winner, node.side));
         }
         if !node.expanded {
             let actions = game.legal_actions();
-            return PendingEvaluation::Network {
-                position: encode(game, &actions),
-                actions,
-            };
+            positions.push(encode(game, &actions));
+            return PendingEvaluation::Network { actions };
         }
         if node.edges.is_empty() {
             return PendingEvaluation::Terminal(-1.0);
@@ -231,8 +226,7 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
             })
             .map_or(0, |(index, _)| index);
         let edge = &mut node.edges[edge_index];
-        let mut next = game.clone();
-        if next.apply_action(edge.action).is_err() {
+        if game.apply_action(edge.action).is_err() {
             edge.prior = 0.0;
             edge.visits += 1;
             edge.value_sum -= 1.0;
@@ -242,8 +236,8 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
         path.push(edge_index);
         let child = edge
             .child
-            .get_or_insert_with(|| Box::new(Node::new(next.turn())));
-        self.select_from(child, &next, path)
+            .get_or_insert_with(|| Box::new(Node::new(game.turn())));
+        self.select_from(child, game, path, positions)
     }
 
     fn expand(&self, node: &mut Node, game: &Game) -> f32 {

@@ -76,8 +76,15 @@ struct Arguments {
     /// Conservative dynamic-tensor budget for one inference batch, in MiB.
     #[arg(long, default_value_t = 1024)]
     inference_memory_budget_mib: usize,
-    #[arg(long, default_value_t = 4)]
+    /// Games in the promotion screen (six balances both sides across all rulesets).
+    #[arg(long, default_value_t = 6)]
     arena_games: usize,
+    /// Simulations per arena action, independent of self-play search.
+    #[arg(long, default_value_t = 16)]
+    arena_simulations: usize,
+    /// Maximum arena actions per game; unfinished games count as draws.
+    #[arg(long, default_value_t = 160)]
+    arena_max_actions: usize,
     /// Print arena starts, periodic action counts, and low-level device identifiers.
     #[arg(long)]
     verbose: bool,
@@ -115,8 +122,15 @@ struct Arguments {
     reconstruction_memory_budget_mib: usize,
     #[arg(long, default_value_t = 0.001)]
     learning_rate: f32,
-    #[arg(long, default_value_t = 0.55)]
+    /// Minimum arena score for promotion. 0.5 accepts ties; use 0.55 for strict improvement.
+    #[arg(long, default_value_t = 0.5)]
     promotion_score: f32,
+    /// Discard accumulated candidate progress and fit from the incumbent this run.
+    #[arg(long)]
+    reset_candidate: bool,
+    /// Carry Adam moments between fits in the candidate checkpoint.
+    #[arg(long)]
+    persistent_adam: bool,
     /// Network preset. Auto preserves the large CPU model and uses balanced for Vulkan.
     #[arg(long, value_enum, default_value_t = ModelSizeArgument::Auto)]
     model_size: ModelSizeArgument,
@@ -155,6 +169,7 @@ struct GeneratedGame {
 }
 
 struct InferenceRequest {
+    queued: Instant,
     positions: Vec<EncodedPosition>,
     response: SyncSender<Vec<Prediction>>,
 }
@@ -270,6 +285,16 @@ fn run() -> Result<(), Box<dyn Error>> {
     {
         return Err("memory budgets and --training-examples must be greater than zero".into());
     }
+    if arguments.simulations == 0
+        || arguments.arena_simulations == 0
+        || arguments.max_actions == 0
+        || arguments.arena_max_actions == 0
+    {
+        return Err("search simulations and action limits must be greater than zero".into());
+    }
+    if !arguments.promotion_score.is_finite() || !(0.0..=1.0).contains(&arguments.promotion_score) {
+        return Err("--promotion-score must be finite and between zero and one".into());
+    }
     let pool = ThreadPoolBuilder::new()
         .num_threads(arguments.threads)
         .thread_name(|index| format!("chronofish-trainer-{index}"))
@@ -325,13 +350,28 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
         ReplayBuffer::default()
     };
 
+    let mut candidate = resume_candidate(&candidate_path, &best, arguments.reset_candidate)?;
+    if arguments.reset_candidate {
+        candidate.clear_optimizer();
+    }
+    if arguments.persistent_adam {
+        field(
+            "Adam state",
+            if candidate.has_optimizer() {
+                "resuming"
+            } else {
+                "no saved moments, starting fresh"
+            },
+        );
+    }
+    field("Learner steps", format_steps(candidate.training_steps()));
     if arguments.fit_only {
         if replay.is_empty() {
             return Err(format!("{} contains no training positions", replay_path.display()).into());
         }
-        let mut candidate = best.clone();
         fit_candidate(
             arguments,
+            pool,
             fitting_device
                 .as_ref()
                 .expect("fit-only initializes a fitting device"),
@@ -386,7 +426,13 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
             }
         };
         for generated in generated {
-            decisive += usize::from(generated.game.outcome.is_some());
+            decisive += usize::from(
+                generated
+                    .game
+                    .outcome
+                    .and_then(|outcome| outcome.winner)
+                    .is_some(),
+            );
             truncated += usize::from(generated.game.truncated);
             replay.extend_game(generated.game, arguments.replay_capacity);
         }
@@ -402,11 +448,13 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
             "Self-play time",
             format_duration(self_play_started.elapsed()),
         );
+        let write_start = Instant::now();
         replay.save(&replay_path)?;
+        field("Replay write time", format_duration(write_start.elapsed()));
 
-        let mut candidate = best.clone();
         fit_candidate(
             arguments,
+            pool,
             fitting_device
                 .as_ref()
                 .expect("training initializes a fitting device"),
@@ -414,7 +462,12 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
             &mut candidate,
             &mut rng,
         )?;
+        let write_start = Instant::now();
         candidate.save(&candidate_path)?;
+        field(
+            "Candidate write time",
+            format_duration(write_start.elapsed()),
+        );
 
         let arena_started = Instant::now();
         evaluate_and_maybe_promote(
@@ -629,11 +682,14 @@ fn evaluate_and_maybe_promote(
         games: arguments.arena_games,
         verbose: arguments.verbose,
         progress_actions: arguments.arena_progress_actions,
-        search,
+        search: SearchConfig {
+            simulations: arguments.arena_simulations,
+            ..search
+        },
         inference_batch_size: arguments.inference_batch_size,
         inference_memory_budget_bytes: mib_to_bytes(arguments.inference_memory_budget_mib),
         network_config: candidate.config(),
-        max_actions: arguments.max_actions,
+        max_actions: arguments.arena_max_actions,
         seed: arguments.seed,
         training_steps: candidate.training_steps(),
     };
@@ -668,10 +724,32 @@ fn evaluate_and_maybe_promote(
         },
     );
     if promoted {
-        candidate.save(best_path)?;
-        *best = candidate.clone();
+        let mut promoted = candidate.clone();
+        promoted.clear_optimizer();
+        promoted.save(best_path)?;
+        *best = promoted;
     }
     Ok(())
+}
+
+// Keep the learner independent of the published incumbent, including across restarts.
+fn resume_candidate(
+    path: &Path,
+    best: &PolicyValueNetwork,
+    reset: bool,
+) -> Result<PolicyValueNetwork, Box<dyn Error>> {
+    if reset || !path.exists() {
+        return Ok(best.clone());
+    }
+    let candidate = PolicyValueNetwork::load(path)?;
+    if candidate.config() != best.config() {
+        return Err("candidate and incumbent network shapes differ; use --reset-candidate to restart the learner".into());
+    }
+    if candidate.training_steps() < best.training_steps() {
+        Ok(best.clone())
+    } else {
+        Ok(candidate)
+    }
 }
 
 fn load_or_initialize(
@@ -699,6 +777,7 @@ fn load_or_initialize(
 
 fn fit_candidate(
     arguments: &Arguments,
+    pool: &ThreadPool,
     fitting_device: &FittingDevice,
     replay: &ReplayBuffer,
     candidate: &mut PolicyValueNetwork,
@@ -706,10 +785,11 @@ fn fit_candidate(
 ) -> Result<(), Box<dyn Error>> {
     section("Fitting");
     let reconstruction_started = Instant::now();
-    let sample = replay.sample_examples(
+    let sample = replay.sample_examples_in_pool(
         arguments.training_examples,
         mib_to_bytes(arguments.reconstruction_memory_budget_mib),
         rng,
+        pool,
     )?;
     let examples = sample.examples;
     field(
@@ -746,6 +826,7 @@ fn fit_candidate(
     );
     let fit_started = Instant::now();
     let train_config = TrainConfig {
+        persistent_adam: arguments.persistent_adam,
         epochs: arguments.epochs,
         batch_size: arguments.batch_size,
         batch_token_budget: arguments.batch_token_budget,
@@ -775,6 +856,15 @@ fn fit_candidate(
             candidate.train_vulkan(device, &examples, train_config, rng)?
         }
     };
+    if metrics.board_slots > 0 {
+        field(
+            "Spatial boards",
+            format!(
+                "{} encoded / {} real / {} padded slots across updates",
+                metrics.encoded_boards, metrics.real_boards, metrics.board_slots
+            ),
+        );
+    }
     field(
         "Training result",
         format!(
@@ -887,8 +977,9 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                                 );
                                 let description = result.outcome.map_or_else(
                                     || "draw (action limit)".to_owned(),
-                                    |outcome| {
-                            format!("{:?} won ({:?})", outcome.winner, outcome.reason)
+                                    |outcome| match outcome.winner {
+                                        Some(winner) => format!("{winner:?} won ({:?})", outcome.reason),
+                                        None => format!("draw ({:?})", outcome.reason),
                                     },
                                 );
                                 {
@@ -913,11 +1004,7 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
     );
     let mut report = ArenaReport::default();
     for (candidate_side, outcome) in results {
-        match outcome {
-            Some(outcome) if outcome.winner == Some(candidate_side) => report.candidate_wins += 1,
-            Some(_) => report.incumbent_wins += 1,
-            None => report.draws += 1,
-        }
+        report.record_outcome(candidate_side, outcome);
     }
     report
 }
@@ -1030,6 +1117,7 @@ impl PolicyValueEvaluator for BatchingEvaluator {
             let (response, results) = mpsc::sync_channel(1);
             self.requests
                 .send(InferenceRequest {
+                    queued: Instant::now(),
                     positions: positions[start..end].to_vec(),
                     response,
                 })
@@ -1085,6 +1173,11 @@ fn run_inference_coordinator<E: PolicyValueEvaluator + ?Sized>(
     memory_budget_bytes: usize,
 ) {
     let mut pending = None;
+    let mut batches = 0usize;
+    let mut total_positions = 0usize;
+    let mut total_requests = 0u32;
+    let mut wait = Duration::ZERO;
+    let mut compute = Duration::ZERO;
     loop {
         let first = match pending.take() {
             Some(request) => request,
@@ -1124,22 +1217,33 @@ fn run_inference_coordinator<E: PolicyValueEvaluator + ?Sized>(
                 }
             }
         }
-        let positions = requests
-            .iter()
-            .flat_map(|request| request.positions.iter().cloned())
-            .collect::<Vec<_>>();
-        let mut predictions = model.predict_batch(&positions).into_iter();
+        let mut positions = Vec::with_capacity(count);
+        let mut responses = Vec::with_capacity(requests.len());
+        batches += 1;
+        total_positions += count;
         for request in requests {
-            let result = predictions
-                .by_ref()
-                .take(request.positions.len())
-                .collect::<Vec<_>>();
-            request
-                .response
+            total_requests += 1;
+            wait += request.queued.elapsed();
+            responses.push((request.response, request.positions.len()));
+            positions.extend(request.positions);
+        }
+        let start = Instant::now();
+        let mut predictions = model.predict_batch(&positions).into_iter();
+        compute += start.elapsed();
+        for (response, length) in responses {
+            let result = predictions.by_ref().take(length).collect::<Vec<_>>();
+            response
                 .send(result)
                 .expect("inference requester remains available");
         }
         assert!(predictions.next().is_none(), "inference result count");
+    }
+    if batches > 0 {
+        println!(
+            "  Inference: {total_positions} positions / {batches} batches (target {target_batch_size}), mean queue wait {:?}, compute {}",
+            wait / total_requests,
+            format_duration(compute)
+        );
     }
 }
 
@@ -1263,6 +1367,127 @@ mod tests {
     }
 
     #[test]
+    fn rejected_candidate_keeps_learning_across_restarts() {
+        let mut rng = ChaCha8Rng::seed_from_u64(73);
+        let best = PolicyValueNetwork::random(NetworkConfig::tiny(), &mut rng);
+        let game = play_self_play_game(
+            &best,
+            Ruleset::Standard,
+            SelfPlayConfig {
+                search: SearchConfig {
+                    simulations: 1,
+                    ..SearchConfig::default()
+                },
+                max_actions: 1,
+                ..SelfPlayConfig::default()
+            },
+            &mut rng,
+        );
+        let mut replay = ReplayBuffer::default();
+        replay.extend_game(game, 10);
+        let examples = replay.examples().unwrap();
+        let config = TrainConfig {
+            epochs: 1,
+            ..TrainConfig::default()
+        };
+        let mut candidate = best.clone();
+        candidate.train(&examples, config, &mut rng).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("chronofish-learner-{}.json", std::process::id()));
+        candidate.save(&path).unwrap();
+        let best_path = path.with_extension("best.json");
+        let mut incumbent = best.clone();
+        let mut arguments = Arguments::try_parse_from([
+            "trainer",
+            "--ruleset",
+            "standard",
+            "--arena-games",
+            "2",
+            "--arena-simulations",
+            "1",
+            "--arena-max-actions",
+            "1",
+            "--promotion-score",
+            "0.55",
+        ])
+        .unwrap();
+        let pool = ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        evaluate_and_maybe_promote(
+            &candidate,
+            &mut incumbent,
+            &best_path,
+            &arguments,
+            SearchConfig::default(),
+            &pool,
+            None,
+        )
+        .unwrap();
+        assert_eq!(incumbent.training_steps(), best.training_steps());
+        assert!(!best_path.exists());
+        arguments.promotion_score = 0.5;
+        evaluate_and_maybe_promote(
+            &candidate,
+            &mut incumbent,
+            &best_path,
+            &arguments,
+            SearchConfig::default(),
+            &pool,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            PolicyValueNetwork::load(&best_path)
+                .unwrap()
+                .training_steps(),
+            candidate.training_steps()
+        );
+        std::fs::remove_file(best_path).unwrap();
+        let mut resumed = resume_candidate(&path, &best, false).unwrap();
+        assert_eq!(resumed.training_steps(), candidate.training_steps());
+        assert!(resumed.training_steps() > best.training_steps());
+        resumed.train(&examples, config, &mut rng).unwrap();
+        assert!(resumed.training_steps() > candidate.training_steps());
+        assert_eq!(
+            resume_candidate(&path, &best, true)
+                .unwrap()
+                .training_steps(),
+            best.training_steps()
+        );
+        // An older learner must not roll back a more recently published incumbent.
+        assert_eq!(
+            resume_candidate(&path, &resumed, false)
+                .unwrap()
+                .training_steps(),
+            resumed.training_steps()
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn default_arena_accepts_ties_and_balances_every_ruleset() {
+        let args = Arguments::try_parse_from(["trainer"]).unwrap();
+        assert!((args.promotion_score - 0.5).abs() < f32::EPSILON);
+        assert_eq!(args.arena_games, 6);
+        assert_eq!(args.arena_simulations, 16);
+        assert_eq!(args.arena_max_actions, 160);
+        for ruleset in [
+            Ruleset::Standard,
+            Ruleset::Multiverse,
+            Ruleset::MultiverseVariant,
+        ] {
+            for side in [Side::White, Side::Black] {
+                assert_eq!(
+                    (0..args.arena_games)
+                        .filter(|&i| selected_ruleset(args.ruleset, i) == ruleset
+                            && candidate_side(args.ruleset, i) == side)
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
     fn display_helpers_format_counts_and_durations_for_people() {
         assert_eq!(format_count(20_000), "20,000");
         assert_eq!(counted(1, "game"), "1 game");
@@ -1324,6 +1549,7 @@ mod tests {
             let (response, result) = mpsc::sync_channel(1);
             requests
                 .send(InferenceRequest {
+                    queued: Instant::now(),
                     positions: vec![position.clone()],
                     response,
                 })

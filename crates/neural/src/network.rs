@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -17,6 +17,7 @@ use chronofish_core::BOARD_SIZE;
 use chronofish_core::{Game, Ruleset};
 use rand::{Rng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 #[cfg(feature = "training")]
@@ -56,6 +57,7 @@ pub trait PolicyValueEvaluator: Send + Sync {
 
 #[derive(Clone, Copy, Debug)]
 pub struct TrainConfig {
+    pub persistent_adam: bool,
     pub epochs: usize,
     pub batch_size: usize,
     pub batch_token_budget: usize,
@@ -68,6 +70,7 @@ pub struct TrainConfig {
 impl Default for TrainConfig {
     fn default() -> Self {
         Self {
+            persistent_adam: false,
             epochs: 4,
             batch_size: 64,
             batch_token_budget: 262_144,
@@ -83,6 +86,9 @@ pub struct TrainMetrics {
     pub policy_loss: f32,
     pub value_loss: f32,
     pub examples: usize,
+    pub board_slots: usize,
+    pub real_boards: usize,
+    pub encoded_boards: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -95,6 +101,7 @@ pub struct BatchMemoryEstimate {
 
 #[derive(Debug)]
 pub struct PolicyValueNetwork {
+    adam: Option<Arc<Vec<u8>>>,
     model: MultiverseNet<CpuBackend>,
     config: NetworkConfig,
     training_steps: u64,
@@ -104,6 +111,7 @@ pub struct PolicyValueNetwork {
 impl Clone for PolicyValueNetwork {
     fn clone(&self) -> Self {
         Self {
+            adam: self.adam.clone(),
             model: self.model.clone(),
             config: self.config,
             training_steps: self.training_steps,
@@ -112,18 +120,23 @@ impl Clone for PolicyValueNetwork {
     }
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct SpatialKey([u64; SPATIAL_KEY_WORDS]);
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum SpatialKey {
+    Binary([u64; SPATIAL_KEY_WORDS]),
+    Other(Box<[u32]>),
+}
 
 impl SpatialKey {
     fn from_board(board: &EncodedBoard) -> Self {
         let mut words = [0_u64; SPATIAL_KEY_WORDS];
         for (index, value) in board.planes.iter().enumerate() {
-            if *value != 0.0 {
+            if value.to_bits() == 1.0_f32.to_bits() {
                 words[index / 64] |= 1_u64 << (index % 64);
+            } else if value.to_bits() != 0 {
+                return Self::Other(board.planes.iter().map(|v| v.to_bits()).collect());
             }
         }
-        Self(words)
+        Self::Binary(words)
     }
 }
 
@@ -476,15 +489,33 @@ struct Checkpoint {
     training_steps: u64,
     encoding: String,
     weights: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adam: Option<AdamCheckpoint>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdamCheckpoint {
+    weights_sha256: String,
+    record: String,
 }
 
 impl PolicyValueNetwork {
+    pub fn clear_optimizer(&mut self) {
+        self.adam = None;
+    }
+
+    #[must_use]
+    pub fn has_optimizer(&self) -> bool {
+        self.adam.is_some()
+    }
+
     #[must_use]
     pub fn random(config: NetworkConfig, rng: &mut impl Rng) -> Self {
         let device = NdArrayDevice::default();
         let seed: u64 = rng.random();
         <CpuBackend as Backend>::seed(&device, seed);
         Self {
+            adam: None,
             model: MultiverseNet::new(config, &device),
             config,
             training_steps: 0,
@@ -563,8 +594,9 @@ impl PolicyValueNetwork {
     ) -> Result<TrainMetrics, ModelError> {
         let seed: u64 = rng.random();
         let bytes = record_bytes(self.model.clone())?;
-        let (model, metrics, updates) = train_backend::<Autodiff<CpuBackend>>(
+        let (model, metrics, updates, adam) = train_backend::<Autodiff<CpuBackend>, true>(
             &bytes,
+            self.adam.as_deref().map(Vec::as_slice),
             self.config,
             examples,
             config,
@@ -573,6 +605,7 @@ impl PolicyValueNetwork {
         )?;
         let bytes = record_bytes(model)?;
         self.model = model_from_bytes(self.config, bytes, &NdArrayDevice::default())?;
+        self.adam = adam.map(Arc::new);
         self.training_steps += updates;
         self.spatial_cache
             .lock()
@@ -592,12 +625,17 @@ impl PolicyValueNetwork {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let weights = record_bytes(self.model.clone())?;
         let checkpoint = Checkpoint {
             format_version: FORMAT_VERSION,
             config: self.config,
             training_steps: self.training_steps,
             encoding: "base64-named-messagepack-f32".to_owned(),
-            weights: BASE64.encode(record_bytes(self.model.clone())?),
+            adam: self.adam.as_ref().map(|state| AdamCheckpoint {
+                weights_sha256: BASE64.encode(Sha256::digest(&weights)),
+                record: BASE64.encode(state.as_slice()),
+            }),
+            weights: BASE64.encode(weights),
         };
         let temporary = path.with_extension("json.tmp");
         fs::write(&temporary, serde_json::to_vec(&checkpoint)?)?;
@@ -624,9 +662,24 @@ impl PolicyValueNetwork {
         let bytes = BASE64
             .decode(checkpoint.weights)
             .map_err(|error| ModelError::Record(error.to_string()))?;
+        let adam = if let Some(state) = checkpoint.adam {
+            if state.weights_sha256 != BASE64.encode(Sha256::digest(&bytes)) {
+                return Err(ModelError::Record(
+                    "Adam checkpoint does not match model weights".into(),
+                ));
+            }
+            Some(Arc::new(
+                BASE64
+                    .decode(state.record)
+                    .map_err(|error| ModelError::Record(error.to_string()))?,
+            ))
+        } else {
+            None
+        };
         let model = model_from_bytes(checkpoint.config, bytes, &NdArrayDevice::default())?;
         Ok(Self {
             model,
+            adam,
             config: checkpoint.config,
             training_steps: checkpoint.training_steps,
             spatial_cache: Arc::new(Mutex::new(SpatialCache::default())),
@@ -656,8 +709,9 @@ impl PolicyValueNetwork {
         let seed: u64 = rng.random();
         let bytes = record_bytes(self.model.clone())?;
         let trained = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            train_backend::<Autodiff<Vulkan>>(
+            train_backend::<Autodiff<Vulkan>, false>(
                 &bytes,
+                self.adam.as_deref().map(Vec::as_slice),
                 self.config,
                 examples,
                 config,
@@ -666,9 +720,10 @@ impl PolicyValueNetwork {
             )
         }))
         .map_err(|payload| ModelError::VulkanExecution(panic_message(payload.as_ref())))?;
-        let (model, metrics, updates) = trained?;
+        let (model, metrics, updates, adam) = trained?;
         let bytes = record_bytes(model)?;
         self.model = model_from_bytes(self.config, bytes, &NdArrayDevice::default())?;
+        self.adam = adam.map(Arc::new);
         self.training_steps += updates;
         self.spatial_cache
             .lock()
@@ -702,84 +757,54 @@ fn predict_batch_cached<B: Backend>(
     if positions.is_empty() {
         return Vec::new();
     }
-    let batch = BatchTensors::from_positions(positions, config.board_embedding, device);
-    let board_count = positions
-        .iter()
-        .map(|position| position.boards.len())
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let keys = positions
-        .iter()
-        .flat_map(|position| position.boards.iter().map(SpatialKey::from_board))
-        .collect::<Vec<_>>();
-    let mut resolved = HashMap::with_capacity(keys.len());
-    let mut missing_keys = Vec::new();
+    let batch = BatchTensors::<B, ()>::with_boards(positions, config.board_embedding, device, ());
+    let board_count = batch.board_mask.dims()[1];
+    let width = config.board_embedding;
+    let mut spatial = vec![0.0; positions.len() * board_count * width];
+    let mut missing = HashMap::new();
     let mut missing_boards = Vec::new();
+    let mut scatter = Vec::new();
     {
         let mut cache = spatial_cache.lock().expect("spatial cache lock");
-        if cache.embeddings.len() >= SPATIAL_CACHE_LIMIT {
-            cache.embeddings.clear();
-        }
-        let mut seen_missing = HashSet::new();
-        for board in positions.iter().flat_map(|position| &position.boards) {
-            let key = SpatialKey::from_board(board);
-            if let Some(embedding) = cache.embeddings.get(&key).cloned() {
-                resolved.insert(key, embedding);
-                cache.hits += 1;
-            } else if seen_missing.insert(key) {
-                missing_keys.push(key);
-                missing_boards.push(board);
-                cache.misses += 1;
+        for (row, position) in positions.iter().enumerate() {
+            for (col, board) in position.boards.iter().enumerate() {
+                let key = SpatialKey::from_board(board);
+                let start = (row * board_count + col) * width;
+                if let Some(hit) = cache.embeddings.get(&key) {
+                    spatial[start..start + width].copy_from_slice(hit);
+                    cache.hits += 1;
+                } else {
+                    let index = *missing.entry(key).or_insert_with(|| {
+                        missing_boards.push(board);
+                        cache.misses += 1;
+                        missing_boards.len() - 1
+                    });
+                    scatter.push((start, index));
+                }
             }
         }
     }
     if !missing_boards.is_empty() {
-        let planes = missing_boards
-            .iter()
-            .flat_map(|board| board.planes.iter().copied())
-            .collect::<Vec<_>>();
         let embeddings = model
-            .encode_spatial(Tensor::from_data(
-                TensorData::new(
-                    planes,
-                    [missing_boards.len(), BOARD_PLANES, BOARD_SIZE, BOARD_SIZE],
-                ),
-                device,
-            ))
+            .encode_spatial(board_tensor(&missing_boards, device))
             .to_data()
             .to_vec::<f32>()
             .expect("spatial tensor uses f32");
-        for (index, key) in missing_keys.into_iter().enumerate() {
-            let start = index * config.board_embedding;
-            resolved.insert(
-                key,
-                embeddings[start..start + config.board_embedding].to_vec(),
-            );
+        for (start, index) in scatter {
+            spatial[start..start + width]
+                .copy_from_slice(&embeddings[index * width..(index + 1) * width]);
         }
         let mut cache = spatial_cache.lock().expect("spatial cache lock");
-        if cache.embeddings.len() + resolved.len() > SPATIAL_CACHE_LIMIT {
+        if cache.embeddings.len() + missing.len() > SPATIAL_CACHE_LIMIT {
             cache.embeddings.clear();
         }
-        let remaining = SPATIAL_CACHE_LIMIT.saturating_sub(cache.embeddings.len());
+        let remaining = SPATIAL_CACHE_LIMIT - cache.embeddings.len();
         cache.embeddings.extend(
-            resolved
-                .iter()
+            missing
+                .into_iter()
                 .take(remaining)
-                .map(|(key, value)| (*key, value.clone())),
+                .map(|(key, index)| (key, embeddings[index * width..(index + 1) * width].to_vec())),
         );
-    }
-    let mut spatial = vec![0.0; positions.len() * board_count * config.board_embedding];
-    let mut key_index = 0;
-    for (batch_index, position) in positions.iter().enumerate() {
-        for board_index in 0..position.boards.len() {
-            let embedding = resolved
-                .get(&keys[key_index])
-                .expect("every board embedding is resolved");
-            let start = (batch_index * board_count + board_index) * config.board_embedding;
-            spatial[start..start + config.board_embedding].copy_from_slice(embedding);
-            key_index += 1;
-        }
     }
     let spatial = Tensor::from_data(
         TensorData::new(
@@ -810,6 +835,58 @@ fn predict_batch_cached<B: Backend>(
         .collect()
 }
 
+fn board_tensor<B: Backend>(boards: &[&EncodedBoard], device: &B::Device) -> Tensor<B, 4> {
+    let planes = boards
+        .iter()
+        .flat_map(|board| board.planes.iter().copied())
+        .collect::<Vec<_>>();
+    Tensor::from_data(
+        TensorData::new(planes, [boards.len(), BOARD_PLANES, BOARD_SIZE, BOARD_SIZE]),
+        device,
+    )
+}
+
+#[cfg(feature = "training")]
+fn packed_forward<B: Backend>(
+    model: &MultiverseNet<B>,
+    positions: &[&EncodedPosition],
+    device: &B::Device,
+    metrics: &mut TrainMetrics,
+) -> crate::ModelOutput<B> {
+    let width = model.config().board_embedding;
+    let batch = BatchTensors::<B, ()>::with_boards(positions, width, device, ());
+    let [rows, cols] = batch.board_mask.dims();
+    let mut indices = vec![0i64; rows * cols];
+    let mut unique = Vec::new();
+    let mut seen = HashMap::new();
+    for (row, position) in positions.iter().enumerate() {
+        metrics.real_boards += position.boards.len();
+        for (col, board) in position.boards.iter().enumerate() {
+            indices[row * cols + col] =
+                *seen
+                    .entry(SpatialKey::from_board(board))
+                    .or_insert_with(|| {
+                        unique.push(board);
+                        i64::try_from(unique.len() - 1).expect("board index fits i64")
+                    });
+        }
+    }
+    metrics.board_slots += rows * cols;
+    metrics.encoded_boards += unique.len();
+    if unique.is_empty() {
+        return model.forward(BatchTensors::from_positions(positions, width, device));
+    }
+    let mut spatial = model.encode_spatial(board_tensor(&unique, device));
+    if unique.len() != rows * cols {
+        // Padding can reference any row: board_mask removes its value and gradient.
+        spatial = spatial.select(
+            0,
+            Tensor::from_data(TensorData::new(indices, [rows * cols]), device),
+        );
+    }
+    model.forward_with_spatial(batch, spatial.reshape([rows, cols, width]))
+}
+
 fn record_bytes<B: Backend>(model: MultiverseNet<B>) -> Result<Vec<u8>, ModelError> {
     NamedMpkBytesRecorder::<FullPrecisionSettings>::default()
         .record(model.into_record(), ())
@@ -829,25 +906,45 @@ fn model_from_bytes<B: Backend>(
 }
 
 #[cfg(feature = "training")]
-fn train_backend<AB: AutodiffBackend>(
+type TrainedModel<B> = (MultiverseNet<B>, TrainMetrics, u64, Option<Vec<u8>>);
+
+#[cfg(feature = "training")]
+#[allow(clippy::too_many_lines)]
+fn train_backend<AB: AutodiffBackend, const PACKED: bool>(
     record: &[u8],
+    adam: Option<&[u8]>,
     network_config: NetworkConfig,
     examples: &[TrainingExample],
     config: TrainConfig,
     seed: u64,
     device: &AB::Device,
-) -> Result<(MultiverseNet<AB::InnerBackend>, TrainMetrics, u64), ModelError> {
+) -> Result<TrainedModel<AB::InnerBackend>, ModelError> {
     use rand::seq::SliceRandom;
 
     if examples.is_empty() || config.epochs == 0 {
         let model = model_from_bytes::<AB>(network_config, record.to_vec(), device)?;
-        return Ok((model.valid(), TrainMetrics::default(), 0));
+        return Ok((
+            model.valid(),
+            TrainMetrics::default(),
+            0,
+            if config.persistent_adam {
+                adam.map(<[u8]>::to_vec)
+            } else {
+                None
+            },
+        ));
     }
     AB::seed(device, seed);
     let mut model = model_from_bytes::<AB>(network_config, record.to_vec(), device)?;
     let mut optimizer = AdamConfig::new()
         .with_weight_decay(Some(WeightDecayConfig::new(config.l2)))
         .init();
+    let recorder = NamedMpkBytesRecorder::<FullPrecisionSettings>::default();
+    if let Some(state) = adam.filter(|_| config.persistent_adam) {
+        let record = <_ as Recorder<AB>>::load(&recorder, state.to_vec(), device)
+            .map_err(|e| ModelError::Record(e.to_string()))?;
+        optimizer = optimizer.load_record(record);
+    }
     let mut order = (0..examples.len()).collect::<Vec<_>>();
     let mut random = rand::rngs::StdRng::seed_from_u64(seed);
     let mut metrics = TrainMetrics::default();
@@ -866,10 +963,8 @@ fn train_backend<AB: AutodiffBackend>(
                 .collect::<Vec<_>>();
             let positions = selected
                 .iter()
-                .map(|example| example.position.clone())
+                .map(|example| &example.position)
                 .collect::<Vec<_>>();
-            let batch =
-                BatchTensors::from_positions(&positions, network_config.board_embedding, device);
             let action_count = positions
                 .iter()
                 .map(|position| position.actions.len())
@@ -889,7 +984,15 @@ fn train_backend<AB: AutodiffBackend>(
             );
             let values =
                 Tensor::<AB, 1>::from_data(TensorData::new(values, [selected.len()]), device);
-            let output = model.forward(batch);
+            let output = if PACKED {
+                packed_forward(&model, &positions, device, &mut metrics)
+            } else {
+                model.forward(BatchTensors::from_positions(
+                    &positions,
+                    network_config.board_embedding,
+                    device,
+                ))
+            };
             let policy_loss =
                 (targets * log_softmax(output.logits, 1)).sum().neg() / selected.len() as f32;
             let value_loss = (output.value - values).powf_scalar(2.0).mean();
@@ -918,7 +1021,15 @@ fn train_backend<AB: AutodiffBackend>(
         metrics.value_loss = scalar(&value_loss_total.expect("training produced value loss"))
             / metrics.examples as f32;
     }
-    Ok((model.valid(), metrics, updates))
+    let adam = if config.persistent_adam {
+        Some(
+            <_ as Recorder<AB>>::record(&recorder, optimizer.to_record(), ())
+                .map_err(|e| ModelError::Record(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    Ok((model.valid(), metrics, updates, adam))
 }
 
 #[cfg(feature = "training")]
@@ -1018,6 +1129,135 @@ mod tests {
         assert!((before.value - after.value).abs() < f32::EPSILON);
     }
 
+    fn spatial_fixture() -> Vec<EncodedPosition> {
+        let standard = Game::new(Ruleset::Standard);
+        let mut game = Game::new(Ruleset::Multiverse);
+        for _ in 0..8 {
+            let action = game.legal_actions()[0];
+            game.apply_action(action).unwrap();
+        }
+        let developed = encode(&game, &game.legal_actions());
+        assert!(developed.boards.len() > 1);
+        vec![
+            encode(&standard, &standard.legal_actions()),
+            developed.clone(),
+            developed,
+        ]
+    }
+
+    fn close(left: &[f32], right: &[f32], tolerance: f32) {
+        assert_eq!(left.len(), right.len());
+        for (a, b) in left.iter().zip(right) {
+            assert!(
+                (a - b).abs() <= tolerance * (1.0 + a.abs()),
+                "{a} versus {b} at tolerance {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn cache_matches_dense_for_cold_partial_and_warm_positions() {
+        let positions = spatial_fixture();
+        let mut rng = ChaCha8Rng::seed_from_u64(8);
+        let network = PolicyValueNetwork::random(NetworkConfig::tiny(), &mut rng);
+        let device = NdArrayDevice::default();
+        for batch in [&positions[..1], &positions[..], &positions[..]] {
+            let dense = network.model.forward(BatchTensors::from_positions(
+                batch,
+                network.config.board_embedding,
+                &device,
+            ));
+            let stride = dense.logits.dims()[1];
+            let policies = softmax(dense.logits, 1).to_data().to_vec::<f32>().unwrap();
+            let values = dense.value.to_data().to_vec::<f32>().unwrap();
+            for (i, prediction) in network.predict_batch(batch).iter().enumerate() {
+                close(
+                    &prediction.policy,
+                    &policies[i * stride..i * stride + batch[i].actions.len()],
+                    1e-5,
+                );
+                close(&[prediction.value], &values[i..=i], 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn packed_training_matches_dense_gradients_and_update() {
+        use burn::module::{ModuleVisitor, Param};
+        type AB = Autodiff<CpuBackend>;
+        #[derive(Default)]
+        struct Parameters {
+            gradients: Option<<AB as AutodiffBackend>::Gradients>,
+            values: Vec<f32>,
+        }
+        impl ModuleVisitor<AB> for Parameters {
+            fn visit_float<const D: usize>(&mut self, param: &Param<Tensor<AB, D>>) {
+                let tensor = param.val();
+                let values = if let Some(gradients) = &self.gradients {
+                    tensor.grad(gradients).unwrap()
+                } else {
+                    tensor.inner()
+                };
+                self.values
+                    .extend(values.to_data().to_vec::<f32>().unwrap());
+            }
+        }
+        let positions = spatial_fixture();
+        let refs = positions.iter().collect::<Vec<_>>();
+        let device = NdArrayDevice::default();
+        let config = NetworkConfig::tiny();
+        let mut rng = ChaCha8Rng::seed_from_u64(9);
+        let network = PolicyValueNetwork::random(config, &mut rng);
+        let bytes = record_bytes(network.model).unwrap();
+        let run = |packed| {
+            let model = model_from_bytes::<AB>(config, bytes.clone(), &device).unwrap();
+            let mut metrics = TrainMetrics::default();
+            let output = if packed {
+                let result = packed_forward(&model, &refs, &device, &mut metrics);
+                assert!(
+                    metrics.encoded_boards < metrics.real_boards
+                        && metrics.real_boards < metrics.board_slots
+                );
+                result
+            } else {
+                model.forward(BatchTensors::from_positions(
+                    &positions,
+                    config.board_embedding,
+                    &device,
+                ))
+            };
+            let value = output.value.clone().to_data().to_vec::<f32>().unwrap();
+            let policy = softmax(output.logits.clone(), 1)
+                .to_data()
+                .to_vec::<f32>()
+                .unwrap();
+            let loss = log_softmax(output.logits, 1)
+                .select(1, Tensor::from_data([0i64], &device))
+                .mean()
+                .neg()
+                + output.value.powf_scalar(2.).mean();
+            let loss_value = scalar(&loss);
+            let gradients = loss.backward();
+            let mut visitor = Parameters {
+                gradients: Some(gradients),
+                values: Vec::new(),
+            };
+            model.visit(&mut visitor);
+            let grads = GradientsParams::from_grads(visitor.gradients.take().unwrap(), &model);
+            let updated = AdamConfig::new().init().step(0.001, model, grads);
+            let mut weights = Parameters::default();
+            updated.visit(&mut weights);
+            (value, policy, loss_value, visitor.values, weights.values)
+        };
+        let dense = run(false);
+        let packed = run(true);
+        close(&dense.0, &packed.0, 1e-5);
+        close(&dense.1, &packed.1, 1e-5);
+        close(&[dense.2], &[packed.2], 1e-5);
+        close(&dense.3, &packed.3, 2e-5);
+        close(&dense.4, &packed.4, 2e-5);
+    }
+
     #[test]
     fn repeated_positions_reuse_cached_spatial_embeddings() {
         let game = Game::new(Ruleset::Multiverse);
@@ -1064,6 +1304,61 @@ mod tests {
         assert!(metrics.policy_loss.is_finite());
         assert!(metrics.value_loss.is_finite());
         assert_eq!(network.training_steps(), 1);
+    }
+
+    #[test]
+    fn resumed_adam_matches_two_uninterrupted_updates() {
+        let game = Game::new(Ruleset::Standard);
+        let position = encode(&game, &game.legal_actions());
+        let examples = [TrainingExample {
+            policy: vec![1.0 / position.actions.len() as f32; position.actions.len()],
+            position,
+            value: 0.7,
+        }];
+        let mut rng = ChaCha8Rng::seed_from_u64(61);
+        let mut split = PolicyValueNetwork::random(NetworkConfig::tiny(), &mut rng);
+        let _ = split.predict(&examples[0].position);
+        let mut uninterrupted = split.clone();
+        let config = TrainConfig {
+            persistent_adam: true,
+            epochs: 1,
+            ..TrainConfig::default()
+        };
+        uninterrupted
+            .train(
+                &examples,
+                TrainConfig {
+                    epochs: 2,
+                    ..config
+                },
+                &mut rng,
+            )
+            .unwrap();
+        split.train(&examples, config, &mut rng).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learner.json");
+        split.save(&path).unwrap();
+        let mut resumed = PolicyValueNetwork::load(&path).unwrap();
+        resumed.train(&examples, config, &mut rng).unwrap();
+        assert_eq!(resumed.training_steps(), 2);
+        let a = uninterrupted.predict(&examples[0].position);
+        let b = resumed.predict(&examples[0].position);
+        assert!(
+            (a.value - b.value).abs() < 1e-6,
+            "{} vs {}",
+            a.value,
+            b.value
+        );
+        assert!(
+            a.policy
+                .iter()
+                .zip(&b.policy)
+                .all(|(x, y)| (x - y).abs() < 1e-6)
+        );
+        let mut checkpoint: Checkpoint = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        checkpoint.adam.as_mut().unwrap().weights_sha256.clear();
+        fs::write(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        assert!(PolicyValueNetwork::load(path).is_err());
     }
 
     #[test]

@@ -304,14 +304,16 @@ impl Game {
         {
             return Err(MoveError::IllegalMove);
         }
-        let checkpoint = (self.ruleset == Ruleset::Standard).then(|| self.checkpoint());
         let mover = self.turn;
         if self.apply_move_coords(movement.from, movement.to) == 0 {
             return Err(MoveError::IllegalMove);
         }
         if self.ruleset == Ruleset::Standard && self.is_in_check(mover) {
-            let _ = self.staged_turn.pop();
-            self.restore(checkpoint.expect("standard move saved a checkpoint"));
+            let checkpoint = self
+                .staged_turn
+                .pop()
+                .expect("applied move staged its checkpoint");
+            self.restore(checkpoint);
             return Err(MoveError::IllegalMove);
         }
         if let Some(promoted) = movement.promotion {
@@ -1331,6 +1333,19 @@ mod tests {
         assert_eq!(game.turn(), Color::Black);
         assert_eq!(game.present_time(), Some(1));
         assert!(!game.has_staged_moves());
+    }
+
+    #[test]
+    fn rejected_standard_move_restores_the_complete_state() {
+        let mut game = Game::new(Ruleset::Standard);
+        play(&mut game, 0, "d2", "d4");
+        play(&mut game, 1, "e7", "e5");
+        play(&mut game, 2, "a2", "a3");
+        play(&mut game, 3, "f8", "b4");
+        let before = serde_json::to_value(&game).unwrap();
+        let ignored_check = Move::new(position(4, 0, "a3"), position(4, 0, "a4"));
+        assert_eq!(game.apply_move(ignored_check), Err(MoveError::IllegalMove));
+        assert_eq!(serde_json::to_value(&game).unwrap(), before);
     }
 
     #[test]

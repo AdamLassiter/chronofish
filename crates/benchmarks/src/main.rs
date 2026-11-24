@@ -1,12 +1,14 @@
 use std::error::Error;
 use std::time::Instant;
 
+use chronofish_alphazero::{ArenaGameConfig, Mcts, play_arena_from_position};
 use chronofish_alphazero::{
     NetworkConfig, PolicyValueNetwork, SearchConfig, SelfPlayConfig, encode, play_self_play_game,
 };
+use chronofish_core::Side;
 use chronofish_core::{Game, Ruleset};
 use rand_chacha::ChaCha8Rng;
-use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::rand_core::{RngCore, SeedableRng};
 
 const SEED: u64 = 0x4855_4749_4e4e_4245;
 const MEASURED_ACTIONS: usize = 8;
@@ -24,6 +26,16 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--match") {
+        let paths: Vec<_> = std::env::args().skip(2).collect();
+        let [candidate, incumbent] = paths.as_slice() else {
+            return Err("--match requires candidate and frozen incumbent checkpoints".into());
+        };
+        return held_out_match(
+            &PolicyValueNetwork::load(candidate)?,
+            &PolicyValueNetwork::load(incumbent)?,
+        );
+    }
     let check = std::env::args()
         .skip(1)
         .any(|argument| argument == "--check");
@@ -65,6 +77,24 @@ fn run() -> Result<(), Box<dyn Error>> {
         SIMULATIONS,
     );
 
+    for ruleset in [Ruleset::Multiverse, Ruleset::MultiverseVariant] {
+        let position = held_out_opening(ruleset, SEED)?;
+        let start = Instant::now();
+        let result = Mcts::new(
+            &network,
+            SearchConfig {
+                simulations: 48,
+                ..SearchConfig::default()
+            },
+        )
+        .search(&position, false, &mut rng);
+        println!(
+            "developed_search ruleset={ruleset} elapsed={:?} visits={:?} pv={:?}",
+            start.elapsed(),
+            result.visits,
+            result.principal_variation
+        );
+    }
     if game.steps.len() != MEASURED_ACTIONS {
         return Err(format!(
             "deterministic benchmark completed {} of {MEASURED_ACTIONS} actions",
@@ -77,6 +107,65 @@ fn run() -> Result<(), Box<dyn Error>> {
             "{throughput:.3} actions/s is below the {MIN_ACTIONS_PER_SECOND:.3} actions/s floor"
         )
         .into());
+    }
+    Ok(())
+}
+
+fn held_out_opening(ruleset: Ruleset, seed: u64) -> Result<Game, Box<dyn Error>> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut game = Game::new(ruleset);
+    for _ in 0..12 {
+        let actions = game.legal_actions();
+        if actions.is_empty() {
+            return Err("held-out opening terminated early".into());
+        }
+        game.apply_action(actions[rng.next_u32() as usize % actions.len()])?;
+    }
+    Ok(game)
+}
+
+fn held_out_match(
+    candidate: &PolicyValueNetwork,
+    incumbent: &PolicyValueNetwork,
+) -> Result<(), Box<dyn Error>> {
+    println!("ruleset,opening,side,outcome,actions");
+    for ruleset in [
+        Ruleset::Standard,
+        Ruleset::Multiverse,
+        Ruleset::MultiverseVariant,
+    ] {
+        for pair in 0..6 {
+            let seed = 0xa113_f01d + pair;
+            let game = held_out_opening(ruleset, seed)?;
+            for candidate_side in [Side::White, Side::Black] {
+                let result = play_arena_from_position(
+                    candidate,
+                    incumbent,
+                    game.clone(),
+                    ArenaGameConfig {
+                        ruleset,
+                        candidate_side,
+                        max_actions: 160,
+                        search: SearchConfig {
+                            simulations: 16,
+                            ..SearchConfig::default()
+                        },
+                    },
+                    &mut ChaCha8Rng::seed_from_u64(seed),
+                    |_, _| {},
+                );
+                let outcome = match result.outcome.map(|outcome| outcome.winner) {
+                    Some(Some(side)) if side == candidate_side => "win",
+                    Some(Some(_)) => "loss",
+                    Some(None) => "terminal_draw",
+                    None => "action_limit",
+                };
+                println!(
+                    "{ruleset},{pair},{candidate_side},{outcome},{}",
+                    result.actions
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -138,4 +227,24 @@ fn verify_multiverse_spatial_cache() -> Result<(), Box<dyn Error>> {
         return Err("immutable multiverse board embeddings were not reused".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn held_out_openings_are_playable() {
+        for ruleset in [
+            Ruleset::Standard,
+            Ruleset::Multiverse,
+            Ruleset::MultiverseVariant,
+        ] {
+            for pair in 0..6 {
+                let game = held_out_opening(ruleset, 0xa113_f01d + pair).unwrap();
+                assert!(game.outcome().is_none());
+                assert!(!game.legal_actions().is_empty());
+            }
+        }
+    }
 }

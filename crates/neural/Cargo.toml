@@ -19,6 +19,7 @@ cubecl-common = { version = "=0.10.0", features = ["std"], optional = true }
 chronofish-core = { path = "../core" }
 rand = "0.9"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = "1"
 thiserror = "2"
 wgpu = { version = "29", default-features = false, optional = true }

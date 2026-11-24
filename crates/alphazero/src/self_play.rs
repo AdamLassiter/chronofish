@@ -6,6 +6,7 @@ use std::path::Path;
 use chronofish_core::{Game, GameOutcome, PlayerAction, Ruleset, Side};
 use rand::Rng;
 use rand::seq::SliceRandom;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -51,6 +52,8 @@ pub struct ReplayStep {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ReplayGame {
+    #[serde(skip)]
+    validated: std::sync::OnceLock<()>,
     ruleset: Ruleset,
     steps: Vec<ReplayStep>,
     outcome: Option<GameOutcome>,
@@ -112,6 +115,15 @@ pub struct ArenaGameResult {
 }
 
 impl ArenaReport {
+    /// Record terminal draws and action-limit draws without crediting either player.
+    pub fn record_outcome(&mut self, candidate_side: Side, outcome: Option<GameOutcome>) {
+        match outcome.and_then(|outcome| outcome.winner) {
+            Some(winner) if winner == candidate_side => self.candidate_wins += 1,
+            Some(_) => self.incumbent_wins += 1,
+            None => self.draws += 1,
+        }
+    }
+
     #[must_use]
     pub fn candidate_score(self) -> f32 {
         let games = self.candidate_wins + self.incumbent_wins + self.draws;
@@ -274,11 +286,7 @@ pub fn run_arena_schedule_with_progress(
                 });
             },
         );
-        match result.outcome {
-            Some(outcome) if outcome.winner == Some(candidate_side) => report.candidate_wins += 1,
-            Some(_) => report.incumbent_wins += 1,
-            None => report.draws += 1,
-        }
+        report.record_outcome(candidate_side, result.outcome);
         progress(ArenaProgress {
             game: game_index + 1,
             games: rulesets.len(),
@@ -298,9 +306,28 @@ pub fn play_arena_game<E: PolicyValueEvaluator + ?Sized>(
     incumbent: &E,
     config: ArenaGameConfig,
     rng: &mut impl Rng,
+    progress: impl FnMut(usize, Option<GameOutcome>),
+) -> ArenaGameResult {
+    play_arena_from_position(
+        candidate,
+        incumbent,
+        Game::new(config.ruleset),
+        config,
+        rng,
+        progress,
+    )
+}
+
+/// Plays an arena game from a supplied opening with the same search as the trainer.
+#[must_use]
+pub fn play_arena_from_position<E: PolicyValueEvaluator + ?Sized>(
+    candidate: &E,
+    incumbent: &E,
+    mut game: Game,
+    config: ArenaGameConfig,
+    rng: &mut impl Rng,
     mut progress: impl FnMut(usize, Option<GameOutcome>),
 ) -> ArenaGameResult {
-    let mut game = Game::new(config.ruleset);
     let mut actions = 0;
     for _ in 0..config.max_actions {
         if game.outcome().is_some() {
@@ -324,6 +351,43 @@ pub fn play_arena_game<E: PolicyValueEvaluator + ?Sized>(
     ArenaGameResult {
         outcome: game.outcome(),
         actions,
+    }
+}
+
+impl ReplayStep {
+    fn checked_actions(&self, game: &Game, index: usize) -> Result<Vec<PlayerAction>, ReplayError> {
+        let actions = game.legal_actions();
+        if actions.len() != self.policy.len() {
+            return Err(ReplayError::Trajectory(format!(
+                "step {index} has {} policy entries for {} legal actions",
+                self.policy.len(),
+                actions.len()
+            )));
+        }
+        if !actions.contains(&self.action) {
+            return Err(ReplayError::Trajectory(format!(
+                "step {index} selects an action that is no longer legal"
+            )));
+        }
+        Ok(actions)
+    }
+
+    fn apply_to(&self, game: &mut Game, index: usize) -> Result<(), ReplayError> {
+        game.apply_action(self.action).map_err(|error| {
+            ReplayError::Trajectory(format!("step {index} cannot be applied: {error}"))
+        })
+    }
+}
+
+impl ReplayGame {
+    fn validate(&self) -> Result<(), ReplayError> {
+        let mut game = Game::new(self.ruleset);
+        for (index, step) in self.steps.iter().enumerate() {
+            step.checked_actions(&game, index)?;
+            step.apply_to(&mut game, index)?;
+        }
+        let _ = self.validated.set(());
+        Ok(())
     }
 }
 
@@ -351,7 +415,7 @@ impl ReplayBuffer {
     }
 
     /// Reconstructs a random, host-memory-bounded sample of replay positions.
-    /// Every trajectory is still validated in full.
+    /// Each trajectory is validated in full on its first sample pass.
     ///
     /// # Errors
     ///
@@ -363,6 +427,32 @@ impl ReplayBuffer {
         max_bytes: usize,
         rng: &mut impl Rng,
     ) -> Result<SampledReplay, ReplayError> {
+        self.sample_examples_impl(max_examples, max_bytes, rng, None)
+    }
+
+    /// Samples in the same order as the serial sampler, using the supplied pool
+    /// for first-use trajectory checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same trajectory or memory errors as [`Self::sample_examples`].
+    pub fn sample_examples_in_pool(
+        &self,
+        max_examples: usize,
+        max_bytes: usize,
+        rng: &mut impl Rng,
+        pool: &rayon::ThreadPool,
+    ) -> Result<SampledReplay, ReplayError> {
+        self.sample_examples_impl(max_examples, max_bytes, rng, Some(pool))
+    }
+
+    fn sample_examples_impl(
+        &self,
+        max_examples: usize,
+        max_bytes: usize,
+        rng: &mut impl Rng,
+        pool: Option<&rayon::ThreadPool>,
+    ) -> Result<SampledReplay, ReplayError> {
         let mut selected = (0..self.len()).collect::<Vec<_>>();
         selected.shuffle(rng);
         selected.truncate(max_examples.min(selected.len()));
@@ -370,6 +460,23 @@ impl ReplayBuffer {
         let mut game_order = (0..self.games.len()).collect::<Vec<_>>();
         if max_examples < self.len() || max_bytes != usize::MAX {
             game_order.shuffle(rng);
+        }
+        if let Some(pool) = pool.filter(|pool| pool.current_num_threads() > 1) {
+            let unchecked: Vec<_> = game_order
+                .iter()
+                .map(|&i| &self.games[i])
+                .filter(|g| g.validated.get().is_none())
+                .collect();
+            if unchecked.len() > 1 {
+                let first_error = pool.install(|| {
+                    unchecked
+                        .par_iter()
+                        .find_map_first(|replay| replay.validate().err())
+                });
+                if let Some(error) = first_error {
+                    return Err(error);
+                }
+            }
         }
         let mut game_offsets = Vec::with_capacity(self.games.len());
         let mut offset = 0_usize;
@@ -383,45 +490,46 @@ impl ReplayBuffer {
         let mut smallest_rejected = usize::MAX;
         for game_index in game_order {
             let replay = &self.games[game_index];
+            let validated = replay.validated.get().is_some();
+            let count = if validated {
+                (0..replay.steps.len())
+                    .rfind(|i| selected.contains(&(game_offsets[game_index] + i)))
+                    .map_or(0, |i| i + 1)
+            } else {
+                replay.steps.len()
+            };
+            if count == 0 {
+                continue;
+            }
             let mut game = Game::new(replay.ruleset);
-            for (index, step) in replay.steps.iter().enumerate() {
+            for (index, step) in replay.steps[..count].iter().enumerate() {
                 let global_index = game_offsets[game_index].saturating_add(index);
-                let actions = game.legal_actions();
-                if actions.len() != step.policy.len() {
-                    return Err(ReplayError::Trajectory(format!(
-                        "step {index} has {} policy entries for {} legal actions",
-                        step.policy.len(),
-                        actions.len()
-                    )));
-                }
-                if !actions.contains(&step.action) {
-                    return Err(ReplayError::Trajectory(format!(
-                        "step {index} selects an action that is no longer legal"
-                    )));
-                }
-                if selected.remove(&global_index) {
-                    let estimate = estimate_example_bytes(&game, actions.len());
-                    if estimated_bytes.saturating_add(estimate) <= max_bytes {
-                        let side = game.turn();
-                        examples.push(TrainingExample {
-                            position: encode(&game, &actions),
-                            policy: step.policy.clone(),
-                            value: replay.outcome.map_or(0.0, |outcome| {
-                                outcome
-                                    .winner
-                                    .map_or(0.0, |winner| if winner == side { 1.0 } else { -1.0 })
-                            }),
-                        });
-                        estimated_bytes = estimated_bytes.saturating_add(estimate);
-                    } else {
-                        skipped_for_memory += 1;
-                        smallest_rejected = smallest_rejected.min(estimate);
+                let sampled = selected.remove(&global_index);
+                if sampled || !validated {
+                    let actions = step.checked_actions(&game, index)?;
+                    if sampled {
+                        let estimate = estimate_example_bytes(&game, actions.len());
+                        if estimated_bytes.saturating_add(estimate) <= max_bytes {
+                            let side = game.turn();
+                            examples.push(TrainingExample {
+                                position: encode(&game, &actions),
+                                policy: step.policy.clone(),
+                                value: replay.outcome.map_or(0.0, |outcome| {
+                                    outcome.winner.map_or(0.0, |winner| {
+                                        if winner == side { 1.0 } else { -1.0 }
+                                    })
+                                }),
+                            });
+                            estimated_bytes = estimated_bytes.saturating_add(estimate);
+                        } else {
+                            skipped_for_memory += 1;
+                            smallest_rejected = smallest_rejected.min(estimate);
+                        }
                     }
                 }
-                game.apply_action(step.action).map_err(|error| {
-                    ReplayError::Trajectory(format!("step {index} cannot be applied: {error}"))
-                })?;
+                step.apply_to(&mut game, index)?;
             }
+            let _ = replay.validated.set(());
         }
         if examples.is_empty() && skipped_for_memory > 0 {
             return Err(ReplayError::MemoryBudget {
@@ -439,6 +547,7 @@ impl ReplayBuffer {
     pub fn extend_game(&mut self, game: SelfPlayGame, capacity: usize) {
         self.format_version = 2;
         self.games.push(ReplayGame {
+            validated: std::sync::OnceLock::new(),
             ruleset: game.ruleset,
             steps: game.steps,
             outcome: game.outcome,
@@ -575,6 +684,82 @@ mod tests {
     }
 
     #[test]
+    fn cached_trajectory_sampling_preserves_examples_and_validates_unsampled_games() {
+        let mut rng = ChaCha8Rng::seed_from_u64(118);
+        let model = PolicyValueNetwork::random(NetworkConfig::tiny(), &mut rng);
+        let mut replay = ReplayBuffer::default();
+        for ruleset in [
+            Ruleset::Standard,
+            Ruleset::Multiverse,
+            Ruleset::MultiverseVariant,
+        ] {
+            let game = play_self_play_game(
+                &model,
+                ruleset,
+                SelfPlayConfig {
+                    search: SearchConfig {
+                        simulations: 2,
+                        ..SearchConfig::default()
+                    },
+                    max_actions: 8,
+                    ..SelfPlayConfig::default()
+                },
+                &mut rng,
+            );
+            replay.extend_game(game, 100);
+        }
+        let parallel = replay.clone();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(3)
+            .build()
+            .unwrap();
+        let sample = || {
+            replay
+                .sample_examples(12, 40 * 1024, &mut ChaCha8Rng::seed_from_u64(78))
+                .unwrap()
+        };
+        let first = sample();
+        assert!(first.skipped_for_memory > 0);
+        let pooled = parallel
+            .sample_examples_in_pool(12, 40 * 1024, &mut ChaCha8Rng::seed_from_u64(78), &pool)
+            .unwrap();
+        let second = sample();
+        for other in [pooled, second] {
+            assert_eq!(first.estimated_bytes, other.estimated_bytes);
+            assert_eq!(first.skipped_for_memory, other.skipped_for_memory);
+            assert_eq!(first.examples.len(), other.examples.len());
+            for (a, b) in first.examples.iter().zip(other.examples) {
+                assert_eq!(a.position, b.position);
+                assert_eq!(a.policy, b.policy);
+                assert_eq!(a.value.to_bits(), b.value.to_bits());
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.zst");
+        replay.games[0].steps[2].policy.clear();
+        replay.games[1].steps[7].policy.clear();
+        replay.save(&path).unwrap();
+        let loaded = ReplayBuffer::load(path).unwrap();
+        for seed in 0..8 {
+            let mut serial_rng = ChaCha8Rng::seed_from_u64(seed);
+            let mut parallel_rng = serial_rng.clone();
+            let serial_error = loaded
+                .sample_examples(0, usize::MAX, &mut serial_rng)
+                .unwrap_err();
+            let parallel_error = loaded
+                .sample_examples_in_pool(0, usize::MAX, &mut parallel_rng, &pool)
+                .unwrap_err();
+            assert!(matches!(serial_error, ReplayError::Trajectory(_)));
+            assert_eq!(serial_error.to_string(), parallel_error.to_string());
+            assert!(
+                loaded.games[..2]
+                    .iter()
+                    .all(|game| game.validated.get().is_none())
+            );
+        }
+    }
+
+    #[test]
     fn replay_sampling_bounds_expanded_positions_and_host_memory() {
         let game = Game::new(Ruleset::Standard);
         let actions = game.legal_actions();
@@ -598,6 +783,38 @@ mod tests {
 
         let error = replay.sample_examples(1, 1, &mut rng).unwrap_err();
         assert!(matches!(error, ReplayError::MemoryBudget { .. }));
+    }
+
+    #[test]
+    fn arena_scores_terminal_and_truncated_draws_equally() {
+        let mut report = ArenaReport::default();
+        report.record_outcome(Side::White, None);
+        report.record_outcome(
+            Side::Black,
+            Some(GameOutcome {
+                winner: None,
+                reason: chronofish_core::OutcomeReason::Stalemate,
+            }),
+        );
+        assert_eq!(report.draws, 2);
+        assert!((report.candidate_score() - 0.5).abs() < f32::EPSILON);
+        report.record_outcome(
+            Side::Black,
+            Some(GameOutcome {
+                winner: Some(Side::Black),
+                reason: chronofish_core::OutcomeReason::Checkmate,
+            }),
+        );
+        report.record_outcome(
+            Side::Black,
+            Some(GameOutcome {
+                winner: Some(Side::White),
+                reason: chronofish_core::OutcomeReason::Checkmate,
+            }),
+        );
+        assert_eq!(report.candidate_wins, 1);
+        assert_eq!(report.incumbent_wins, 1);
+        assert!((report.candidate_score() - 0.5).abs() < f32::EPSILON);
     }
 
     #[test]

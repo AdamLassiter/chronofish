@@ -248,9 +248,9 @@ impl<B: Backend> MultiverseNet<B> {
 
     /// Completes policy/value evaluation from cached spatial board embeddings.
     #[must_use]
-    pub fn forward_with_spatial(
+    pub fn forward_with_spatial<P>(
         &self,
-        batch: BatchTensors<B>,
+        batch: BatchTensors<B, P>,
         spatial: Tensor<B, 3>,
     ) -> ModelOutput<B> {
         let [batch_size, board_count, _] = spatial.dims();
@@ -314,8 +314,8 @@ pub struct ModelOutput<B: Backend> {
     pub value: Tensor<B, 1>,
 }
 
-pub struct BatchTensors<B: Backend> {
-    pub boards: Tensor<B, 5>,
+pub struct BatchTensors<B: Backend, P = Tensor<B, 5>> {
+    pub boards: P,
     pub metadata: Tensor<B, 3>,
     pub board_mask: Tensor<B, 2>,
     pub global: Tensor<B, 2>,
@@ -335,26 +335,63 @@ impl<B: Backend> BatchTensors<B> {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn from_positions(
-        positions: &[EncodedPosition],
+        positions: &[impl std::borrow::Borrow<EncodedPosition>],
         embedding_width: usize,
         device: &B::Device,
+    ) -> Self {
+        let board_count = positions
+            .iter()
+            .map(|p| p.borrow().boards.len())
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let mut boards = vec![0.0; positions.len() * board_count * BOARD_PLANES * 64];
+        for (row, position) in positions.iter().enumerate() {
+            for (col, board) in position.borrow().boards.iter().enumerate() {
+                let start = (row * board_count + col) * BOARD_PLANES * 64;
+                boards[start..start + BOARD_PLANES * 64].copy_from_slice(&board.planes);
+            }
+        }
+        let boards = Tensor::from_data(
+            TensorData::new(
+                boards,
+                [
+                    positions.len(),
+                    board_count,
+                    BOARD_PLANES,
+                    BOARD_SIZE,
+                    BOARD_SIZE,
+                ],
+            ),
+            device,
+        );
+        Self::with_boards(positions, embedding_width, device, boards)
+    }
+}
+
+impl<B: Backend, P> BatchTensors<B, P> {
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn with_boards(
+        positions: &[impl std::borrow::Borrow<EncodedPosition>],
+        embedding_width: usize,
+        device: &B::Device,
+        boards: P,
     ) -> Self {
         assert!(!positions.is_empty(), "a neural batch cannot be empty");
         let batch_size = positions.len();
         let board_count = positions
             .iter()
-            .map(|position| position.boards.len())
+            .map(|position| position.borrow().boards.len())
             .max()
             .unwrap_or(1)
             .max(1);
         let action_count = positions
             .iter()
-            .map(|position| position.actions.len())
+            .map(|position| position.borrow().actions.len())
             .max()
             .unwrap_or(1)
             .max(1);
 
-        let mut boards = vec![0.0; batch_size * board_count * BOARD_PLANES * 64];
         let mut metadata = vec![0.0; batch_size * board_count * BOARD_METADATA_FEATURES];
         let mut board_mask = vec![0.0; batch_size * board_count];
         let mut global = vec![0.0; batch_size * GLOBAL_FEATURES];
@@ -364,12 +401,10 @@ impl<B: Backend> BatchTensors<B> {
         let mut destination_indices = vec![0_i64; batch_size * action_count * embedding_width];
         let mut move_mask = vec![0.0; batch_size * action_count * embedding_width];
         for (batch, position) in positions.iter().enumerate() {
+            let position = position.borrow();
             global[batch * GLOBAL_FEATURES..(batch + 1) * GLOBAL_FEATURES]
                 .copy_from_slice(&position.global);
             for (board, encoded) in position.boards.iter().enumerate() {
-                let plane_start = (batch * board_count + board) * BOARD_PLANES * 64;
-                boards[plane_start..plane_start + BOARD_PLANES * 64]
-                    .copy_from_slice(&encoded.planes);
                 let metadata_start = (batch * board_count + board) * BOARD_METADATA_FEATURES;
                 metadata[metadata_start..metadata_start + BOARD_METADATA_FEATURES]
                     .copy_from_slice(&encoded.metadata);
@@ -394,19 +429,7 @@ impl<B: Backend> BatchTensors<B> {
             }
         }
         Self {
-            boards: Tensor::from_data(
-                TensorData::new(
-                    boards,
-                    [
-                        batch_size,
-                        board_count,
-                        BOARD_PLANES,
-                        BOARD_SIZE,
-                        BOARD_SIZE,
-                    ],
-                ),
-                device,
-            ),
+            boards,
             metadata: Tensor::from_data(
                 TensorData::new(metadata, [batch_size, board_count, BOARD_METADATA_FEATURES]),
                 device,
