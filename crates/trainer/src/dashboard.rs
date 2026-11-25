@@ -719,7 +719,7 @@ fn bar(ratio: f64, width: usize) -> (String, String) {
     let full = eighths / 8;
     let mut filled = "█".repeat(full);
     let mut used = full;
-    if full < width && eighths % 8 > 0 {
+    if full < width && !eighths.is_multiple_of(8) {
         filled.push_str(PARTIAL[eighths % 8]);
         used += 1;
     }
