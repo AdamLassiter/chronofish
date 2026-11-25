@@ -10,18 +10,19 @@ use chronofish_alphazero::{
     ArenaGameConfig, ArenaReport, EncodedPosition, ModelSize, NetworkConfig, PolicyValueEvaluator,
     PolicyValueNetwork, Prediction, ReplayBuffer, SearchConfig, SelfPlayConfig, SelfPlayGame,
     TrainConfig, estimate_batch_memory_from_shape, estimate_inference_batch_memory,
-    estimate_training_batch_memory, play_arena_game, play_self_play_game_with_progress,
+    estimate_training_batch_memory, play_arena_from_position, play_self_play_game_with_progress,
 };
-use chronofish_core::{Ruleset, Side};
+use chronofish_core::{Game, Ruleset, Side};
 use chronofish_neural::VulkanTrainingDevice;
 use clap::{Parser, ValueEnum};
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 const SELF_PLAY_SEED: u64 = 0x5345_4c46_504c_4159;
 const ARENA_SEED: u64 = 0x4152_454e_415f_415a;
+const ARENA_OPENING_SEED: u64 = 0x4f50_454e_494e_4753;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RuleSelection {
@@ -87,6 +88,10 @@ struct Arguments {
     /// Maximum arena actions per game; unfinished games count as draws.
     #[arg(long, default_value_t = 160)]
     arena_max_actions: usize,
+    /// Random opening actions shared by each colour-reversed arena pair. Arena search is
+    /// deterministic, so zero replays one game per ruleset and colour.
+    #[arg(long, default_value_t = 8)]
+    arena_opening_actions: usize,
     /// Print arena starts, periodic action counts, and low-level device identifiers.
     #[arg(long)]
     verbose: bool,
@@ -165,6 +170,7 @@ struct ArenaRunConfig {
     inference_memory_budget_bytes: usize,
     network_config: NetworkConfig,
     max_actions: usize,
+    opening_actions: usize,
     seed: u64,
     training_steps: u64,
 }
@@ -730,6 +736,7 @@ fn evaluate_and_maybe_promote(
         inference_memory_budget_bytes: mib_to_bytes(arguments.inference_memory_budget_mib),
         network_config: candidate.config(),
         max_actions: arguments.arena_max_actions,
+        opening_actions: arguments.arena_opening_actions,
         seed: arguments.seed,
         training_steps: candidate.training_steps(),
     };
@@ -966,11 +973,12 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
     field(
         "Schedule",
         format!(
-            "{} · {} · {}/action · {} limit",
+            "{} · {} · {}/action · {} limit · {}-action paired openings",
             counted(config.games, "game"),
             counted(pool.current_num_threads(), "worker"),
             counted(config.search.simulations, "simulation"),
-            counted(config.max_actions, "action")
+            counted(config.max_actions, "action"),
+            config.opening_actions
         ),
     );
     let completed = Mutex::new(0_usize);
@@ -1005,9 +1013,21 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                                     config.training_steps,
                                     usize_to_u64(game_index),
                                 ));
-                                let result = play_arena_game(
+                                let pair = arena_pair(config.selection, game_index);
+                                let opening = arena_opening(
+                                    ruleset,
+                                    config.opening_actions,
+                                    derived_seed(
+                                        config.seed,
+                                        ARENA_OPENING_SEED,
+                                        config.training_steps,
+                                        usize_to_u64(pair) | (ruleset_tag(ruleset) << 32),
+                                    ),
+                                );
+                                let result = play_arena_from_position(
                                     candidate_evaluator,
                                     incumbent_evaluator,
+                                    opening,
                                     ArenaGameConfig {
                                         ruleset,
                                         candidate_side,
@@ -1044,9 +1064,10 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     *finished += 1;
                                     report(format!(
-                                        "  [{finished}/{}] arena game {} · {ruleset} · candidate {candidate_side} · {} · {description}",
+                                        "  [{finished}/{}] arena game {} · {ruleset} · opening {} · candidate {candidate_side} · {} · {description}",
                                         config.games,
                                         game_index + 1,
+                                        pair + 1,
                                         counted(result.actions, "action"),
                                     ));
                                 }
@@ -1381,12 +1402,50 @@ const fn selected_ruleset(selection: RuleSelection, index: usize) -> Ruleset {
     }
 }
 
-const fn candidate_side(selection: RuleSelection, game_index: usize) -> Side {
-    let ruleset_game_index = match selection {
+const fn ruleset_game_index(selection: RuleSelection, game_index: usize) -> usize {
+    match selection {
         RuleSelection::Standard | RuleSelection::Multiverse | RuleSelection::Variant => game_index,
         RuleSelection::All => game_index / 3,
-    };
-    if ruleset_game_index.is_multiple_of(2) {
+    }
+}
+
+/// Index of the colour-reversed pair within its ruleset; both games share one opening.
+const fn arena_pair(selection: RuleSelection, game_index: usize) -> usize {
+    ruleset_game_index(selection, game_index) / 2
+}
+
+const fn ruleset_tag(ruleset: Ruleset) -> u64 {
+    match ruleset {
+        Ruleset::Standard => 0,
+        Ruleset::Multiverse => 1,
+        Ruleset::MultiverseVariant => 2,
+    }
+}
+
+/// Plays up to `actions` uniformly random legal actions, stopping before any that ends the game.
+fn arena_opening(ruleset: Ruleset, actions: usize, seed: u64) -> Game {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed);
+    let mut game = Game::new(ruleset);
+    for _ in 0..actions {
+        let legal = game.legal_actions();
+        if legal.is_empty() {
+            break;
+        }
+        let mut next = game.clone();
+        if next
+            .apply_action(legal[rng.random_range(0..legal.len())])
+            .is_err()
+            || next.outcome().is_some()
+        {
+            break;
+        }
+        game = next;
+    }
+    game
+}
+
+const fn candidate_side(selection: RuleSelection, game_index: usize) -> Side {
+    if ruleset_game_index(selection, game_index).is_multiple_of(2) {
         Side::White
     } else {
         Side::Black
@@ -1671,6 +1730,60 @@ mod tests {
 
         assert_eq!(predictions.len(), 3);
         assert_eq!(evaluator.0.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn arena_pairs_share_an_opening_and_pairs_differ() {
+        let opening = |selection, game_index| {
+            let ruleset = selected_ruleset(selection, game_index);
+            let pair = arena_pair(selection, game_index);
+            let game = arena_opening(
+                ruleset,
+                8,
+                derived_seed(
+                    1,
+                    ARENA_OPENING_SEED,
+                    0,
+                    usize_to_u64(pair) | (ruleset_tag(ruleset) << 32),
+                ),
+            );
+            assert!(game.outcome().is_none());
+            format!("{:?}", game.timelines())
+        };
+        for selection in [RuleSelection::Standard, RuleSelection::All] {
+            let games = if matches!(selection, RuleSelection::All) {
+                12
+            } else {
+                4
+            };
+            let openings = (0..games)
+                .map(|index| opening(selection, index))
+                .collect::<Vec<_>>();
+            for first in 0..games {
+                for second in first + 1..games {
+                    let same_ruleset =
+                        selected_ruleset(selection, first) == selected_ruleset(selection, second);
+                    let same_pair = same_ruleset
+                        && arena_pair(selection, first) == arena_pair(selection, second);
+                    assert_eq!(
+                        openings[first] == openings[second],
+                        same_pair,
+                        "{first} {second}"
+                    );
+                    if same_pair {
+                        assert_ne!(
+                            candidate_side(selection, first),
+                            candidate_side(selection, second)
+                        );
+                    }
+                }
+            }
+        }
+        let start = format!("{:?}", Game::new(Ruleset::Standard).timelines());
+        assert_eq!(
+            format!("{:?}", arena_opening(Ruleset::Standard, 0, 9).timelines()),
+            start
+        );
     }
 
     #[test]

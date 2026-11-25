@@ -37,6 +37,8 @@ Vulkan training (including AMD GPUs through the installed Vulkan driver):
 
 In an interactive terminal the trainer opens a live dashboard. It shows every scheduled self-play and arena game with its progress and result, the arena scoreboard and promotion outlook, action throughput, inference batching, and the result of each iteration. Press `q` to quit. When the run ends, the full log is printed to stdout. Output that is piped or redirected stays plain text, and `--plain` forces plain text in a terminal.
 
+Arena search is deterministic, so each colour-reversed pair of arena games starts from its own random opening (`--arena-opening-actions`, default 8). Both games in a pair use the same opening, so the comparison stays fair. Openings change as training progresses.
+
 Use `--check-training-device` to initialize and verify the selected device without beginning a run. The trainer prints the resolved adapter, fitting and inference backends, parallelism, memory budgets, and phase timings at startup. CPU and Vulkan checkpoints share the same architecture and file format.
 
 Training keeps a persistent learner in `candidate-v2.json`, separate from the published `best-v2.json`. Every round and `--fit-only` run continues that learner, even after a failed promotion or a restart. Use `--reset-candidate` to start fitting from the incumbent again. A candidate older than the incumbent is automatically replaced by the incumbent.
