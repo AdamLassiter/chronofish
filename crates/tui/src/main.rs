@@ -202,8 +202,8 @@ fn render_board(timeline: i32, board: &chronofish_core::BoardSnapshot) {
     println!("T{}L{} ({})", board.time, timeline, board.side_to_move);
     for y in (0..8).rev() {
         print!("{} ", y + 1);
-        for x in 0..8 {
-            print!("{} ", board.board[y][x].map_or('.', piece_char));
+        for square in &board.board[y] {
+            print!("{} ", square.map_or('.', piece_char));
         }
         println!();
     }

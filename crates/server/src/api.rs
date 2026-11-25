@@ -1293,7 +1293,8 @@ mod tests {
             None,
         )
         .await;
-        assert!(unresolved.as_array().expect("reports").is_empty());
+        let reports = unresolved.as_array().expect("reports");
+        assert_eq!(reports.as_slice(), [] as [serde_json::Value; 0]);
     }
 
     #[tokio::test]

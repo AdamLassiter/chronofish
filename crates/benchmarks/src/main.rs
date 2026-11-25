@@ -243,7 +243,10 @@ mod tests {
             for pair in 0..6 {
                 let game = held_out_opening(ruleset, 0xa113_f01d + pair).unwrap();
                 assert!(game.outcome().is_none());
-                assert!(!game.legal_actions().is_empty());
+                assert_ne!(
+                    game.legal_actions(),
+                    [] as [chronofish_core::PlayerAction; 0]
+                );
             }
         }
     }

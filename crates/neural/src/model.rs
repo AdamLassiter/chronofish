@@ -107,25 +107,6 @@ impl From<ModelSize> for NetworkConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn balanced_preset_sits_between_compact_and_large() {
-        let compact = NetworkConfig::compact();
-        let balanced = NetworkConfig::balanced();
-        let large = NetworkConfig::large();
-
-        assert!(compact.channels < balanced.channels);
-        assert!(balanced.channels < large.channels);
-        assert!(compact.residual_blocks < balanced.residual_blocks);
-        assert!(balanced.residual_blocks < large.residual_blocks);
-        assert!(compact.board_embedding < balanced.board_embedding);
-        assert!(balanced.board_embedding < large.board_embedding);
-    }
-}
-
 #[derive(Module, Debug)]
 pub struct ResidualBlock<B: Backend> {
     conv1: Conv2d<B>,
@@ -466,5 +447,24 @@ impl<B: Backend, P> BatchTensors<B, P> {
                 device,
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn balanced_preset_sits_between_compact_and_large() {
+        let compact = NetworkConfig::compact();
+        let balanced = NetworkConfig::balanced();
+        let large = NetworkConfig::large();
+
+        assert!(compact.channels < balanced.channels);
+        assert!(balanced.channels < large.channels);
+        assert!(compact.residual_blocks < balanced.residual_blocks);
+        assert!(balanced.residual_blocks < large.residual_blocks);
+        assert!(compact.board_embedding < balanced.board_embedding);
+        assert!(balanced.board_embedding < large.board_embedding);
     }
 }
