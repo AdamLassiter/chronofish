@@ -396,6 +396,18 @@ impl Game {
         Ok(())
     }
 
+    /// Zobrist-style hash of every timeline and board, maintained incrementally.
+    ///
+    /// Suitable as a transposition-table key; it does not include the side to move.
+    pub fn position_hash(&self) -> u64 {
+        self.position_hash
+    }
+
+    /// Royal pieces of either colour that are attacked on present-time boards.
+    pub fn checked_royals(&self) -> Vec<Position> {
+        self.checked_royal_positions()
+    }
+
     pub(crate) fn turn_color(&self) -> Color {
         self.turn
     }

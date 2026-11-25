@@ -12,7 +12,9 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 chronofish-alphazero = { path = "../alphazero" }
+chronofish-classic = { path = "../classic" }
 chronofish-core = { path = "../core" }
+chronofish-random-bot = { path = "../random-bot" }
 
 [lints]
 workspace = true

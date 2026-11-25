@@ -1,11 +1,13 @@
 use chronofish_core::{AiDecision, AiPlayer, AiProfile, Game};
 
-/// A tiny deterministic baseline used to prove the pluggable-AI boundary.
-pub struct RavenBot {
+/// Bobby Fissure: plays uniformly random legal actions, tearing spacetime at will.
+///
+/// A tiny deterministic baseline that proves the pluggable-AI boundary.
+pub struct BobbyFissureBot {
     state: u64,
 }
 
-impl Default for RavenBot {
+impl Default for BobbyFissureBot {
     fn default() -> Self {
         Self {
             state: 0x6875_6769_6e6e,
@@ -13,7 +15,7 @@ impl Default for RavenBot {
     }
 }
 
-impl RavenBot {
+impl BobbyFissureBot {
     #[must_use]
     pub const fn new(seed: u64) -> Self {
         Self { state: seed }
@@ -28,11 +30,11 @@ impl RavenBot {
     }
 }
 
-impl AiPlayer for RavenBot {
+impl AiPlayer for BobbyFissureBot {
     fn profile(&self) -> AiProfile {
         AiProfile {
-            username: "bot-raven",
-            display_name: "Raven (baseline)",
+            username: "bot-bobby-fissure",
+            display_name: "Bobby Fissure",
         }
     }
 
@@ -58,7 +60,7 @@ mod tests {
     #[test]
     fn bot_returns_an_authoritatively_legal_opening() {
         let game = Game::new(Ruleset::Standard);
-        let mut bot = RavenBot::default();
+        let mut bot = BobbyFissureBot::default();
         let chronofish_core::PlayerAction::Move { movement } =
             bot.choose_action(&game).expect("bot action").action
         else {

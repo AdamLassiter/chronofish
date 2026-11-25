@@ -775,7 +775,7 @@ mod tests {
 
     use super::*;
     use chronofish_core::{AiDecision, AiProfile, Game};
-    use chronofish_random_bot::RavenBot;
+    use chronofish_random_bot::BobbyFissureBot;
 
     struct FailsOnceBot {
         failed: bool,
@@ -908,7 +908,7 @@ mod tests {
     async fn account_game_and_authoritative_bot_reply_work_end_to_end() {
         let state = AppState::new(
             Database::in_memory().expect("database"),
-            vec![Box::new(RavenBot::default())],
+            vec![Box::new(BobbyFissureBot::default())],
         )
         .expect("state");
         let app = router(state);
@@ -934,7 +934,7 @@ mod tests {
             "/api/games",
             Some(token),
             Some(json!({
-                "opponent": "bot-raven",
+                "opponent": "bot-bobby-fissure",
                 "ruleset": "classic",
                 "playAs": "attacker"
             })),
@@ -1052,7 +1052,7 @@ mod tests {
     async fn player_can_undo_a_staged_move_before_submitting() {
         let state = AppState::new(
             Database::in_memory().expect("database"),
-            vec![Box::new(RavenBot::default())],
+            vec![Box::new(BobbyFissureBot::default())],
         )
         .expect("state");
         let app = router(state);
@@ -1071,7 +1071,7 @@ mod tests {
             "/api/games",
             Some(token),
             Some(json!({
-                "opponent": "bot-raven",
+                "opponent": "bot-bobby-fissure",
                 "ruleset": "multiverse",
                 "playAs": "white"
             })),
@@ -1122,7 +1122,7 @@ mod tests {
     async fn abandoning_a_game_records_a_rated_concession_loss() {
         let state = AppState::new(
             Database::in_memory().expect("database"),
-            vec![Box::new(RavenBot::default())],
+            vec![Box::new(BobbyFissureBot::default())],
         )
         .expect("state");
         let app = router(state);
@@ -1141,7 +1141,7 @@ mod tests {
             "/api/games",
             Some(token),
             Some(json!({
-                "opponent": "bot-raven",
+                "opponent": "bot-bobby-fissure",
                 "ruleset": "standard",
                 "playAs": "white"
             })),
@@ -1173,7 +1173,7 @@ mod tests {
             .expect("resigner");
         let bot = users
             .iter()
-            .find(|user| user["username"] == "bot-raven")
+            .find(|user| user["username"] == "bot-bobby-fissure")
             .expect("bot");
         assert_eq!(resigner["rating"], 1484);
         assert_eq!(resigner["gamesPlayed"], 1);
@@ -1195,7 +1195,7 @@ mod tests {
     async fn bug_reports_capture_the_game_and_require_admin_token_to_manage() {
         let state = AppState::new(
             Database::in_memory().expect("database"),
-            vec![Box::new(RavenBot::default())],
+            vec![Box::new(BobbyFissureBot::default())],
         )
         .expect("state")
         .with_bug_admin_token("test-bug-admin-secret");
@@ -1219,7 +1219,7 @@ mod tests {
             "/api/games",
             Some(token),
             Some(json!({
-                "opponent": "bot-raven",
+                "opponent": "bot-bobby-fissure",
                 "ruleset": "standard",
                 "playAs": "white"
             })),

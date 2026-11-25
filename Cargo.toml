@@ -2,6 +2,7 @@
 members = [
     "crates/alphazero",
     "crates/benchmarks",
+    "crates/classic",
     "crates/core",
     "crates/neural",
     "crates/random-bot",

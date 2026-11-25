@@ -20,7 +20,7 @@ mod network {
     };
 }
 
-pub use bot::{ChronofishCpuBot, ChronofishGpuBot};
+pub use bot::{AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot};
 pub use chronofish_neural::{
     ACTION_FEATURES, BOARD_METADATA_FEATURES, BOARD_PLANES, EncodedAction, EncodedBoard,
     EncodedPosition, GLOBAL_FEATURES, ModelError, ModelSize, NetworkConfig, PolicyValueEvaluator,

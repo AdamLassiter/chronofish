@@ -178,6 +178,10 @@ impl Database {
             CREATE INDEX IF NOT EXISTS games_players ON games(attacker_id, defender_id, updated_at);
             CREATE INDEX IF NOT EXISTS moves_game ON moves(game_id, sequence);
             CREATE INDEX IF NOT EXISTS bug_reports_status ON bug_reports(status, created_at);
+            -- The random baseline was renamed from Raven; keep its rating and games.
+            UPDATE users SET username = 'bot-bobby-fissure', display_name = 'Bobby Fissure'
+             WHERE username = 'bot-raven' AND is_bot = 1
+               AND NOT EXISTS (SELECT 1 FROM users WHERE username = 'bot-bobby-fissure');
             ",
             )
     }
@@ -767,6 +771,31 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raven_is_renamed_to_bobby_fissure_keeping_its_account() {
+        let database = Database::in_memory().expect("database");
+        let raven = database
+            .ensure_bot("bot-raven", "Raven (baseline)")
+            .expect("legacy bot");
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE users SET rating = 1234 WHERE id = ?1", [raven.id])
+            .unwrap();
+        database.migrate().expect("first migration");
+        database.migrate().expect("migration is idempotent");
+        let renamed = database
+            .auth_by_username("bot-bobby-fissure")
+            .unwrap()
+            .expect("renamed account")
+            .user;
+        assert_eq!(renamed.id, raven.id);
+        assert_eq!(renamed.rating, 1234);
+        assert_eq!(renamed.display_name, "Bobby Fissure");
+        assert!(database.auth_by_username("bot-raven").unwrap().is_none());
+    }
 
     #[test]
     fn finished_game_is_historicized_and_rates_both_accounts_once() {

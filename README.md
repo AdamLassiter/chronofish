@@ -1,6 +1,6 @@
 # Chronofish
 
-Chronofish is a Rust engine for standard chess and chess played across time and branching timelines. It provides one authoritative rules crate, AlphaZero-style CPU and Vulkan/WGPU bots, self-play training, a debug terminal client, and a persistent web server.
+Chronofish is a Rust engine for standard chess and chess played across time and branching timelines. It provides one authoritative rules crate, AlphaZero-style CPU and Vulkan/WGPU bots, classic alpha-beta, rollout and greedy bots, self-play training, a debug terminal client, and a persistent web server.
 
 ## Rulesets
 
@@ -19,6 +19,30 @@ cargo run -p chronofish-tui -- --mode multiverse
 ```
 
 The TUI accepts commands such as `move T0L0:e2 T0L0:e4`, `submit`, `undo`, `legal`, and `boards`.
+
+## Bots
+
+Every bot implements `AiPlayer`. Each one isolates a different part of how an engine plays.
+
+| Bot | Username | Architecture |
+|---|---|---|
+| Bobby Fissure | `bot-bobby-fissure` | Uniformly random legal actions; the baseline (formerly Raven) |
+| Grabablanca | `bot-grabablanca` | Greedy: the best handcrafted evaluation one action ahead |
+| Deep Blueshift | `bot-deep-blueshift` | Iterative-deepening alpha-beta with a transposition table, quiescence and a node budget |
+| Monte Carlsen | `bot-monte-carlsen` | UCT tree search with capture-biased random rollouts; no network |
+| AlphaNow | `bot-alpha-now` | The AlphaZero network's top policy action, with no search |
+| Chronofish CPU / GPU | `bot-chronofish-cpu` / `-gpu` | AlphaZero MCTS guided by the trained network |
+
+The classic bots live in `crates/classic` and share one material-and-placement evaluation that is aware of active timelines. Their search runs over actions rather than plies, because a 5D turn is several staged moves followed by a submission. The server registers every bot. AlphaNow shares Chronofish CPU's checkpoint. In the TUI, choose a bot with `--opponent fissure|grabablanca|blueshift|carlsen|alpha-now|cpu|gpu`, and pass `--model` for a trained network.
+
+Compare bots with a round-robin tournament. Every pair plays each random opening from both sides. The tournament prints standings with W/D/L, Elo and time per action, followed by a crosstable:
+
+```sh
+cargo run --release -p chronofish-benchmarks -- --tournament \
+  --openings 2 --ruleset all --max-actions 80 --model models/training/best-v2.json
+```
+
+Use `--bots` to choose a subset and `--csv` to save one row per game.
 
 ## Training
 
@@ -73,7 +97,7 @@ cd ..
 cargo run --release -p chronofish-server
 ```
 
-The server listens on `127.0.0.1:3000` by default and serves the built browser client at `http://127.0.0.1:3000/app` (and `/`). Static client assets are embedded from `web/dist` under `/assets`. It stores accounts, games, history, Elo, and player bug reports in `chronofish.sqlite3`. Configure it with `CHRONOFISH_ADDR`, `CHRONOFISH_DATABASE`, `CHRONOFISH_AZ_MODEL`, `CHRONOFISH_GPU_MODEL`, and `CHRONOFISH_AZ_SIMULATIONS`.
+The server listens on `127.0.0.1:3000` by default and serves the built browser client at `http://127.0.0.1:3000/app` (and `/`). Static client assets are embedded from `web/dist` under `/assets`. It stores accounts, games, history, Elo, and player bug reports in `chronofish.sqlite3`. Configure it with `CHRONOFISH_ADDR`, `CHRONOFISH_DATABASE`, `CHRONOFISH_AZ_MODEL`, `CHRONOFISH_GPU_MODEL`, `CHRONOFISH_AZ_SIMULATIONS`, `CHRONOFISH_BLUESHIFT_NODES`, and `CHRONOFISH_CARLSEN_ITERATIONS`.
 
 The browser client is server-authoritative. It renders every board in the multiverse, highlights legal planning moves, and records a bot's principal variation with its move for post-game review.
 

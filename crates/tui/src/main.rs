@@ -1,7 +1,13 @@
 use std::io::{self, Write};
 
-use chronofish_alphazero::{ChronofishCpuBot, ChronofishGpuBot, SearchConfig};
+use std::path::PathBuf;
+
+use chronofish_alphazero::{
+    AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot, PolicyValueNetwork, SearchConfig,
+};
+use chronofish_classic::{DeepBlueshift, Grabablanca, MonteCarlsen};
 use chronofish_core::{AiPlayer, Game, Move, PieceType, Position, Ruleset};
+use chronofish_random_bot::BobbyFissureBot;
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -25,8 +31,20 @@ impl From<Mode> for Ruleset {
 enum Opponent {
     #[default]
     Human,
+    /// Chronofish CPU: `AlphaZero` MCTS with the large network.
     Cpu,
+    /// Chronofish GPU: `AlphaZero` MCTS with the balanced network.
     Gpu,
+    /// Bobby Fissure: uniformly random legal actions.
+    Fissure,
+    /// Grabablanca: greedy one-action lookahead.
+    Grabablanca,
+    /// Deep Blueshift: alpha-beta search with a handcrafted evaluation.
+    Blueshift,
+    /// Monte Carlsen: UCT tree search with heuristic rollouts.
+    Carlsen,
+    /// `AlphaNow`: the network's top policy action, no search.
+    AlphaNow,
 }
 
 #[derive(Debug, Parser)]
@@ -41,6 +59,9 @@ struct Cli {
     opponent: Opponent,
     #[arg(long, default_value_t = 48)]
     ai_simulations: usize,
+    /// Checkpoint for the network bots (cpu, gpu, alpha-now); untrained if omitted.
+    #[arg(long)]
+    model: Option<PathBuf>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -50,10 +71,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         simulations: cli.ai_simulations,
         ..SearchConfig::default()
     };
+    let model = cli
+        .model
+        .as_ref()
+        .map(PolicyValueNetwork::load)
+        .transpose()?;
     let mut bot: Option<Box<dyn AiPlayer>> = match cli.opponent {
         Opponent::Human => None,
-        Opponent::Cpu => Some(Box::new(ChronofishCpuBot::bootstrap(search, 0x0043_5055))),
-        Opponent::Gpu => Some(Box::new(ChronofishGpuBot::bootstrap(search, 0x0047_5055))),
+        Opponent::Cpu => Some(Box::new(model.map_or_else(
+            || ChronofishCpuBot::bootstrap(search, 0x0043_5055),
+            |model| ChronofishCpuBot::new(model, search, 0x0043_5055),
+        ))),
+        Opponent::Gpu => Some(Box::new(model.map_or_else(
+            || ChronofishGpuBot::bootstrap(search, 0x0047_5055),
+            |model| ChronofishGpuBot::new(model, search, 0x0047_5055),
+        ))),
+        Opponent::AlphaNow => Some(Box::new(
+            model.map_or_else(|| AlphaNowBot::bootstrap(0x004e_4f57), AlphaNowBot::new),
+        )),
+        Opponent::Fissure => Some(Box::new(BobbyFissureBot::default())),
+        Opponent::Grabablanca => Some(Box::new(Grabablanca::default())),
+        Opponent::Blueshift => Some(Box::new(DeepBlueshift::default())),
+        Opponent::Carlsen => Some(Box::new(MonteCarlsen::default())),
     };
 
     println!("Chronofish — {}", game.ruleset());

@@ -3,7 +3,7 @@ name = "chronofish-random-bot"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Simple deterministic baseline bot for Chronofish"
+description = "Bobby Fissure, the uniform-random baseline bot for Chronofish"
 
 [dependencies]
 chronofish-core = { path = "../core" }

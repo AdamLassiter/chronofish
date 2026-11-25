@@ -1134,7 +1134,20 @@ name = "chronofish-benchmarks"
 version = "0.6.0"
 dependencies = [
  "chronofish-alphazero",
+ "chronofish-classic",
  "chronofish-core",
+ "chronofish-random-bot",
+ "clap",
+ "rand_chacha 0.9.0",
+ "rayon",
+]
+
+[[package]]
+name = "chronofish-classic"
+version = "0.6.0"
+dependencies = [
+ "chronofish-core",
+ "rand 0.9.5",
  "rand_chacha 0.9.0",
 ]
 
@@ -1180,6 +1193,7 @@ dependencies = [
  "argon2",
  "axum",
  "chronofish-alphazero",
+ "chronofish-classic",
  "chronofish-core",
  "chronofish-random-bot",
  "rand_core 0.6.4",
@@ -1213,7 +1227,9 @@ name = "chronofish-tui"
 version = "0.6.0"
 dependencies = [
  "chronofish-alphazero",
+ "chronofish-classic",
  "chronofish-core",
+ "chronofish-random-bot",
  "clap",
 ]
 

@@ -1,3 +1,5 @@
+mod tournament;
+
 use std::error::Error;
 use std::time::Instant;
 
@@ -26,6 +28,9 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    if std::env::args().nth(1).as_deref() == Some("--tournament") {
+        return tournament::run(std::env::args().skip(2));
+    }
     if std::env::args().nth(1).as_deref() == Some("--match") {
         let paths: Vec<_> = std::env::args().skip(2).collect();
         let [candidate, incumbent] = paths.as_slice() else {
