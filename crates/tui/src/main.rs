@@ -2,9 +2,7 @@ use std::io::{self, Write};
 
 use std::path::PathBuf;
 
-use chronofish_alphazero::{
-    AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot, PolicyValueNetwork, SearchConfig,
-};
+use chronofish_alphazero::{AlphaNowBot, ChronofishBot, PolicyValueNetwork, SearchConfig};
 use chronofish_classic::{
     BlueshiftLevel, BobbyFissureBot, DeepBlueshift, Grabablanca, MonteCarlsen,
 };
@@ -32,13 +30,14 @@ impl From<Mode> for Ruleset {
 enum Opponent {
     #[default]
     Human,
-    /// Chronofish CPU: `AlphaZero` MCTS with the large network.
-    Cpu,
-    /// Chronofish GPU: `AlphaZero` MCTS with the balanced network.
-    Gpu,
+    /// Chronofish: `AlphaZero` MCTS guided by the trained network.
+    #[value(alias = "cpu")]
+    Chronofish,
     /// Bobby Fissure: uniformly random legal actions.
     Fissure,
+    /// Kairos: alpha-beta over complete 5D turns (5D modes only).
     Kairos,
+    /// Loki: Monte Carlo tree search over complete 5D turns (5D modes only).
     Loki,
     /// Grabablanca: greedy one-action lookahead.
     Grabablanca,
@@ -66,7 +65,7 @@ struct Cli {
     opponent: Opponent,
     #[arg(long, default_value_t = 48)]
     ai_simulations: usize,
-    /// Checkpoint for the network bots (cpu, gpu, alpha-now); untrained if omitted.
+    /// Checkpoint for the network bots (chronofish, alpha-now); untrained if omitted.
     #[arg(long)]
     model: Option<PathBuf>,
     /// Start from a file containing a 5DUCI move history.
@@ -93,13 +92,9 @@ fn make_opponent(cli: &Cli) -> Result<Option<Box<dyn AiPlayer>>, Box<dyn std::er
         .transpose()?;
     Ok(match cli.opponent {
         Opponent::Human => None,
-        Opponent::Cpu => Some(Box::new(model.map_or_else(
-            || ChronofishCpuBot::bootstrap(search, 0x0043_5055),
-            |model| ChronofishCpuBot::new(model, search, 0x0043_5055),
-        ))),
-        Opponent::Gpu => Some(Box::new(model.map_or_else(
-            || ChronofishGpuBot::bootstrap(search, 0x0047_5055),
-            |model| ChronofishGpuBot::new(model, search, 0x0047_5055),
+        Opponent::Chronofish => Some(Box::new(model.map_or_else(
+            || ChronofishBot::bootstrap(search, 0x0043_5055),
+            |model| ChronofishBot::new(model, search, 0x0043_5055),
         ))),
         Opponent::AlphaNow => Some(Box::new(
             model.map_or_else(|| AlphaNowBot::bootstrap(0x004e_4f57), AlphaNowBot::new),

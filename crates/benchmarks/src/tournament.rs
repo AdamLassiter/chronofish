@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use chronofish_alphazero::{AlphaNowBot, ChronofishCpuBot, PolicyValueNetwork, SearchConfig};
+use chronofish_alphazero::{AlphaNowBot, ChronofishBot, PolicyValueNetwork, SearchConfig};
 use chronofish_classic::eval::evaluate;
 use chronofish_classic::{
     BlueshiftConfig, BobbyFissureBot, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
@@ -41,7 +41,7 @@ const ROSTER: [&str; 8] = [
     "blueshift",
     "carlsen",
     "alpha-now",
-    "cpu",
+    "chronofish",
     "kairos",
     "loki",
 ];
@@ -90,7 +90,7 @@ impl RuleSelection {
 #[allow(clippy::struct_excessive_bools)]
 struct Arguments {
     /// Comma-separated bots: fissure, grabablanca, blueshift[-<nodes>[k]], carlsen,
-    /// alpha-now, cpu, kairos, loki, and with --stockfish sf-<elo> (1320–3190) or sf-skill<0-20>.
+    /// alpha-now, chronofish, kairos, loki, and with --stockfish sf-<elo> (1320–3190) or sf-skill<0-20>.
     #[arg(long, value_delimiter = ',', default_values_t = ROSTER.map(str::to_owned))]
     bots: Vec<String>,
     /// Random openings per ruleset; each pair plays every opening from both sides.
@@ -108,10 +108,10 @@ struct Arguments {
     /// wins; otherwise the game is drawn. Zero scores every unfinished game as a draw.
     #[arg(long, default_value_t = 400)]
     adjudicate_cp: i32,
-    /// Checkpoint for the network bots (alpha-now, cpu); untrained if omitted.
+    /// Checkpoint for the network bots (alpha-now, chronofish); untrained if omitted.
     #[arg(long)]
     model: Option<PathBuf>,
-    /// MCTS simulations per action for the cpu bot.
+    /// MCTS simulations per action for the chronofish bot.
     #[arg(long, default_value_t = 48)]
     simulations: usize,
     /// UCI engine binary for sf-* bots; defaults to $STOCKFISH.
@@ -153,7 +153,7 @@ enum Bot {
     Blueshift(usize),
     Carlsen,
     AlphaNow,
-    Cpu,
+    Chronofish,
     Kairos,
     Loki,
     Stockfish(Strength),
@@ -173,7 +173,8 @@ impl Bot {
             "blueshift" => Self::Blueshift(BlueshiftConfig::default().max_nodes),
             "carlsen" => Self::Carlsen,
             "alpha-now" => Self::AlphaNow,
-            "cpu" => Self::Cpu,
+            // `cpu` is the name from before the CPU and GPU bots were merged.
+            "chronofish" | "cpu" => Self::Chronofish,
             "kairos" => Self::Kairos,
             "loki" => Self::Loki,
             _ => {
@@ -220,7 +221,7 @@ impl Bot {
             Self::Blueshift(nodes) => format!("blueshift-{nodes}"),
             Self::Carlsen => "carlsen".to_owned(),
             Self::AlphaNow => "alpha-now".to_owned(),
-            Self::Cpu => "cpu".to_owned(),
+            Self::Chronofish => "chronofish".to_owned(),
             Self::Kairos => "kairos".to_owned(),
             Self::Loki => "loki".to_owned(),
             Self::Stockfish(Strength::Elo(elo)) => format!("sf-{elo}"),
@@ -242,7 +243,7 @@ impl Bot {
             Self::Blueshift(nodes) => format!("Deep Blueshift {nodes}"),
             Self::Carlsen => "Monte Carlsen".to_owned(),
             Self::AlphaNow => format!("AlphaNow{untrained}"),
-            Self::Cpu => format!("Chronofish CPU{untrained}"),
+            Self::Chronofish => format!("Chronofish{untrained}"),
             Self::Kairos => "Kairos".to_owned(),
             Self::Loki => "Loki".to_owned(),
             Self::Stockfish(Strength::Elo(elo)) => format!("Stockfish {elo}"),
@@ -303,9 +304,9 @@ impl Context {
                 || AlphaNowBot::bootstrap(seed),
                 |model| AlphaNowBot::new(model.clone()),
             )),
-            Bot::Cpu => Box::new(model.map_or_else(
-                || ChronofishCpuBot::bootstrap(search, seed),
-                |model| ChronofishCpuBot::new(model.clone(), search, seed),
+            Bot::Chronofish => Box::new(model.map_or_else(
+                || ChronofishBot::bootstrap(search, seed),
+                |model| ChronofishBot::new(model.clone(), search, seed),
             )),
             Bot::Kairos => Box::new(kairos::KairosBot::default()),
             Bot::Loki => Box::new(chronofish_ftxi::LokiBot::new(seed)),

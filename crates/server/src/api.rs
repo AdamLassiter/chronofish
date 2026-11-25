@@ -261,15 +261,19 @@ async fn users(State(state): State<AppState>) -> Result<Json<Vec<LobbyUser>>, Ap
         users
             .into_iter()
             .map(|user| {
-                let supported_rulesets = bots.get(&user.id).map(|bot| {
-                    [
-                        Ruleset::Standard,
-                        Ruleset::Multiverse,
-                        Ruleset::MultiverseVariant,
-                    ]
-                    .into_iter()
-                    .filter(|&ruleset| bot.supports_ruleset(ruleset))
-                    .collect()
+                // A bot account that no longer has a player keeps its history and
+                // rating but supports no ruleset, so it cannot be challenged.
+                let supported_rulesets = user.is_bot.then(|| {
+                    bots.get(&user.id).map_or_else(Vec::new, |bot| {
+                        [
+                            Ruleset::Standard,
+                            Ruleset::Multiverse,
+                            Ruleset::MultiverseVariant,
+                        ]
+                        .into_iter()
+                        .filter(|&ruleset| bot.supports_ruleset(ruleset))
+                        .collect()
+                    })
                 });
                 LobbyUser {
                     user,
@@ -331,7 +335,7 @@ async fn create_game(
                 .lock()
                 .expect("bot mutex poisoned")
                 .get(&opponent.id)
-                .is_some_and(|bot| !bot.supports_ruleset(ruleset))
+                .is_none_or(|bot| !bot.supports_ruleset(ruleset))
         {
             return Err(ApiError::bad_request("that bot does not play this ruleset"));
         }
@@ -1105,6 +1109,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn retired_bots_keep_their_accounts_but_cannot_be_challenged() {
+        let database = Database::in_memory().expect("database");
+        database
+            .ensure_bot("bot-chronofish-gpu", "Chronofish GPU", 1500)
+            .expect("retired bot");
+        let app = router(AppState::new(database, Vec::new()).expect("state"));
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({
+                "username": "retired-player",
+                "password": "correct horse battery staple"
+            })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+
+        let (_, users) = request(&app, "GET", "/api/users", Some(token), None).await;
+        let users = users.as_array().expect("users");
+        let retired = users
+            .iter()
+            .find(|user| user["username"] == "bot-chronofish-gpu")
+            .expect("retired account is still listed");
+        assert_eq!(retired["supportedRulesets"], json!([]));
+        let human = users
+            .iter()
+            .find(|user| user["username"] == "retired-player")
+            .expect("human account");
+        assert!(human["supportedRulesets"].is_null());
+
+        let (status, _) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(
+                json!({"opponent": "bot-chronofish-gpu", "ruleset": "standard", "playAs": "white"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

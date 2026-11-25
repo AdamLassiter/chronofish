@@ -182,6 +182,10 @@ impl Database {
             UPDATE users SET username = 'bot-bobby-fissure', display_name = 'Bobby Fissure'
              WHERE username = 'bot-raven' AND is_bot = 1
                AND NOT EXISTS (SELECT 1 FROM users WHERE username = 'bot-bobby-fissure');
+            -- Chronofish CPU and GPU merged into one bot; the CPU account carries on.
+            UPDATE users SET username = 'bot-chronofish', display_name = 'Chronofish'
+             WHERE username = 'bot-chronofish-cpu' AND is_bot = 1
+               AND NOT EXISTS (SELECT 1 FROM users WHERE username = 'bot-chronofish');
             ",
             )
     }
@@ -805,6 +809,29 @@ mod tests {
         assert_eq!(renamed.rating, 1234);
         assert_eq!(renamed.display_name, "Bobby Fissure");
         assert!(database.auth_by_username("bot-raven").unwrap().is_none());
+    }
+
+    #[test]
+    fn chronofish_cpu_is_renamed_to_chronofish_keeping_its_account() {
+        let database = Database::in_memory().expect("database");
+        let cpu = database
+            .ensure_bot("bot-chronofish-cpu", "Chronofish CPU", 1500)
+            .expect("legacy bot");
+        database.migrate().expect("migration");
+        database.migrate().expect("migration is idempotent");
+        let renamed = database
+            .auth_by_username("bot-chronofish")
+            .unwrap()
+            .expect("renamed account")
+            .user;
+        assert_eq!(renamed.id, cpu.id);
+        assert_eq!(renamed.display_name, "Chronofish");
+        assert!(
+            database
+                .auth_by_username("bot-chronofish-cpu")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

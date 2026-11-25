@@ -5,9 +5,7 @@ mod web;
 use std::path::Path;
 
 use axum::Router;
-use chronofish_alphazero::{
-    AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot, PolicyValueNetwork, SearchConfig,
-};
+use chronofish_alphazero::{AlphaNowBot, ChronofishBot, PolicyValueNetwork, SearchConfig};
 use chronofish_classic::{
     BlueshiftLevel, BobbyFissureBot, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
 };
@@ -27,49 +25,31 @@ impl AppState {
             simulations: env_parse("CHRONOFISH_AZ_SIMULATIONS")?.unwrap_or(48),
             ..SearchConfig::default()
         };
-        let cpu_network = load_network(
+        let network = load_network(
             std::env::var_os("CHRONOFISH_AZ_MODEL"),
             "models/training/best-v2.json",
-            "Chronofish CPU and AlphaNow",
+            "Chronofish and AlphaNow",
         )?;
-        let muninn = cpu_network.clone().map_or_else(
-            || ChronofishCpuBot::bootstrap(search, 0x4d55_4e49_4e4e),
-            |network| ChronofishCpuBot::new(network, search, 0x4d55_4e49_4e4e),
+        let chronofish = network.clone().map_or_else(
+            || ChronofishBot::bootstrap(search, 0x4d55_4e49_4e4e),
+            |network| ChronofishBot::new(network, search, 0x4d55_4e49_4e4e),
         );
-        let alpha_now = cpu_network.map_or_else(
+        let alpha_now = network.map_or_else(
             || AlphaNowBot::bootstrap(0x4e4f_5741_4c50_4841),
             AlphaNowBot::new,
         );
-        let chronofish = load_network(
-            std::env::var_os("CHRONOFISH_GPU_MODEL"),
-            "models/training-gpu/best-v2.json",
-            "Chronofish GPU",
-        )?
-        .map_or_else(
-            || ChronofishGpuBot::bootstrap(search, 0x4855_4749_4e4e),
-            |network| ChronofishGpuBot::new(network, search, 0x4855_4749_4e4e),
-        );
-        let reference_policy = load_network(
+        let reference_network = load_network(
             std::env::var_os("CHRONOFISH_REFERENCE_AZ_MODEL"),
             "models/training/best-reference-v3.json",
-            "Chronofish CPU and AlphaNow (5D)",
+            "Chronofish and AlphaNow (5D)",
         )?;
-        let reference_now = reference_policy.clone().map_or_else(
+        let reference_chronofish = reference_network.clone().map_or_else(
+            || ChronofishBot::bootstrap(search, 0x4d55_4e49_4e4e),
+            |network| ChronofishBot::new(network, search, 0x4d55_4e49_4e4e),
+        );
+        let reference_now = reference_network.map_or_else(
             || AlphaNowBot::bootstrap(0x4e4f_5741_4c50_4841),
             AlphaNowBot::new,
-        );
-        let reference_muninn = reference_policy.map_or_else(
-            || ChronofishCpuBot::bootstrap(search, 0x4d55_4e49_4e4e),
-            |model| ChronofishCpuBot::new(model, search, 0x4d55_4e49_4e4e),
-        );
-        let reference_accelerated = load_network(
-            std::env::var_os("CHRONOFISH_REFERENCE_GPU_MODEL"),
-            "models/training-gpu/best-reference-v3.json",
-            "Chronofish GPU (5D)",
-        )?
-        .map_or_else(
-            || ChronofishGpuBot::bootstrap(search, 0x4855_4749_4e4e),
-            |model| ChronofishGpuBot::new(model, search, 0x4855_4749_4e4e),
         );
         let blueshift = DeepBlueshift::level(BlueshiftLevel::Hard).with_max_nodes(
             env_parse("CHRONOFISH_BLUESHIFT_NODES")?.unwrap_or(BlueshiftLevel::Hard.max_nodes()),
@@ -98,12 +78,8 @@ impl AppState {
                     reference: reference_now,
                 }),
                 Box::new(RulesetBot {
-                    standard: muninn,
-                    reference: reference_muninn,
-                }),
-                Box::new(RulesetBot {
                     standard: chronofish,
-                    reference: reference_accelerated,
+                    reference: reference_chronofish,
                 }),
             ],
         )

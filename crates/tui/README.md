@@ -8,7 +8,7 @@ cargo run -p chronofish-tui -- --mode multiverse --opponent blueshift
 
 Modes are `standard`, `multiverse`, and `variant`. The terminal accepts
 `move T0L0:e2 T0L0:e4`, `submit`, `undo`, `legal`, `boards`, and `quit`.
-Choose an opponent with `--opponent fissure|grabablanca|blueshift-easy|blueshift-medium|blueshift|carlsen|alpha-now|cpu|gpu|kairos|loki`. Kairos and Loki support both 5D modes.
+Choose an opponent with `--opponent fissure|grabablanca|blueshift-easy|blueshift-medium|blueshift|carlsen|alpha-now|chronofish|kairos|loki`. Kairos and Loki play only the 5D modes, so the client refuses them with `--mode standard`.
 Pass `--model FILE` for a neural checkpoint.
 
 ## Game files
