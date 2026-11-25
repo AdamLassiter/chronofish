@@ -25,7 +25,7 @@ pub struct CarlsenConfig {
 impl Default for CarlsenConfig {
     fn default() -> Self {
         Self {
-            iterations: 300,
+            iterations: 1200,
             rollout_actions: 12,
             exploration: 1.4,
             capture_bias: 0.7,

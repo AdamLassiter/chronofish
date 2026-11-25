@@ -26,7 +26,7 @@ pub struct BlueshiftConfig {
 impl Default for BlueshiftConfig {
     fn default() -> Self {
         Self {
-            max_nodes: 15_000,
+            max_nodes: 80_000,
             max_depth: 8,
             quiescence_depth: 4,
         }

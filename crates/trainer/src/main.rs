@@ -1,6 +1,8 @@
 mod dashboard;
+mod setup;
 
 use std::error::Error;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -14,7 +16,7 @@ use chronofish_alphazero::{
 };
 use chronofish_core::{Game, Ruleset, Side};
 use chronofish_neural::VulkanTrainingDevice;
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -157,6 +159,9 @@ struct Arguments {
     /// Print plain line-oriented progress instead of the live terminal dashboard.
     #[arg(long)]
     plain: bool,
+    /// Start immediately with these arguments instead of opening the interactive setup screen.
+    #[arg(long)]
+    skip_setup: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -306,32 +311,19 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let arguments = Arguments::parse();
-    if arguments.threads == 0 {
-        return Err("--threads must be greater than zero".into());
-    }
-    if arguments.mcts_batch_size == 0 || arguments.inference_batch_size == 0 {
-        return Err(
-            "--mcts-batch-size and --inference-batch-size must be greater than zero".into(),
-        );
-    }
-    if arguments.inference_memory_budget_mib == 0
-        || arguments.training_memory_budget_mib == 0
-        || arguments.reconstruction_memory_budget_mib == 0
-        || arguments.training_examples == 0
+    let matches = Arguments::command().get_matches();
+    let mut arguments = Arguments::from_arg_matches(&matches)?;
+    if !arguments.plain
+        && !arguments.skip_setup
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
     {
-        return Err("memory budgets and --training-examples must be greater than zero".into());
+        match setup::run(&matches)? {
+            Some(chosen) => arguments = chosen,
+            None => return Ok(()),
+        }
     }
-    if arguments.simulations == 0
-        || arguments.arena_simulations == 0
-        || arguments.max_actions == 0
-        || arguments.arena_max_actions == 0
-    {
-        return Err("search simulations and action limits must be greater than zero".into());
-    }
-    if !arguments.promotion_score.is_finite() || !(0.0..=1.0).contains(&arguments.promotion_score) {
-        return Err("--promotion-score must be finite and between zero and one".into());
-    }
+    validate(&arguments)?;
     if !arguments.plain && !arguments.check_training_device {
         dashboard::start();
     }
@@ -1360,6 +1352,42 @@ fn request_dimensions(request: &InferenceRequest) -> (usize, usize) {
                 actions.max(position.actions.len()),
             )
         })
+}
+
+/// Rejects argument combinations that parse but cannot run.
+fn validate(arguments: &Arguments) -> Result<(), String> {
+    if arguments.threads == 0 {
+        return Err(String::from("--threads must be greater than zero"));
+    }
+    if arguments.mcts_batch_size == 0 || arguments.inference_batch_size == 0 {
+        return Err(String::from(
+            "--mcts-batch-size and --inference-batch-size must be greater than zero",
+        ));
+    }
+    if arguments.inference_memory_budget_mib == 0
+        || arguments.training_memory_budget_mib == 0
+        || arguments.reconstruction_memory_budget_mib == 0
+        || arguments.training_examples == 0
+    {
+        return Err(String::from(
+            "memory budgets and --training-examples must be greater than zero",
+        ));
+    }
+    if arguments.simulations == 0
+        || arguments.arena_simulations == 0
+        || arguments.max_actions == 0
+        || arguments.arena_max_actions == 0
+    {
+        return Err(String::from(
+            "search simulations and action limits must be greater than zero",
+        ));
+    }
+    if !arguments.promotion_score.is_finite() || !(0.0..=1.0).contains(&arguments.promotion_score) {
+        return Err(String::from(
+            "--promotion-score must be finite and between zero and one",
+        ));
+    }
+    Ok(())
 }
 
 fn default_threads() -> usize {

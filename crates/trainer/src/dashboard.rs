@@ -310,13 +310,15 @@ pub fn start() -> bool {
     if !io::stdout().is_terminal() || DASHBOARD.get().is_some() {
         return DASHBOARD.get().is_some();
     }
-    let terminal = match ratatui::try_init() {
+    let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {
             eprintln!("warning: live dashboard unavailable ({error}); using plain output");
             return false;
         }
     };
+    // The setup screen may have just used the same terminal.
+    let _ = terminal.clear();
     let dashboard = DASHBOARD.get_or_init(|| Dashboard {
         state: Mutex::new(State::new()),
         stop: AtomicBool::new(false),
