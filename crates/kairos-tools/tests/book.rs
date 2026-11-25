@@ -1,15 +1,15 @@
 //! The opening book (data/book_theory.txt, from data/book_theory_src.txt) and `OwnBook`.
 
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
-use kairos::engine::ab::AlphaBeta;
-use kairos::engine::book::{Book, generate_tuned};
-use kairos::engine::{Limits, OptionValue};
-use kairos::web::api::{Api, resolve_position};
-use kairos::web::tree::{parse_lan_moves, play_action};
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::engine::ab::AlphaBeta;
+use kairos_tools::engine::book::{Book, generate_tuned};
+use kairos_tools::engine::{Limits, OptionValue};
+use kairos_tools::web::api::{Api, resolve_position};
+use kairos_tools::web::tree::{parse_lan_moves, play_action};
 use std::sync::atomic::AtomicBool;
 
 const SRC: &str = include_str!("../data/book_theory_src.txt");
-const BOOK: &str = include_str!("../data/book_theory.txt");
+const BOOK: &str = include_str!("../../kairos/data/book_theory.txt");
 const TUNING: &str = include_str!("../data/book_tuning.txt");
 
 fn lf(s: &str) -> String {
@@ -17,7 +17,7 @@ fn lf(s: &str) -> String {
 }
 
 /// A variant's start position followed by 5DUCI moves.
-fn position(variant: &str, moves: &str) -> kairos::core::state::State {
+fn position(variant: &str, moves: &str) -> kairos_tools::core::state::State {
     let mut s = position_from_uci(&resolve_position(variant).unwrap()).unwrap();
     apply_uci_moves(&mut s, moves).unwrap();
     s
@@ -28,7 +28,7 @@ fn book_file_is_generated_from_its_source() {
     assert_eq!(
         lf(&generate_tuned(&lf(SRC), &lf(TUNING)).expect("source and tuning build")),
         lf(BOOK),
-        "run `ktools bookgen > data/book_theory.txt`"
+        "run `ktools bookgen > ../kairos/data/book_theory.txt`"
     );
 }
 
@@ -183,7 +183,10 @@ fn search(own_book: Option<bool>, variant: &str, moves: &str) -> (String, Vec<St
         &AtomicBool::new(false),
         &mut |l| lines.push(l),
     );
-    (kairos::web::tree::action_lan(&s, &best.unwrap()), lines)
+    (
+        kairos_tools::web::tree::action_lan(&s, &best.unwrap()),
+        lines,
+    )
 }
 
 #[test]
@@ -406,7 +409,7 @@ fn api_opening_follows_the_selected_branch_and_survives_leaving_the_book() {
     let mut api = Api::new();
     let mut call = |request: &str| {
         let response = api.call(request, &mut |_| {});
-        let json = kairos::web::json::Json::parse(&response).unwrap();
+        let json = kairos_tools::web::json::Json::parse(&response).unwrap();
         assert_eq!(json.get("ok").bool(), Some(true), "{response}");
         json
     };
@@ -494,7 +497,7 @@ fn moves_that_transpose_into_the_book_are_listed_and_played() {
     assert!(
         t.iter().any(|m| m.lan == "(0T2)g1f3"
             && m.play
-            && m.weight == kairos::engine::book::TRANSPOSE_WEIGHT),
+            && m.weight == kairos_tools::engine::book::TRANSPOSE_WEIGHT),
         "{:?}",
         t.iter().map(|m| &m.lan).collect::<Vec<_>>()
     );
@@ -558,9 +561,9 @@ fn a_transposed_order_keeps_only_moves_that_still_do_the_same() {
         b.probe(&book_order)
             .is_some_and(|m| m.iter().any(|m| m.lan == "(0T4)d8a5"))
     );
-    let mated = |s: &kairos::core::state::State| {
+    let mated = |s: &kairos_tools::core::state::State| {
         let mut t = s.clone();
-        kairos::core::variants::apply_uci_moves(&mut t, "(0T4)d8a5 submit").unwrap();
+        kairos_tools::core::variants::apply_uci_moves(&mut t, "(0T4)d8a5 submit").unwrap();
         t
     };
     assert!(

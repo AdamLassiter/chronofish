@@ -1140,7 +1140,9 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
+ "chronofish-ftxi",
  "clap",
+ "kairos",
  "rand_chacha 0.9.0",
  "rayon",
 ]
@@ -1170,6 +1172,7 @@ name = "chronofish-ftxi"
 version = "0.6.0"
 dependencies = [
  "chronofish-5d-rules",
+ "chronofish-core",
  "chronofish-notation",
  "rand 0.9.5",
 ]
@@ -1209,6 +1212,8 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
+ "chronofish-ftxi",
+ "kairos",
  "rand_core 0.6.4",
  "rusqlite",
  "serde",
@@ -1242,8 +1247,10 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
+ "chronofish-ftxi",
  "chronofish-notation",
  "clap",
+ "kairos",
 ]
 
 [[package]]
@@ -3564,7 +3571,20 @@ name = "kairos"
 version = "0.1.0"
 dependencies = [
  "chronofish-5d-rules",
+ "chronofish-core",
  "chronofish-notation",
+]
+
+[[package]]
+name = "kairos-tools"
+version = "0.6.0"
+dependencies = [
+ "chronofish-5d-rules",
+ "chronofish-core",
+ "chronofish-ftxi",
+ "chronofish-notation",
+ "kairos",
+ "rand 0.9.5",
 ]
 
 [[package]]

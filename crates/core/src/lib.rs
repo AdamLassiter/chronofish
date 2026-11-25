@@ -25,4 +25,4 @@ pub use player::{AiDecision, AiPlayer, AiProfile, GameView};
 
 pub(crate) use model::*;
 
-pub use reference::reference_setup;
+pub use reference::{ReferenceBotTurn, reference_setup};

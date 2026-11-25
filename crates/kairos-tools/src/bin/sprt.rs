@@ -4,14 +4,14 @@
 //! --unpaired: each game of a pair gets its own generated opening (self-play data: identical
 //! deterministic engines would otherwise replay the same game with colours swapped).
 
-use kairos::core::action::{ExtMove, MoveSeq};
-use kairos::core::hypercuboid::{HcCursor, HcInfo};
-use kairos::core::promotion::PromotionOptions;
-use kairos::core::state::{MateType, State};
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
-use kairos::engine::ab::{AlphaBeta, MATE};
-use kairos::engine::{Limits, OptionValue, REPORT_SCALE, report_cp};
-use kairos::misc::ordering::{AxisOrders, HcOrdering};
+use kairos_tools::core::action::{ExtMove, MoveSeq};
+use kairos_tools::core::hypercuboid::{HcCursor, HcInfo};
+use kairos_tools::core::promotion::PromotionOptions;
+use kairos_tools::core::state::{MateType, State};
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::engine::ab::{AlphaBeta, MATE};
+use kairos_tools::engine::{Limits, OptionValue, REPORT_SCALE, report_cp};
+use kairos_tools::misc::ordering::{AxisOrders, HcOrdering};
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -1522,7 +1522,7 @@ mod tests {
     fn delay_clock_charges() {
         let c = Clock::parse("20+0/d0.2/t0.5").unwrap();
         // The start position has one active timeline: 200 + 500 ms of delay.
-        let s = kairos::core::variants::startpos();
+        let s = kairos_tools::core::variants::startpos();
         assert_eq!(s.active_timelines(), 1);
         let d = c.delay_at(&s);
         assert_eq!(d, 700);

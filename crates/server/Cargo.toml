@@ -6,6 +6,8 @@ license.workspace = true
 description = "Authoritative multiplayer web server for Chronofish"
 
 [dependencies]
+kairos = { path = "../kairos" }
+chronofish-ftxi = { path = "../ftxi" }
 argon2 = "0.5"
 axum = "0.8"
 chronofish-alphazero = { path = "../alphazero" }

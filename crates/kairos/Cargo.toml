@@ -9,26 +9,11 @@ license = "GPL-3.0-only"
 name = "kairos"
 path = "src/lib.rs"
 
-[[bin]]
-name = "kairos"
-path = "src/bin/kairos.rs"
-
-[[bin]]
-name = "ktools"
-path = "src/bin/ktools.rs"
-
-[[bin]]
-name = "sprt"
-path = "src/bin/sprt.rs"
-
-[[bin]]
-name = "tune"
-path = "src/bin/tune.rs"
-
 [features]
 prof = ["chronofish-5d-rules/prof"]
 
 [dependencies]
+chronofish-core = { path = "../core" }
 chronofish-5d-rules = { path = "../5d-rules" }
 chronofish-notation = { path = "../notation" }
 

@@ -172,26 +172,7 @@ pub fn branch_of(s: &State, m: &ExtMove) -> Option<(i32, i32)> {
 
 pub use crate::core::referee::{apply_draft_move, play_action};
 
-/// Parse a list of LAN tokens (`submit` tokens are ignored).
-pub fn parse_lan_moves(text: &str) -> Result<Vec<ExtMove>, String> {
-    text.split_whitespace()
-        .filter(|t| *t != "submit")
-        .map(ExtMove::parse)
-        .collect()
-}
-
-/// The action's LAN tokens, played in order from `s`.
-pub fn action_lan(s: &State, act: &Action) -> String {
-    let mut os = s.clone();
-    let mut parts = Vec::new();
-    for em in act.moves() {
-        parts.push(em.lan(&os));
-        if let Some(n) = os.normalize_promotion(*em) {
-            os.apply_ext::<false>(n);
-        }
-    }
-    parts.join(" ")
-}
+pub use chronofish_notation::{action_lan, parse_lan_moves};
 
 impl Game {
     pub fn new(start: &str) -> Result<Game, String> {

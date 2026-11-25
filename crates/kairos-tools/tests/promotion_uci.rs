@@ -1,7 +1,7 @@
 //! The 5DUCI `position` argument carries the pieces pawns promote to.
 
-use kairos::core::promotion::{PromotionOptions, format_promotions};
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::core::promotion::{PromotionOptions, format_promotions};
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
 
 const BOARD: &str = "[4k3/P7/8/8/8/8/8/4K3:0:1:w]";
 
@@ -27,8 +27,8 @@ fn only_the_listed_pieces_are_legal() {
 /// Kxf7 2. h8=N# is mate in 2, while promoting to a queen mates later.
 #[test]
 fn the_search_underpromotes() {
-    use kairos::engine::Limits;
-    use kairos::engine::ab::AlphaBeta;
+    use kairos_tools::engine::Limits;
+    use kairos_tools::engine::ab::AlphaBeta;
     use std::sync::atomic::AtomicBool;
     const FEN: &str = "[5bk*1/5N2/7P/6K1/8/8/8/8:0:1:w]";
     let search = |promotions: &str, moves: &str, depth: u32| {

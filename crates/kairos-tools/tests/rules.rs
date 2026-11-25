@@ -1,8 +1,8 @@
 //! Rules regressions found by cross-checking against other implementations (see RULES_VERIFICATION.md).
 
-use kairos::core::perft::parse_g_line;
-use kairos::core::state::State;
-use kairos::core::vec4::Vec4;
+use kairos_tools::core::perft::parse_g_line;
+use kairos_tools::core::state::State;
+use kairos_tools::core::vec4::Vec4;
 
 /// Destination squares (x, y) of the piece on (x, y) of the side to move's board (l, t).
 fn targets(s: &State, l: i32, t: i32, x: i32, y: i32) -> Vec<(i32, i32, i32, i32)> {
@@ -27,7 +27,9 @@ fn en_passant_right_after_a_timeline_starts() {
         targets(&s, 0, 5, 2, 3)
     );
     let mut t = s.clone();
-    assert!(t.apply_move::<false>(kairos::core::action::FullMove::parse("(0T5)c4b3").unwrap()));
+    assert!(
+        t.apply_move::<false>(kairos_tools::core::action::FullMove::parse("(0T5)c4b3").unwrap())
+    );
     assert_eq!(t.board(0, 6, false).get_fen(false), "4k3/8/8/8/8/1p6/8/4K3");
 }
 
@@ -55,8 +57,8 @@ fn no_en_passant_against_a_pawn_that_did_not_just_double_step() {
 fn check_on_an_untouchable_opponent_board_is_mate() {
     // Black's queen on the inactive timeline -2 (Black to move there) attacks White's king on
     // the same board. Nothing White plays changes that board, so no action is legal.
-    use kairos::core::hypercuboid::HcInfo;
-    use kairos::core::state::MateType;
+    use kairos_tools::core::hypercuboid::HcInfo;
+    use kairos_tools::core::state::MateType;
     let s = parse_g_line(
         "G 1 size 8x8 odd fen [4k3/8/8/8/8/8/8/4K3:0:1:w][4k3/8/8/8/8/8/8/4K3:-1:1:w][4k3/8/8/8/8/8/8/q3K3:-2:1:b]",
     )
@@ -73,8 +75,12 @@ fn moves_only_from_playable_boards() {
     // After e2e4 the T1 board is no longer playable: a second move from it is rejected.
     let s = parse_g_line("G 1 size 8x8 odd fen [r*nbqk*bnr*/p*p*p*p*p*p*p*p*/8/8/8/8/P*P*P*P*P*P*P*P*/R*NBQK*BNR*:0:1:w]").unwrap();
     let mut t = s.clone();
-    assert!(t.apply_move::<false>(kairos::core::action::FullMove::parse("(0T1)e2e4").unwrap()));
-    assert!(!t.apply_move::<false>(kairos::core::action::FullMove::parse("(0T1)d2d4").unwrap()));
+    assert!(
+        t.apply_move::<false>(kairos_tools::core::action::FullMove::parse("(0T1)e2e4").unwrap())
+    );
+    assert!(
+        !t.apply_move::<false>(kairos_tools::core::action::FullMove::parse("(0T1)d2d4").unwrap())
+    );
     assert!(parse_g_line("G 1 size 8x8 odd fen [r*nbqk*bnr*/p*p*p*p*p*p*p*p*/8/8/8/8/P*P*P*P*P*P*P*P*/R*NBQK*BNR*:0:1:w] moves (0T1)e2e4 (0T1)d2d4 submit").is_err());
 }
 
@@ -97,7 +103,9 @@ fn castling_on_boards_narrower_than_eight_files() {
         k
     );
     let mut t = s.clone();
-    assert!(t.apply_move::<false>(kairos::core::action::FullMove::parse("(0T1)d1f1").unwrap()));
+    assert!(
+        t.apply_move::<false>(kairos_tools::core::action::FullMove::parse("(0T1)d1f1").unwrap())
+    );
     assert_eq!(
         t.board(0, 1, true).get_fen(false),
         "r2k2r/ppppppp/7/7/7/PPPPPPP/R3RK1"
@@ -107,7 +115,8 @@ fn castling_on_boards_narrower_than_eight_files() {
 /// Castle on (l, t) with the king on (x, 0) to (to_x, 0) and return the new rank 1.
 fn castle(s: &State, x: i32, to_x: i32) -> String {
     let mut t = s.clone();
-    let m = kairos::core::action::FullMove::new(Vec4::new(x, 0, 1, 0), Vec4::new(to_x, 0, 1, 0));
+    let m =
+        kairos_tools::core::action::FullMove::new(Vec4::new(x, 0, 1, 0), Vec4::new(to_x, 0, 1, 0));
     assert!(
         t.apply_move::<false>(m),
         "castling {} -> {} rejected",
@@ -173,8 +182,8 @@ fn a_brawn_on_its_own_back_rank_does_not_promote_moving_through_time() {
         if t == 1
             && black
             && s.board(l, 1, true)
-                .get_piece(kairos::core::piece::ppos(0, 4))
-                == kairos::core::piece::BRAWN_B
+                .get_piece(kairos_tools::core::piece::ppos(0, 4))
+                == kairos_tools::core::piece::BRAWN_B
         {
             jumps.extend(
                 targets(&s, l, 1, 0, 4)
@@ -186,17 +195,19 @@ fn a_brawn_on_its_own_back_rank_does_not_promote_moving_through_time() {
     }
     assert!(!jumps.is_empty(), "no back-rank jump for the brawn");
     for (l, (tl, tt, tx, ty)) in jumps {
-        let fm =
-            kairos::core::action::FullMove::new(Vec4::new(0, 4, 1, l), Vec4::new(tx, ty, tt, tl));
+        let fm = kairos_tools::core::action::FullMove::new(
+            Vec4::new(0, 4, 1, l),
+            Vec4::new(tx, ty, tt, tl),
+        );
         let e = s
-            .normalize_promotion(kairos::core::action::ExtMove::new(
+            .normalize_promotion(kairos_tools::core::action::ExtMove::new(
                 fm,
-                kairos::core::piece::NO_PIECE,
+                kairos_tools::core::piece::NO_PIECE,
             ))
             .unwrap();
         assert_eq!(
             e.promote_to,
-            kairos::core::piece::NO_PIECE,
+            kairos_tools::core::piece::NO_PIECE,
             "promoted on its own back rank: {:?}",
             fm
         );

@@ -1,8 +1,8 @@
 //! Limited levels should retain basic board-local tactical competence.
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
-use kairos::engine::ab::AlphaBeta;
-use kairos::engine::{Limits, OptionValue};
-use kairos::web::tree::action_lan;
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::engine::ab::AlphaBeta;
+use kairos_tools::engine::{Limits, OptionValue};
+use kairos_tools::web::tree::action_lan;
 use std::sync::atomic::AtomicBool;
 
 #[test]

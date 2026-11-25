@@ -9,7 +9,6 @@ pub mod nnue;
 pub mod sac;
 mod skill;
 pub mod time;
-pub mod uci;
 
 /// Scale of reported scores: `score cp X` is `s * 100 / REPORT_SCALE` for internal score `s`,
 /// so +100 is about a 75% expected score, +200 about 90% and +400 about 99%.

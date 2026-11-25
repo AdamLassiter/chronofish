@@ -1,9 +1,8 @@
 //! 5DUCI protocol loop (engine side).
 
-use super::ab::AlphaBeta;
-use super::{Limits, OptionValue};
 use crate::core::state::State;
 use crate::core::variants::{position_from_uci, startpos};
+use kairos::engine::{Limits, OptionValue, ab::AlphaBeta};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -78,11 +77,11 @@ pub fn run(engine: AlphaBeta) {
                 out("option name Hash type spin default 64 min 1 max 65536");
                 out(&format!(
                     "option name Threads type spin default 1 min 1 max {}",
-                    super::ab::MAX_THREADS
+                    kairos::engine::ab::MAX_THREADS
                 ));
                 out(&format!(
                     "option name MultiPV type spin default 1 min 1 max {}",
-                    super::ab::MAX_MULTIPV
+                    kairos::engine::ab::MAX_MULTIPV
                 ));
                 out("option name OwnBook type check default false");
                 out("option name MateVerify type string default auto");

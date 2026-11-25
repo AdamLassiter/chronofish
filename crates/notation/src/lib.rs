@@ -18,5 +18,6 @@ pub use chronofish_pgn::{export_5dpgn, export_5dpgn_for};
 #[cfg(feature = "chronofish")]
 pub use lan::{decode_lan, format_lan, replay_lan};
 pub use position::{
-    apply_uci_moves, parse_board_fen_metadata, parse_g_line, position_from_uci, replay_checked_uci,
+    action_lan, apply_uci_moves, parse_board_fen_metadata, parse_g_line, parse_lan_moves,
+    position_from_uci, replay_checked_uci, setup_to_uci,
 };

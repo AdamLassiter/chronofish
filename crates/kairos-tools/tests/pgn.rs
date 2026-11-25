@@ -1,12 +1,12 @@
 //! 5dpgn parser and printer: the files in tests/data/pgn, round trips, and (ignored) the
 //! external corpus.
 
-use kairos::core::action::Action;
-use kairos::core::hypercuboid::HcInfo;
-use kairos::core::promotion::PromotionOptions;
-use kairos::core::state::State;
-use kairos::core::variants::{VariantSetup, parse_board_fen_metadata, state_from_setup};
-use kairos::web::pgn::*;
+use kairos_tools::core::action::Action;
+use kairos_tools::core::hypercuboid::HcInfo;
+use kairos_tools::core::promotion::PromotionOptions;
+use kairos_tools::core::state::State;
+use kairos_tools::core::variants::{VariantSetup, parse_board_fen_metadata, state_from_setup};
+use kairos_tools::web::pgn::*;
 use std::path::{Path, PathBuf};
 
 const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/pgn");

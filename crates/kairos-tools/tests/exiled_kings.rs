@@ -1,9 +1,9 @@
 //! The exiled-kings tournament rule: at a stalemate, a side without a royal piece on the
 //! latest board of every active timeline loses.
 
-use kairos::core::state::State;
-use kairos::core::variants::state_from_setup;
-use kairos::web::pgn::*;
+use kairos_tools::core::state::State;
+use kairos_tools::core::variants::state_from_setup;
+use kairos_tools::web::pgn::*;
 
 const GAME: &str = include_str!("data/pgn/exiled_kings.5dpgn");
 
@@ -33,7 +33,7 @@ fn white_is_the_exiled_side_in_the_example_game() {
 
 #[test]
 fn nobody_is_exiled_in_the_start_position() {
-    let s = kairos::core::variants::startpos();
+    let s = kairos_tools::core::variants::startpos();
     assert_eq!(s.exiled_kings_loser(), None);
 }
 
@@ -43,7 +43,7 @@ fn the_action_that_ends_the_game_by_exiled_kings_is_written_with_a_mate_symbol()
     // with a side exiled, and is written like a mate (`#`) though it need not be a check; the
     // actions before it carry no `#`.
     let line = include_str!("data/exiled_kings_record.jsonl");
-    let l = kairos::web::record::load(line, None).expect("record");
+    let l = kairos_tools::web::record::load(line, None).expect("record");
     let main = l.game.mainline();
     let last = *main.last().unwrap();
     assert!(

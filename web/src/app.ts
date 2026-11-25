@@ -21,6 +21,7 @@ interface User {
   isBot: boolean;
   rating: number;
   gamesPlayed: number;
+  supportedRulesets?: Ruleset[];
 }
 
 interface Position {
@@ -281,6 +282,30 @@ async function logout(): Promise<void> {
   show("auth-view");
 }
 
+function updateOpponents(): void {
+  const user = currentUser();
+  const opponent = element<HTMLSelectElement>(
+    "#new-game-form select[name=opponent]",
+  );
+  const ruleset = element<HTMLSelectElement>("#new-game-form select[name=ruleset]").value as Ruleset;
+  const selected = opponent.value;
+  opponent.replaceChildren(
+    ...state.users
+      .filter((candidate) =>
+        candidate.id !== user.id && (candidate.supportedRulesets?.includes(ruleset) ?? true),
+      )
+      .map((candidate) => {
+        const option = document.createElement("option");
+        option.value = candidate.username;
+        option.textContent = `${candidate.displayName}${candidate.isBot ? " · bot" : ""} (${candidate.rating})`;
+        return option;
+      }),
+  );
+  if (Array.from(opponent.options).some((option) => option.value === selected)) {
+    opponent.value = selected;
+  }
+}
+
 async function loadLobby(): Promise<void> {
   stopPolling();
   const [games, users, leaders] = await Promise.all([
@@ -289,20 +314,7 @@ async function loadLobby(): Promise<void> {
     api<User[]>("/api/leaderboard"),
   ]);
   state.users = users;
-  const user = currentUser();
-  const opponent = element<HTMLSelectElement>(
-    "#new-game-form select[name=opponent]",
-  );
-  opponent.replaceChildren(
-    ...users
-      .filter((candidate) => candidate.id !== user.id)
-      .map((candidate) => {
-        const option = document.createElement("option");
-        option.value = candidate.username;
-        option.textContent = `${candidate.displayName}${candidate.isBot ? " · bot" : ""} (${candidate.rating})`;
-        return option;
-      }),
-  );
+  updateOpponents();
   const list = element("#game-list");
   if (games.length === 0)
     list.innerHTML = "<p>No games yet. Challenge a bot or another account.</p>";
@@ -1105,6 +1117,7 @@ authForm.onsubmit = (event) => {
 };
 
 const newGameForm = element<HTMLFormElement>("#new-game-form");
+element<HTMLSelectElement>("#new-game-form select[name=ruleset]").onchange = updateOpponents;
 newGameForm.onsubmit = (event) => {
   event.preventDefault();
   void (async () => {

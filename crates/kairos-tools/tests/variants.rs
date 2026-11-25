@@ -1,9 +1,11 @@
 //! Every built-in variant sets up, can move, and round-trips through its 5DUCI position and its
 //! 5dpgn Board header.
 
-use kairos::core::state::MateType;
-use kairos::core::variants::{VARIANT_NAMES, default_variant, position_from_uci, state_from_setup};
-use kairos::web::record;
+use kairos_tools::core::state::MateType;
+use kairos_tools::core::variants::{
+    VARIANT_NAMES, default_variant, position_from_uci, state_from_setup,
+};
+use kairos_tools::web::record;
 
 #[test]
 fn every_variant_sets_up_and_can_move() {

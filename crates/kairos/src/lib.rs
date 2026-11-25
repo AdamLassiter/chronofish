@@ -13,6 +13,7 @@ pub mod core {
         pub use chronofish_notation::parse_g_line;
     }
 }
+mod bot;
+pub use bot::KairosBot;
 pub mod engine;
 pub mod misc;
-pub mod web;

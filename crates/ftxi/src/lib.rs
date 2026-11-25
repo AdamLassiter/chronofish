@@ -3,6 +3,8 @@
 //! The reference is ftxi's `5dchess_engine` at `664277d`, particularly
 //! src/engine/uct.h. Selection shares statistics across prefixes of legal hypercuboid points.
 
+mod bot;
+pub use bot::LokiBot;
 mod linear;
 pub use linear::LinearProfile;
 

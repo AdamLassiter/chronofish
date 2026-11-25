@@ -38,6 +38,8 @@ enum Opponent {
     Gpu,
     /// Bobby Fissure: uniformly random legal actions.
     Fissure,
+    Kairos,
+    Loki,
     /// Grabablanca: greedy one-action lookahead.
     Grabablanca,
     /// Deep Blueshift: alpha-beta search with a handcrafted evaluation.
@@ -103,6 +105,8 @@ fn make_opponent(cli: &Cli) -> Result<Option<Box<dyn AiPlayer>>, Box<dyn std::er
             model.map_or_else(|| AlphaNowBot::bootstrap(0x004e_4f57), AlphaNowBot::new),
         )),
         Opponent::Fissure => Some(Box::new(BobbyFissureBot::default())),
+        Opponent::Kairos => Some(Box::new(kairos::KairosBot::default())),
+        Opponent::Loki => Some(Box::new(chronofish_ftxi::LokiBot::default())),
         Opponent::Grabablanca => Some(Box::new(Grabablanca::default())),
         Opponent::Blueshift => Some(Box::new(DeepBlueshift::level(BlueshiftLevel::Hard))),
         Opponent::BlueshiftEasy => Some(Box::new(DeepBlueshift::level(BlueshiftLevel::Easy))),
@@ -115,6 +119,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let mut bot = make_opponent(&cli)?;
     let mut game = Game::new(cli.mode.into());
+    if let Some(player) = &bot
+        && !player.supports_ruleset(game.ruleset())
+    {
+        return Err(format!(
+            "{} cannot play {}",
+            player.profile().display_name,
+            game.ruleset()
+        )
+        .into());
+    }
     if cli.export_pgn.is_some() && game.ruleset() == Ruleset::Standard {
         return Err("--export-pgn requires a 5D mode".into());
     }

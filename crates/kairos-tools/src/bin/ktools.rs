@@ -1,10 +1,10 @@
 //! Command-line utilities: perft, legal-action dumps and node-count benchmarks.
 //! Positions are read as "G <promotions> <5duci position> moves <lan|submit>*" lines.
 
-use kairos::core::action::MoveSeq;
-use kairos::core::hypercuboid::HcInfo;
-use kairos::core::perft::{parse_g_line, perft};
-use kairos::core::state::{MateType, State};
+use kairos_tools::core::action::MoveSeq;
+use kairos_tools::core::hypercuboid::HcInfo;
+use kairos_tools::core::perft::{parse_g_line, perft};
+use kairos_tools::core::state::{MateType, State};
 use std::io::{BufRead, Write};
 use std::time::{Duration, Instant};
 
@@ -24,11 +24,11 @@ fn mate_name(m: MateType) -> &'static str {
     }
 }
 
-fn coord(v: kairos::core::vec4::Vec4) -> String {
+fn coord(v: kairos_tools::core::vec4::Vec4) -> String {
     format!("{},{},{},{}", v.l(), v.t(), v.x(), v.y())
 }
 
-fn move_string(m: &kairos::core::action::FullMove) -> String {
+fn move_string(m: &kairos_tools::core::action::FullMove) -> String {
     format!("{}>{}", coord(m.from), coord(m.to))
 }
 
@@ -174,7 +174,7 @@ fn main() {
             &mut out,
         ),
         "rootgen" => {
-            use kairos::engine::ab::AlphaBeta;
+            use kairos_tools::engine::ab::AlphaBeta;
             let path = args
                 .get(2)
                 .map(|s| s.as_str())
@@ -200,8 +200,8 @@ fn main() {
         "gameprobe" => {
             // gameprobe <file.g> [ms] : per position, the timelines (all / active), the search's
             // last report (depth, score, nodes, nps, roots) and the action, with `ms` per move.
-            use kairos::engine::Limits;
-            use kairos::engine::ab::AlphaBeta;
+            use kairos_tools::engine::Limits;
+            use kairos_tools::engine::ab::AlphaBeta;
             let path = args.get(2).expect("gameprobe <file.g> [ms]");
             let ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
             let text = std::fs::read_to_string(path).expect("positions");
@@ -215,7 +215,7 @@ fn main() {
                     .ok()
                     .and_then(|v| v.parse::<i64>().ok())
                 {
-                    e.set_option("Threads", &kairos::engine::OptionValue::Int(t));
+                    e.set_option("Threads", &kairos_tools::engine::OptionValue::Int(t));
                 }
                 let mut last = String::new();
                 let t = Instant::now();
@@ -240,9 +240,9 @@ fn main() {
                 for n in 0..w.first_branch_axis() {
                     for i in u[n].iter() {
                         match w.entry(n, i) {
-                            kairos::core::hypercuboid::Entry::Physical { .. } => phys += 1,
-                            kairos::core::hypercuboid::Entry::Arriving { .. } => arr += 1,
-                            kairos::core::hypercuboid::Entry::Departing { .. } => dep += 1,
+                            kairos_tools::core::hypercuboid::Entry::Physical { .. } => phys += 1,
+                            kairos_tools::core::hypercuboid::Entry::Arriving { .. } => arr += 1,
+                            kairos_tools::core::hypercuboid::Entry::Departing { .. } => dep += 1,
                             _ => {}
                         }
                     }
@@ -258,12 +258,12 @@ fn main() {
                     last.split(" pv ").next().unwrap_or(""), best.map(|a| a.to_string()).unwrap_or_default()).unwrap();
                 out.flush().unwrap();
             }
-            write!(out, "{}", kairos::misc::prof::report()).unwrap();
+            write!(out, "{}", kairos_tools::misc::prof::report()).unwrap();
         }
         "nodeorder" => {
             // nodeorder <file.g> <k> [n] : the first n actions an interior node of the k-th
             // position would search (ORDER_NO_FUTURE=1: without optional boards, as interior nodes).
-            use kairos::engine::ab::AlphaBeta;
+            use kairos_tools::engine::ab::AlphaBeta;
             let text = std::fs::read_to_string(args.get(2).expect("nodeorder <file.g> <k> [n]"))
                 .expect("positions");
             let k: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -291,7 +291,7 @@ fn main() {
             // tlcorpus <per_bucket> <games.jsonl>... : G lines of positions from the games, up to
             // per_bucket for each count of active timelines (1, 2, 3, 4-5, 6-7, 8-10, 11+), taking
             // every 7th position of each game. Prints "G ..." with the bucket as a comment before.
-            use kairos::core::variants::{apply_uci_moves, position_from_uci};
+            use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
             let per: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
             let bucket = |n: usize| match n {
                 0 | 1 => 0,
@@ -378,7 +378,7 @@ fn main() {
         "inactivebook" => {
             // inactivebook <max> <games.jsonl>... : G lines of game positions with a timeline
             // outside the active range, at most one per game.
-            use kairos::core::variants::{apply_uci_moves, position_from_uci};
+            use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
             let max: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(500);
             let mut n = 0usize;
             let mut games = 0usize;
@@ -431,7 +431,7 @@ fn main() {
             // chesspos <max> <games.jsonl>... : the single-timeline positions of the games and the
             // move played there, as "<board fen>|<side>|<move>|<file>:<game>:<action>" (the board
             // is the present one; actions with a travel or another board are left out).
-            use kairos::core::variants::{apply_uci_moves, position_from_uci};
+            use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
             let max: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000);
             let mut n = 0;
             'files: for path in &args[3..] {
@@ -493,8 +493,8 @@ fn main() {
             // chessfeat <labels.tsv> <out.bin> [every=1] [max=1000000]: standard-chess term counts
             // (white minus black) of labelled positions, for scripts/chess/fit_chess.py.
             // Record: i16 phase, i16 side (1 black), i32 cp, then `chess::t::COUNT` i16.
-            use kairos::core::board::Board;
-            use kairos::engine::chess::{CountSink, analyze, t, terms, threats};
+            use kairos_tools::core::board::Board;
+            use kairos_tools::engine::chess::{CountSink, analyze, t, terms, threats};
             let every: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(1);
             let max: usize = args
                 .get(5)
@@ -561,7 +561,7 @@ fn main() {
         "chessbench" => {
             // chessbench <labels.tsv> [n=20000] [reps=20]: ns per board of the standard-chess terms
             // next to the rest of `hce::board_terms`.
-            use kairos::core::board::Board;
+            use kairos_tools::core::board::Board;
             let n: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20000);
             let reps: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(20);
             let text = std::fs::read_to_string(&args[2]).expect("labels");
@@ -575,7 +575,7 @@ fn main() {
             let t0 = Instant::now();
             for _ in 0..reps {
                 for b in &boards {
-                    let c = kairos::engine::chess::board_chess(std::hint::black_box(b), 8, 8);
+                    let c = kairos_tools::engine::chess::board_chess(std::hint::black_box(b), 8, 8);
                     acc += c.v[0][1] as i64 + c.thr[1][0] as i64;
                 }
             }
@@ -583,7 +583,7 @@ fn main() {
             let t1 = Instant::now();
             for _ in 0..reps {
                 for b in &boards {
-                    acc += std::mem::size_of_val(&kairos::engine::hce::board_terms(
+                    acc += std::mem::size_of_val(&kairos_tools::engine::hce::board_terms(
                         std::hint::black_box(b),
                         8,
                         8,
@@ -605,8 +605,8 @@ fn main() {
             // legalcheck <file.g>... : every legal action of each position, enumerated with and
             // without the problem memos (best-first in the engine's order, and depth-first in
             // natural order); prints positions where the sets differ.
-            use kairos::core::hypercuboid::NO_PROBLEM_MEMO;
-            use kairos::engine::ab::AlphaBeta;
+            use kairos_tools::core::hypercuboid::NO_PROBLEM_MEMO;
+            use kairos_tools::engine::ab::AlphaBeta;
             use std::sync::atomic::Ordering;
             let (mut n, mut checked, mut bad) = (0, 0, 0);
             for path in &args[2..] {
@@ -660,8 +660,8 @@ fn main() {
             .unwrap();
         }
         "depthstat" => {
-            use kairos::engine::Limits;
-            use kairos::engine::ab::AlphaBeta;
+            use kairos_tools::engine::Limits;
+            use kairos_tools::engine::ab::AlphaBeta;
             let path = args
                 .get(2)
                 .map(|s| s.as_str())
@@ -725,7 +725,7 @@ fn main() {
                 let t0 = Instant::now();
                 let r = exact_mate(&s, n);
                 let txt = r.as_ref().map(|a| {
-                    let act = kairos::core::action::Action::from_moveseq(a, &s);
+                    let act = kairos_tools::core::action::Action::from_moveseq(a, &s);
                     let mut os = s.clone();
                     act.moves()
                         .iter()
@@ -762,7 +762,7 @@ fn main() {
                 }
                 let s = parse_g_line(&line).unwrap();
                 let txt = |st: &State, a: &MoveSeq| {
-                    let act = kairos::core::action::Action::from_moveseq(a, st);
+                    let act = kairos_tools::core::action::Action::from_moveseq(a, st);
                     let mut os = st.clone();
                     act.moves()
                         .iter()
@@ -830,7 +830,7 @@ fn main() {
         "evalpos" => {
             // evalpos <file.g> [ms] : static evaluation breakdown (white's view) and a short
             // search of each G line.
-            use kairos::engine::hce;
+            use kairos_tools::engine::hce;
             let ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1000);
             let text = std::fs::read_to_string(&args[2]).expect("positions");
             for line in text.lines().filter(|l| l.starts_with("G ")) {
@@ -840,9 +840,9 @@ fn main() {
                 let f = hce::features_from(&sd, &s, false);
                 let black = s.get_present().1;
                 let base = hce::score(&f, &w, black);
-                let res = kairos::engine::evalnet::embedded()
+                let res = kairos_tools::engine::evalnet::embedded()
                     .map(|n| {
-                        n.residual(&kairos::engine::evalnet::inputs_from(
+                        n.residual(&kairos_tools::engine::evalnet::inputs_from(
                             &sd,
                             &s,
                             hce::score(&f, &w, black),
@@ -884,12 +884,12 @@ fn main() {
                 }
                 writeln!(out).unwrap();
                 if ms > 0 {
-                    let mut e = kairos::engine::ab::AlphaBeta::new();
+                    let mut e = kairos_tools::engine::ab::AlphaBeta::new();
                     let stop = std::sync::atomic::AtomicBool::new(false);
                     let depth = std::env::var("EVALPOS_DEPTH")
                         .ok()
                         .and_then(|d| d.parse().ok());
-                    let limits = kairos::engine::Limits {
+                    let limits = kairos_tools::engine::Limits {
                         movetime: Some(ms),
                         depth,
                         ..Default::default()
@@ -924,7 +924,7 @@ fn main() {
         "labelrun" => labelrun(&args[2..], &mut out),
         "netcheck" => {
             // Residuals of the first records of a netdata file under a net blob.
-            use kairos::engine::evalnet::{NI, Net};
+            use kairos_tools::engine::evalnet::{NI, Net};
             let net = Net::from_bytes(&std::fs::read(&args[2]).unwrap()).expect("net");
             let raw = std::fs::read(&args[3]).unwrap();
             let f: Vec<f32> = raw
@@ -941,7 +941,7 @@ fn main() {
         "futurestats" => {
             // How often engine actions move on boards other than the mandatory ones (boards
             // ahead of the present or on inactive timelines), by kind of move.
-            use kairos::core::variants::{apply_uci_moves, position_from_uci};
+            use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
             let (mut actions, mut with_future) = (0usize, 0usize);
             let (mut phys, mut dep, mut arr) = (0usize, 0usize, 0usize);
             let mut optional_boards = 0usize;
@@ -974,7 +974,7 @@ fn main() {
                             actions += 1;
                             let mut fut = false;
                             for tok in a.split_whitespace() {
-                                let Ok(em) = kairos::core::action::ExtMove::parse(tok) else {
+                                let Ok(em) = kairos_tools::core::action::ExtMove::parse(tok) else {
                                     continue;
                                 };
                                 let (fl, tl) = (em.fm.from.l(), em.fm.to.l());
@@ -1026,8 +1026,8 @@ fn main() {
             let (mut ttm, mut tml) = (0.0, 0.0);
             for (k, line) in text.lines().filter(|l| l.starts_with("G ")).enumerate() {
                 let s = parse_g_line(line).unwrap();
-                let mut e = kairos::engine::ab::AlphaBeta::new();
-                let _g = kairos::core::hypercuboid::interrupt_on(
+                let mut e = kairos_tools::engine::ab::AlphaBeta::new();
+                let _g = kairos_tools::core::hypercuboid::interrupt_on(
                     &stop,
                     Some(Instant::now() + std::time::Duration::from_millis(ms)),
                 );
@@ -1065,7 +1065,7 @@ fn main() {
                 tml
             )
             .unwrap();
-            write!(out, "{}", kairos::misc::prof::report()).unwrap();
+            write!(out, "{}", kairos_tools::misc::prof::report()).unwrap();
         }
         "abbench" => abbench(
             args.get(2).map(|s| s.as_str()).unwrap_or("data/bench_ab.g"),
@@ -1097,7 +1097,7 @@ fn main() {
             &mut out,
         ),
         "naive" => {
-            use kairos::core::naive::{is_legal_action, naive_actions};
+            use kairos_tools::core::naive::{is_legal_action, naive_actions};
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
                 if !line.starts_with("G ") {
@@ -1135,8 +1135,8 @@ fn main() {
             }
         }
         "slicecheck" => {
-            use kairos::core::hypercuboid::Entry;
-            use kairos::core::naive::naive_actions;
+            use kairos_tools::core::hypercuboid::Entry;
+            use kairos_tools::core::naive::naive_actions;
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
                 if !line.starts_with("G ") {
@@ -1203,7 +1203,7 @@ fn main() {
                     nb
                 )
                 .unwrap();
-                let order = kairos::misc::ordering::HcOrdering::Natural;
+                let order = kairos_tools::misc::ordering::HcOrdering::Natural;
                 let mut yielded = std::collections::HashSet::new();
                 let mut alive: Vec<bool> = targets.iter().map(|t| ss.contains(&t.1)).collect();
                 writeln!(
@@ -1218,7 +1218,7 @@ fn main() {
                     let mut hc = ss.pop_back().unwrap();
                     let before = ss.clone();
                     let hc0 = hc.clone();
-                    let mut psc = kairos::core::hypercuboid::PointScratch::default();
+                    let mut psc = kairos_tools::core::hypercuboid::PointScratch::default();
                     let pt = if w.take_point(&mut hc, &order, &mut psc) {
                         Some(psc.point)
                     } else {
@@ -1292,9 +1292,9 @@ fn main() {
         }
         "explain" => {
             // explain <action moves...> : timeline geometry before/after an action
-            let act: Vec<kairos::core::action::FullMove> = args[2..]
+            let act: Vec<kairos_tools::core::action::FullMove> = args[2..]
                 .iter()
-                .map(|t| kairos::core::action::FullMove::parse(t).unwrap())
+                .map(|t| kairos_tools::core::action::FullMove::parse(t).unwrap())
                 .collect();
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
@@ -1302,7 +1302,7 @@ fn main() {
                     continue;
                 }
                 let s = parse_g_line(&line).unwrap();
-                let show = |s: &kairos::core::state::State, out: &mut dyn Write| {
+                let show = |s: &kairos_tools::core::state::State, out: &mut dyn Write| {
                     let (a, b) = s.get_lines_range();
                     writeln!(
                         out,
@@ -1361,8 +1361,8 @@ fn main() {
         "validate" => {
             // HC search (several orderings/modes) vs exhaustive naive search (its actions
             // without wasted moves).
-            use kairos::core::hypercuboid::HcCursor;
-            use kairos::core::naive::{naive_actions_budget, wastes_moves};
+            use kairos_tools::core::hypercuboid::HcCursor;
+            use kairos_tools::core::naive::{naive_actions_budget, wastes_moves};
             let limit: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(20000);
             let (mut checked, mut skipped, mut bad) = (0, 0, 0);
             for (idx, line) in stdin.lock().lines().enumerate() {
@@ -1390,14 +1390,14 @@ fn main() {
                     let (w, ss) = HcInfo::build_hc(&s);
                     if variant == 2 {
                         // The engine's best-first enumeration.
-                        let acts =
-                            kairos::engine::ab::AlphaBeta::new().node_order(&s, limit * 2 + 1);
+                        let acts = kairos_tools::engine::ab::AlphaBeta::new()
+                            .node_order(&s, limit * 2 + 1);
                         results.push(acts.iter().map(seq_string).collect());
                         continue;
                     }
                     let order = match variant {
-                        0 => kairos::misc::ordering::HcOrdering::Natural,
-                        1 => kairos::engine::ab::AlphaBeta::new().ordering(&s, &w),
+                        0 => kairos_tools::misc::ordering::HcOrdering::Natural,
+                        1 => kairos_tools::engine::ab::AlphaBeta::new().ordering(&s, &w),
                         v => shuffled_order(&w, v),
                     };
                     let mut cur = HcCursor::new(ss, order);
@@ -1440,7 +1440,7 @@ fn main() {
         }
         "ordercheck" => {
             // Legal-action counts under the natural, engine and shuffled orders must agree.
-            use kairos::core::hypercuboid::HcCursor;
+            use kairos_tools::core::hypercuboid::HcCursor;
             let cap: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(20000);
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
@@ -1450,7 +1450,7 @@ fn main() {
                 let s = parse_g_line(&line).unwrap();
                 let (w, ss) = HcInfo::build_hc(&s);
                 let natural = w.search(&s, ss).take(cap).count();
-                let best_first = kairos::engine::ab::AlphaBeta::new()
+                let best_first = kairos_tools::engine::ab::AlphaBeta::new()
                     .node_order(&s, cap)
                     .len();
                 let mut shuffled = Vec::new();
@@ -1498,8 +1498,8 @@ fn main() {
             // randplay <plies> <games> <seed> [branchy] : random legal games from each start
             // position, printing a "G" line for every position reached ("branchy" prefers, out
             // of a few random actions, one that time travels the most).
-            use kairos::core::action::ExtMove;
-            use kairos::core::hypercuboid::HcCursor;
+            use kairos_tools::core::action::ExtMove;
+            use kairos_tools::core::hypercuboid::HcCursor;
             let plies: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10);
             let games: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1);
             let mut rng_state: u64 = args
@@ -1598,8 +1598,8 @@ fn main() {
         "playcheck" => {
             // playcheck : for each "G" game line, replay its moves and check at every submit that the
             // action just played is legal and that the position before it was not reported as mate.
-            use kairos::core::action::{ExtMove, FullMove};
-            use kairos::core::naive::is_legal_action;
+            use kairos_tools::core::action::{ExtMove, FullMove};
+            use kairos_tools::core::naive::is_legal_action;
             for line in stdin.lock().lines() {
                 let line = line.unwrap();
                 if !line.starts_with("G ") {
@@ -1728,11 +1728,11 @@ fn main() {
                     .unwrap_or("data/book_tuning.txt"),
             )
             .unwrap_or_default();
-            match kairos::engine::book::generate_tuned(&src, &tuning) {
+            match kairos_tools::engine::book::generate_tuned(&src, &tuning) {
                 Ok(text) => {
                     write!(out, "{}", text).unwrap();
-                    let b =
-                        kairos::engine::book::Book::parse(&text).expect("generated book parses");
+                    let b = kairos_tools::engine::book::Book::parse(&text)
+                        .expect("generated book parses");
                     let (p, m) = b.size();
                     eprintln!("book: {} positions, {} actions", p, m);
                 }
@@ -1750,10 +1750,10 @@ fn main() {
                 .unwrap_or("data/tactics_src.txt");
             let src = std::fs::read_to_string(path).expect("tactics source");
             let mut notes = Vec::new();
-            match kairos::misc::tactics::generate_with_notes(&src, &mut notes) {
+            match kairos_tools::misc::tactics::generate_with_notes(&src, &mut notes) {
                 Ok(text) => {
                     write!(out, "{}", text).unwrap();
-                    let n = kairos::misc::tactics::parse(&text)
+                    let n = kairos_tools::misc::tactics::parse(&text)
                         .expect("generated suite parses")
                         .len();
                     for note in &notes {
@@ -1777,9 +1777,9 @@ fn main() {
             // bookcover <file>: for each 5dpgn line (one game per line) how far the opening book
             // knows it: the actions that are book moves ("play" or "know") and the first one
             // that is not (its position, if known, still lists the book's other actions).
-            use kairos::core::variants::state_from_setup;
-            use kairos::engine::book::Book;
-            use kairos::web::pgn::{action_to_pgn_short, parse_5dpgn};
+            use kairos_tools::core::variants::state_from_setup;
+            use kairos_tools::engine::book::Book;
+            use kairos_tools::web::pgn::{action_to_pgn_short, parse_5dpgn};
             let book = Book::theory();
             let text = std::fs::read_to_string(args.get(2).expect("file")).expect("read");
             for (n, line) in text.lines().enumerate() {
@@ -1801,7 +1801,7 @@ fn main() {
                 for a in g.root.mainline() {
                     plies += 1;
                     let txt = action_to_pgn_short(&s, a);
-                    let lan = kairos::web::tree::action_lan(&s, a);
+                    let lan = kairos_tools::web::tree::action_lan(&s, a);
                     let in_book = book
                         .probe(&s)
                         .is_some_and(|ms| ms.iter().any(|m| m.lan == lan));
@@ -1837,10 +1837,10 @@ fn main() {
             // uci2pgn <position> <moves> [<more moves>]: the 5dpgn of a 5DUCI position and the
             // actions ("... submit" each; the last list may leave its final action unsubmitted)
             // played from it.
-            use kairos::core::action::{Action, ExtMove};
-            use kairos::core::variants::{apply_uci_moves, position_from_uci};
-            use kairos::web::pgn::{PgnOptions, write_5dpgn_opts};
-            use kairos::web::record::setup_of_state;
+            use kairos_tools::core::action::{Action, ExtMove};
+            use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+            use kairos_tools::web::pgn::{PgnOptions, write_5dpgn_opts};
+            use kairos_tools::web::record::setup_of_state;
             let mut s = position_from_uci(args.get(2).expect("position")).expect("position");
             let setup = setup_of_state(&s);
             let text = args[3..].join(" submit ");
@@ -1869,9 +1869,9 @@ fn main() {
         "pgn2g" => {
             // pgn2g [all] <file.5dpgn>... : the "G" line of each game's main-line end ("all":
             // of every position along the main line).
-            use kairos::core::variants::state_from_setup;
-            use kairos::web::pgn::parse_5dpgn;
-            use kairos::web::record::setup_to_uci;
+            use kairos_tools::core::variants::state_from_setup;
+            use kairos_tools::web::pgn::parse_5dpgn;
+            use kairos_tools::web::record::setup_to_uci;
             let all = args.get(2).map(|s| s.as_str()) == Some("all");
             for f in &args[2 + all as usize..] {
                 let text = std::fs::read(f)
@@ -1909,10 +1909,10 @@ fn main() {
             // subdump <spaces> <seed> [volume] : dumps the actions found in `spaces` random
             // sub-universes of positions too big to enumerate, so two builds compare part by part.
             // Output: "S <k>" then "a <wastes 0|1> <action>|<action without wasted moves>" lines.
-            use kairos::core::hypercuboid::{Entry, HcCursor};
-            use kairos::core::naive::wastes_moves;
-            use kairos::misc::geometry::{Hc, SearchSpace};
-            use kairos::misc::integer_set::IntegerSet;
+            use kairos_tools::core::hypercuboid::{Entry, HcCursor};
+            use kairos_tools::core::naive::wastes_moves;
+            use kairos_tools::misc::geometry::{Hc, SearchSpace};
+            use kairos_tools::misc::integer_set::IntegerSet;
             let spaces: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(4);
             let seed: u64 = args.get(3).and_then(|v| v.parse().ok()).unwrap_or(1);
             let volume: usize = args.get(4).and_then(|v| v.parse().ok()).unwrap_or(20000);
@@ -2017,8 +2017,8 @@ fn main() {
             // wastecheck [cap] : checks the hypercuboid search against a `ktools dump` that still
             // includes wasted-move actions: same actions once those are dropped, same mate type.
             // Truncated dumps are checked one way; positions with `cap`+ actions are skipped.
-            use kairos::core::action::FullMove;
-            use kairos::core::naive::{is_legal_action, wastes_moves};
+            use kairos_tools::core::action::FullMove;
+            use kairos_tools::core::naive::{is_legal_action, wastes_moves};
             use std::collections::BTreeSet;
             let cap: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(200_000);
             let (mut positions, mut cut, mut skipped, mut old_n, mut wasted_n, mut new_n, mut bad) =
@@ -2141,7 +2141,7 @@ fn main() {
             // `cap` actions of each G line in the order an interior node tries them.
             let text = std::fs::read_to_string(&args[2]).expect("positions");
             let cap: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(20000);
-            let e = kairos::engine::ab::AlphaBeta::new();
+            let e = kairos_tools::engine::ab::AlphaBeta::new();
             for line in text.lines().filter(|l| l.starts_with("G ")) {
                 let s = parse_g_line(line).unwrap();
                 let order = e.node_order(&s, cap);
@@ -2232,7 +2232,7 @@ fn bench(path: &str, out: &mut impl Write) {
         leaves as f64 / secs
     )
     .unwrap();
-    write!(out, "{}", kairos::misc::prof::report()).unwrap();
+    write!(out, "{}", kairos_tools::misc::prof::report()).unwrap();
 }
 
 /// A search report with only clock-derived fields removed. Keep PV tokens verbatim.
@@ -2303,8 +2303,8 @@ impl BenchResult {
 /// actual nodes, final score/proof/action, and reports including every completed-depth PV.
 /// NPS includes root preparation inside find_best_move, but excludes engine setup.
 fn abbench(path: &str, depth: u32, out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     use std::hash::{Hash, Hasher};
     let node_cap = std::env::var("AB_NODES").ok().map(|v| {
         v.parse::<u64>()
@@ -2388,7 +2388,7 @@ fn abbench(path: &str, depth: u32, out: &mut impl Write) {
     writeln!(out, "aboracle {:016x} | v2 depth {} | nodes {} in {:.6}s ({:.0} nps) | wall {:.6}s | mate counted | node-cap {}",
         h.finish(), depth, total_nodes, secs, total_nodes as f64 / secs.max(f64::MIN_POSITIVE), wall,
         node_cap.map_or_else(|| "none".into(), |n| n.to_string())).unwrap();
-    write!(out, "{}", kairos::misc::prof::report()).unwrap();
+    write!(out, "{}", kairos_tools::misc::prof::report()).unwrap();
 }
 
 #[cfg(test)]
@@ -2448,8 +2448,8 @@ mod bench_tests {
 /// Lazy SMP scaling: per thread count, total nodes/s and mean depth reached in `ms` per
 /// position, then the time to reach (with depth as the limit) the depth one thread reaches.
 fn smpbench(path: &str, ms: u64, threads: Vec<usize>, out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     let text = std::fs::read_to_string(path).expect("bench positions");
     let positions: Vec<State> = text
         .lines()
@@ -2544,9 +2544,9 @@ fn overrun(
     step: usize,
     out: &mut impl Write,
 ) {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     let text = std::fs::read_to_string(path).expect("games");
     let stop = std::sync::atomic::AtomicBool::new(false);
     let mut e = AlphaBeta::new();
@@ -2621,7 +2621,7 @@ fn json_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     }
 }
 
-fn apply_seq(s: &State, a: &[kairos::core::action::FullMove]) -> Option<State> {
+fn apply_seq(s: &State, a: &[kairos_tools::core::action::FullMove]) -> Option<State> {
     let mut c = s.clone();
     for fm in a {
         if !c.apply_move::<false>(*fm) {
@@ -2680,9 +2680,9 @@ fn has_mate_in_1(s: &State, cap: usize) -> bool {
 /// For checkmate games: replays to the loser's last decision and asks whether alpha-beta with
 /// various node budgets still plays into a mate in one.
 fn blunders(path: &str, max_games: usize, out: &mut impl Write) {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
-    use kairos::engine::Limits;
-    use kairos::engine::ab::AlphaBeta;
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::engine::Limits;
+    use kairos_tools::engine::ab::AlphaBeta;
     let no_safety = std::env::var("NO_SAFETY").is_ok();
     let text = std::fs::read_to_string(path).expect("games");
     let mut positions: Vec<State> = Vec::new();
@@ -2807,7 +2807,7 @@ fn blunders(path: &str, max_games: usize, out: &mut impl Write) {
 
 /// Positions just before a game-ending mate (winner to move), from harness JSONL.
 fn mate_positions(path: &str, max_games: usize) -> Vec<State> {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
     let text = std::fs::read_to_string(path).expect("games");
     let mut positions = Vec::new();
     for line in text.lines() {
@@ -2842,7 +2842,7 @@ fn mate_positions(path: &str, max_games: usize) -> Vec<State> {
 /// Rank of the first mating action in the alpha-beta node ordering, for positions where the
 /// side to move mated in the game. `opts` are `key=value` engine options.
 fn materank(path: &str, max_games: usize, out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
+    use kairos_tools::engine::ab::AlphaBeta;
 
     let positions = mate_positions(path, max_games);
     let ranks: Vec<Option<usize>> = std::thread::scope(|sc| {
@@ -2891,8 +2891,8 @@ fn materank(path: &str, max_games: usize, out: &mut impl Write) {
 /// `hypercuboid::wasted_moves`), in order.
 fn without_wasted(
     s: &State,
-    mvs: &[kairos::core::action::FullMove],
-) -> Vec<kairos::core::action::FullMove> {
+    mvs: &[kairos_tools::core::action::FullMove],
+) -> Vec<kairos_tools::core::action::FullMove> {
     let player = s.get_present().1;
     let mut c = s.clone();
     let mut branching = Vec::new();
@@ -2900,7 +2900,7 @@ fn without_wasted(
         branching.push(c.get_timeline_end(m.to.l()) != (m.to.t(), player));
         c.apply_move::<true>(m);
     }
-    let wasted = kairos::core::hypercuboid::wasted_moves(&c, mvs, |i| branching[i]);
+    let wasted = kairos_tools::core::hypercuboid::wasted_moves(&c, mvs, |i| branching[i]);
     mvs.iter()
         .enumerate()
         .filter(|(i, _)| !wasted.contains(i))
@@ -2908,7 +2908,7 @@ fn without_wasted(
         .collect()
 }
 
-fn shuffled_order(w: &HcInfo, seed: u64) -> kairos::misc::ordering::HcOrdering {
+fn shuffled_order(w: &HcInfo, seed: u64) -> kairos_tools::misc::ordering::HcOrdering {
     let mut st = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
     let u = w.get_universe();
     let orders = (0..u.dimension())
@@ -2923,14 +2923,16 @@ fn shuffled_order(w: &HcInfo, seed: u64) -> kairos::misc::ordering::HcOrdering {
             v
         })
         .collect();
-    kairos::misc::ordering::HcOrdering::Precomputed(kairos::misc::ordering::AxisOrders::new(orders))
+    kairos_tools::misc::ordering::HcOrdering::Precomputed(
+        kairos_tools::misc::ordering::AxisOrders::new(orders),
+    )
 }
 
 /// Mate puzzles: "# mate <n> <name>" comment lines, each followed by a G line. Reports the
 /// time and depth at which the search first reports the mate, within `ms` per puzzle.
 fn puzzles(path: &str, ms: u64, out: &mut impl Write) {
-    use kairos::engine::Limits;
-    use kairos::engine::ab::AlphaBeta;
+    use kairos_tools::engine::Limits;
+    use kairos_tools::engine::ab::AlphaBeta;
     let text = std::fs::read_to_string(path).expect("puzzles");
     let mut label = String::new();
     let mut solved = 0;
@@ -3004,15 +3006,15 @@ fn puzzles(path: &str, ms: u64, out: &mut impl Write) {
     writeln!(out, "solved {}/{}", solved, total).unwrap();
 }
 
-/// Tactics regression suite (`kairos::misc::tactics`): searches each position for `ms` and
+/// Tactics regression suite (`kairos_tools::misc::tactics`): searches each position for `ms` and
 /// reports whether the played action is correct, and from when every reported line agreed.
 fn tactics(path: &str, ms: u64, threads: usize, out: &mut impl Write) {
-    use kairos::core::action::Action;
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
-    use kairos::web::tree::parse_lan_moves;
+    use kairos_tools::core::action::Action;
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
+    use kairos_tools::web::tree::parse_lan_moves;
     let text = std::fs::read_to_string(path).expect("tactics suite");
-    let suite = match kairos::misc::tactics::parse(&text) {
+    let suite = match kairos_tools::misc::tactics::parse(&text) {
         Ok(s) => s,
         Err(e) => {
             writeln!(out, "{}", e).unwrap();
@@ -3091,7 +3093,7 @@ fn tactics(path: &str, ms: u64, threads: usize, out: &mut impl Write) {
             }
             other => {
                 let played = other
-                    .map(|a| kairos::web::tree::action_lan(&t.state, &a))
+                    .map(|a| kairos_tools::web::tree::action_lan(&t.state, &a))
                     .unwrap_or_else(|| "none".into());
                 let wanted = if t.avoid {
                     format!("not {}", t.best_lan.join(" | "))
@@ -3128,7 +3130,7 @@ fn tactics(path: &str, ms: u64, threads: usize, out: &mut impl Write) {
 /// result for white (1, 0.5, 0), or None for a game without a usable result or that does not
 /// replay (engine failures, missing fields, illegal moves).
 fn replay_game(line: &str, mut f: impl FnMut(&State, Option<i32>, &str)) -> Option<f32> {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
     // A game lost to an engine failure has no real result.
     if json_field(line, "reason").is_some_and(|r| r.starts_with("protocol")) {
         return None;
@@ -3229,7 +3231,7 @@ fn replay_game(line: &str, mut f: impl FnMut(&State, Option<i32>, &str)) -> Opti
 /// NNUE_LABELS=file (`labelrun` output, for the same games file): only the relabelled positions,
 /// with their new scores (or, with NNUE_LABELS_KEEP=1, their old ones, for comparison).
 fn nnuedata(args: &[String], out: &mut impl Write) {
-    use kairos::engine::{hce, nnue};
+    use kairos_tools::engine::{hce, nnue};
     use std::io::BufWriter;
     struct Sample {
         head: [f32; 4],
@@ -3251,7 +3253,7 @@ fn nnuedata(args: &[String], out: &mut impl Write) {
     let no_check = std::env::var_os("NETDATA_NO_CHECK").is_some();
     let keep_teacher = std::env::var_os("NNUE_LABELS_KEEP").is_some();
     let quiet = std::env::var_os("NNUE_QUIET").is_some();
-    let local_vals = kairos::engine::local::values_from(
+    let local_vals = kairos_tools::engine::local::values_from(
         &hce::tuned_weights()[hce::fi::MAT_A..hce::fi::MAT_A + 10],
     );
     let labels: Option<std::collections::HashMap<(usize, usize), f32>> =
@@ -3410,7 +3412,7 @@ fn nnuedata(args: &[String], out: &mut impl Write) {
 /// Whether `s` is quiet, as the search evaluates positions statically (`nnuedata` NNUE_QUIET):
 /// the side to move not in check, no capture quiescence would credit it (`local::capture_gain`
 /// on its boards of the present), and the action it played neither capturing nor checking.
-fn is_quiet(s: &State, played: &str, local_vals: &kairos::engine::local::Values) -> bool {
+fn is_quiet(s: &State, played: &str, local_vals: &kairos_tools::engine::local::Values) -> bool {
     if s.has_phantom_check() {
         return false;
     }
@@ -3420,7 +3422,7 @@ fn is_quiet(s: &State, played: &str, local_vals: &kairos::engine::local::Values)
     let gain: i32 = (amin..=amax)
         .filter(|&l| s.get_timeline_end(l) == present)
         .map(|l| {
-            kairos::engine::local::capture_gain(
+            kairos_tools::engine::local::capture_gain(
                 s.board(l, present.0, present.1),
                 present.1,
                 h,
@@ -3438,10 +3440,10 @@ fn is_quiet(s: &State, played: &str, local_vals: &kairos::engine::local::Values)
 /// cross-board captures (the same), captures by a lesser piece (same-board, cross-board count),
 /// physical and superphysical move counts. Values are kind_value10 units, royals excluded.
 fn xthreat(args: &[String], out: &mut impl Write) {
-    use kairos::core::bitboard::{marked_pos, pmask};
-    use kairos::core::vec4::Vec4;
-    use kairos::engine::hce;
-    let local_vals = kairos::engine::local::values_from(
+    use kairos_tools::core::bitboard::{marked_pos, pmask};
+    use kairos_tools::core::vec4::Vec4;
+    use kairos_tools::engine::hce;
+    let local_vals = kairos_tools::engine::local::values_from(
         &hce::tuned_weights()[hce::fi::MAT_A..hce::fi::MAT_A + 10],
     );
     let stats = |s: &State| -> [i32; 10] {
@@ -3509,7 +3511,7 @@ fn xthreat(args: &[String], out: &mut impl Write) {
             mand,
         ]
     };
-    let mut e = kairos::engine::ab::AlphaBeta::new();
+    let mut e = kairos_tools::engine::ab::AlphaBeta::new();
     for f in args {
         let text = std::fs::read_to_string(f).expect("games");
         for line in text.lines().filter(|l| !l.trim().is_empty()) {
@@ -3547,7 +3549,7 @@ fn xthreat(args: &[String], out: &mut impl Write) {
 
 /// Whether action `played` (5DUCI moves) of the side to move in `s` captures or gives check.
 fn tactical(s: &State, played: &str) -> bool {
-    use kairos::core::action::ExtMove;
+    use kairos_tools::core::action::ExtMove;
     let c = s.get_present().1;
     let captures = played
         .split_whitespace()
@@ -3555,20 +3557,20 @@ fn tactical(s: &State, played: &str) -> bool {
         .any(|m| {
             let to = m.fm.to;
             s.get_board_ptr(to.l(), to.t(), c)
-                .is_some_and(|b| b.hostile(c) & kairos::core::bitboard::pmask(to.xy()) != 0)
+                .is_some_and(|b| b.hostile(c) & kairos_tools::core::bitboard::pmask(to.xy()) != 0)
         });
     if captures {
         return true;
     }
     let mut after = s.clone();
-    kairos::core::variants::apply_uci_moves(&mut after, &format!("{} submit", played)).is_ok()
+    kairos_tools::core::variants::apply_uci_moves(&mut after, &format!("{} submit", played)).is_ok()
         && after.has_phantom_check()
 }
 
 /// `nnueeval model.nnue file.g`: the NNUE evaluation of each position (internal units, side to
 /// move's view), for checking the trainer's export against the engine.
 fn nnueeval(args: &[String], out: &mut impl Write) {
-    use kairos::engine::{hce, nnue};
+    use kairos_tools::engine::{hce, nnue};
     let m = nnue::Model::from_bytes(&std::fs::read(&args[0]).expect("model")).expect("model");
     let mut cache = nnue::Cache::new();
     let text = std::fs::read_to_string(&args[1]).expect("positions");
@@ -3581,7 +3583,7 @@ fn nnueeval(args: &[String], out: &mut impl Write) {
 /// `nnuerecs model.nnue prefix [n]`: the NNUE evaluation of the first `n` records `nnuedata`
 /// wrote to `prefix.*`, one per line (the trainer's `--parity` prints its own for comparison).
 fn nnuerecs(args: &[String], out: &mut impl Write) {
-    use kairos::engine::nnue::{Model, ND};
+    use kairos_tools::engine::nnue::{Model, ND};
     let m = Model::from_bytes(&std::fs::read(&args[0]).expect("model")).expect("model");
     let read = |ext: &str| std::fs::read(format!("{}.{}", args[1], ext)).expect("records");
     // One view stored (`.ft1`), or both (older exports, `.ftr`).
@@ -3636,7 +3638,7 @@ fn nnuerecs(args: &[String], out: &mut impl Write) {
             let own: Vec<u16> = (0..k).map(|j| feat(off + j)).collect();
             let other = if one_view {
                 own.iter()
-                    .map(|&f| kairos::engine::nnue::other_view(f, (rh >> 8) as i32))
+                    .map(|&f| kairos_tools::engine::nnue::other_view(f, (rh >> 8) as i32))
                     .collect()
             } else {
                 (0..k).map(|j| feat(off + k + j)).collect()
@@ -3652,7 +3654,7 @@ fn nnuerecs(args: &[String], out: &mut impl Write) {
 /// `nnuerel file.g [reps]`: the cost of the NNUE relation features against the handcrafted
 /// evaluation's counting pass (`hce::sides`), per position, and how many features positions have.
 fn nnuerel(args: &[String], out: &mut impl Write) {
-    use kairos::engine::{hce, nnue};
+    use kairos_tools::engine::{hce, nnue};
     let text = std::fs::read_to_string(&args[0]).expect("positions");
     let reps: usize = args.get(1).and_then(|x| x.parse().ok()).unwrap_or(200);
     let states: Vec<State> = text
@@ -3682,19 +3684,19 @@ fn nnuerel(args: &[String], out: &mut impl Write) {
     let sides = t.elapsed().as_secs_f64();
     // The time-travel move generation alone.
     let t = Instant::now();
-    let mut ml = kairos::core::multiverse::MoveList::new();
+    let mut ml = kairos_tools::core::multiverse::MoveList::new();
     for _ in 0..reps {
         for s in &states {
             let (lo, hi) = s.get_lines_range();
             for l in lo..=hi {
                 let (tt, c) = s.get_timeline_end(l);
                 let b = s.board(l, tt, c);
-                for sq in kairos::core::bitboard::marked_pos(b.hostile(!c) & !b.wall()) {
+                for sq in kairos_tools::core::bitboard::marked_pos(b.hostile(!c) & !b.wall()) {
                     ml.clear();
                     s.multiverse().gen_superphysical_moves(
-                        kairos::core::vec4::Vec4::from_xy(
+                        kairos_tools::core::vec4::Vec4::from_xy(
                             sq,
-                            kairos::core::vec4::Vec4::new(0, 0, tt, l),
+                            kairos_tools::core::vec4::Vec4::new(0, 0, tt, l),
                         ),
                         c,
                         &mut ml,
@@ -3729,13 +3731,13 @@ fn nnuerel(args: &[String], out: &mut impl Write) {
 /// positions as its record plus `"label_plies":[..]` (1-based engine positions, as `nnuedata`'s
 /// ply).
 fn labelpick(args: &[String], out: &mut impl Write) {
-    use kairos::engine::nnue;
+    use kairos_tools::engine::nnue;
     let per_game: usize = args[1].parse().expect("per_game");
     let min_weight: f64 = args[2].parse().expect("min_weight");
     let quiet = std::env::var_os("LABEL_QUIET").is_some();
-    let local_vals = kairos::engine::local::values_from(
-        &kairos::engine::hce::tuned_weights()
-            [kairos::engine::hce::fi::MAT_A..kairos::engine::hce::fi::MAT_A + 10],
+    let local_vals = kairos_tools::engine::local::values_from(
+        &kairos_tools::engine::hce::tuned_weights()
+            [kairos_tools::engine::hce::fi::MAT_A..kairos_tools::engine::hce::fi::MAT_A + 10],
     );
     let mut lines: Vec<String> = Vec::new();
     for f in &args[3..] {
@@ -3845,8 +3847,8 @@ fn labelpick(args: &[String], out: &mut impl Write) {
 /// Each label is written (and flushed) as soon as its search ends, so a job cut short keeps them. Writes per position: line, ply, score (internal units,
 /// side to move's view), depth, 1 for a proven mate.
 fn labelrun(args: &[String], out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     use std::sync::atomic::AtomicBool;
     let text = std::fs::read_to_string(&args[0]).expect("picks");
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -3949,7 +3951,7 @@ fn labelrun(args: &[String], out: &mut impl Write) {
 /// the evaluation's cost before any training (dense 0: without the handcrafted counts).
 fn nnuerandom(args: &[String], out: &mut impl Write) {
     let n = |i: usize, d: usize| args.get(i).and_then(|x| x.parse().ok()).unwrap_or(d);
-    let m = kairos::engine::nnue::Model::random(
+    let m = kairos_tools::engine::nnue::Model::random(
         n(1, 128),
         n(2, 32),
         n(3, 32),
@@ -3970,8 +3972,8 @@ fn nnuerandom(args: &[String], out: &mut impl Write) {
 /// wdl, game; side to move's view). NETDATA_FEN=<path> also writes single-timeline FENs.
 /// NETDATA_NO_CHECK drops in-check positions; use it for held-out sets, as check leaks the result.
 fn netdata(args: &[String], out: &mut impl Write) {
-    use kairos::engine::evalnet::{NI, inputs};
-    use kairos::engine::hce::{evaluate, tuned_weights};
+    use kairos_tools::engine::evalnet::{NI, inputs};
+    use kairos_tools::engine::hce::{evaluate, tuned_weights};
     let out_path = &args[0];
     let mut lines: Vec<String> = Vec::new();
     for f in &args[1..] {
@@ -4076,10 +4078,10 @@ fn netdata(args: &[String], out: &mut impl Write) {
 /// One position of `ktools hcverify`: (reference action count, whether it is complete, the
 /// first generator that repeated an action).
 fn hcverify(s: &State, cap: usize, seeds: u64) -> Result<(usize, bool, Option<String>), String> {
-    use kairos::core::hypercuboid::{BestFirstCursor, HcCursor};
-    use kairos::core::naive::is_legal_action;
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::misc::ordering::AxisOrders;
+    use kairos_tools::core::hypercuboid::{BestFirstCursor, HcCursor};
+    use kairos_tools::core::naive::is_legal_action;
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::misc::ordering::AxisOrders;
     use std::collections::BTreeSet;
     let (w, ss) = HcInfo::build_hc(s);
     let mut reference: BTreeSet<String> = BTreeSet::new();
@@ -4208,9 +4210,9 @@ fn hcverify(s: &State, cap: usize, seeds: u64) -> Result<(usize, bool, Option<St
 /// how far each search runs past its hard time limit, and searches returning no or illegal
 /// actions. `clock` is time left + increment in ms; 30 s past the limit counts as hung.
 fn overrunpos(args: &[String], out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::time::TimePlan;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::time::TimePlan;
+    use kairos_tools::engine::{Limits, OptionValue};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     let mut threads: Vec<usize> = vec![1, 4];
@@ -4337,9 +4339,9 @@ fn overrunpos(args: &[String], out: &mut impl Write) {
 /// Time to the first legal action under several enumeration strategies (each capped).
 ///   ktools firstact <file.g> [cap ms]
 fn firstact(path: &str, cap: u64, out: &mut impl Write) {
-    use kairos::core::hypercuboid::{HcCursor, interrupt_on, interrupted};
+    use kairos_tools::core::hypercuboid::{HcCursor, interrupt_on, interrupted};
     let text = std::fs::read_to_string(path).expect("positions");
-    let e = kairos::engine::ab::AlphaBeta::new();
+    let e = kairos_tools::engine::ab::AlphaBeta::new();
     let stop = std::sync::atomic::AtomicBool::new(false);
     let deadline = || Some(Instant::now() + std::time::Duration::from_millis(cap));
     for line in text.lines().filter(|l| l.starts_with("G ")) {
@@ -4445,7 +4447,7 @@ struct McPly {
 
 /// Mate distance in moves of an internal score: > 0 the side to move mates, < 0 it is mated.
 fn mc_mate(score: i32) -> Option<i32> {
-    use kairos::engine::ab::MATE;
+    use kairos_tools::engine::ab::MATE;
     if score > MATE - 1000 {
         Some((MATE - score + 1) / 2)
     } else if score < -(MATE - 1000) {
@@ -4473,7 +4475,7 @@ fn mc_g_line(base: &str, acts: &[&str]) -> String {
 /// records (replayed with these actions), or harness JSONL games (each game's first claimed
 /// mate: the position two actions before the first `evals` entry with a mate score).
 fn mc_cases(path: &str, max: usize) -> Vec<McCase> {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
     let text = std::fs::read_to_string(path).expect("cases");
     let mut cases = Vec::new();
     for (n, line) in text.lines().enumerate() {
@@ -4531,7 +4533,7 @@ fn mc_cases(path: &str, max: usize) -> Vec<McCase> {
             let mate = if json_field(line, "eval_scale").is_some() {
                 20000
             } else {
-                kairos::engine::ab::MATE - 1000
+                kairos_tools::engine::ab::MATE - 1000
             };
             let acts: Vec<&str> = moves
                 .split(" submit")
@@ -4594,7 +4596,7 @@ fn mc_play(
     depth_limit: u32,
     max_ms: u64,
 ) -> (Vec<McPly>, bool) {
-    use kairos::engine::ab::AlphaBeta;
+    use kairos_tools::engine::ab::AlphaBeta;
     use std::sync::atomic::{AtomicBool, Ordering};
     let mut engines = [AlphaBeta::new(), AlphaBeta::new()];
     let mut s = case.start.clone();
@@ -4649,14 +4651,14 @@ fn mc_ply(
     case: &McCase,
     j: usize,
     s: &State,
-    engines: &mut [kairos::engine::ab::AlphaBeta; 2],
+    engines: &mut [kairos_tools::engine::ab::AlphaBeta; 2],
     stop: &std::sync::atomic::AtomicBool,
     nodes: u64,
     depth_limit: u32,
 ) -> Option<(McPly, State)> {
-    use kairos::engine::Limits;
+    use kairos_tools::engine::Limits;
     {
-        let _g = kairos::core::hypercuboid::interrupt_on(stop, None);
+        let _g = kairos_tools::core::hypercuboid::interrupt_on(stop, None);
         let (w, ss) = HcInfo::build_hc(s);
         w.search(s, ss).next()?;
     }
@@ -4687,7 +4689,7 @@ fn mc_ply(
     let (score, proven) = (e.last_score(), e.last_proven());
     if let Some(uci) = forced {
         let mut c = s.clone();
-        kairos::core::variants::apply_uci_moves(&mut c, &format!("{} submit", uci)).ok()?;
+        kairos_tools::core::variants::apply_uci_moves(&mut c, &format!("{} submit", uci)).ok()?;
         return Some((
             McPly {
                 black,
@@ -4707,7 +4709,7 @@ fn mc_ply(
         .map(|m| m.to_string())
         .collect::<Vec<_>>()
         .join(" ");
-    let lan = kairos::web::tree::action_lan(s, &best);
+    let lan = kairos_tools::web::tree::action_lan(s, &best);
     let next = s.can_apply_action(&best)?;
     Some((
         McPly {
@@ -4858,7 +4860,7 @@ fn mc_flags(plies: &[McPly], mated: bool) -> (Option<(usize, i32)>, Vec<McFlag>)
 fn mc_text(score: i32) -> String {
     match mc_mate(score) {
         Some(m) => format!("M{}", m),
-        None => format!("cp{}", kairos::engine::report_cp(score)),
+        None => format!("cp{}", kairos_tools::engine::report_cp(score)),
     }
 }
 
@@ -5010,12 +5012,15 @@ fn matecheck(args: &[String], out: &mut impl Write) {
 /// the book does not know is replayed, and each book move of the position compared: legal in
 /// both, the same check and mate, the same boards after it. A line listed needs `{exact}`.
 fn bookexact(args: &[String], out: &mut impl Write) {
-    use kairos::core::variants::apply_uci_moves;
+    use kairos_tools::core::variants::apply_uci_moves;
     use std::collections::{HashMap, HashSet};
-    let path = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "data/book_theory.txt".to_string());
+    let path = args.first().cloned().unwrap_or_else(|| {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kairos/data/book_theory.txt"
+        )
+        .to_string()
+    });
     let text = std::fs::read_to_string(&path).expect("book file");
     struct Pos {
         line: usize,
@@ -5200,9 +5205,9 @@ fn bookexact(args: &[String], out: &mut impl Write) {
 /// book position once with a fixed node budget and writes its score, best action and PV.
 /// Also writes `<out>.edges.tsv` and `<out>.positions.tsv`; resumes past rows already written.
 fn bookeval(args: &[String], out: &mut impl Write) {
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
-    use kairos::web::tree::{parse_lan_moves, play_action};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
+    use kairos_tools::web::tree::{parse_lan_moves, play_action};
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -5217,10 +5222,13 @@ fn bookeval(args: &[String], out: &mut impl Write) {
         .unwrap_or_else(|| "docs/theory/book_evals.tsv".to_string());
     let max_secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(600);
     let depth_cap: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(30);
-    let book_file = args
-        .get(5)
-        .cloned()
-        .unwrap_or_else(|| "data/book_theory.txt".to_string());
+    let book_file = args.get(5).cloned().unwrap_or_else(|| {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../kairos/data/book_theory.txt"
+        )
+        .to_string()
+    });
     let text = std::fs::read_to_string(&book_file).expect("book file");
     // Positions by frontier key (the book's own key), the first state seen; edges between them.
     let mut states: HashMap<u64, State> = HashMap::new();
@@ -5469,7 +5477,7 @@ fn bookeval(args: &[String], out: &mut impl Write) {
                             after("depth", 1),
                             kind,
                             score,
-                            best.map(|a| kairos::web::tree::action_lan(s, &a))
+                            best.map(|a| kairos_tools::web::tree::action_lan(s, &a))
                                 .unwrap_or_default(),
                             after("nodes", 1),
                             t.elapsed().as_secs_f64(),
@@ -5496,9 +5504,9 @@ fn bookeval(args: &[String], out: &mut impl Write) {
 /// finds the mate in one before each checkmate game's final action, and how long it takes.
 /// Env: MATE_VERIFY (engine `MateVerify`), M1_DEPTH, M1_CLOCK (ms), M1_STRIDE.
 fn mate1recall(args: &[String], out: &mut impl Write) {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     let mut files = Vec::new();
     let (mut max, mut threads) = (usize::MAX, 8usize);
     let mut it = args.iter();
@@ -5670,8 +5678,8 @@ fn mate1recall(args: &[String], out: &mut impl Write) {
 /// and whether the mating action travelled.
 ///   matekinds games.jsonl...
 fn matekinds(args: &[String], out: &mut impl Write) {
-    use kairos::core::check_position::CheckPosition;
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::core::check_position::CheckPosition;
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
     use std::collections::BTreeMap;
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let (mut games, mut mates) = (0usize, 0usize);
@@ -5781,7 +5789,7 @@ fn matekinds(args: &[String], out: &mut impl Write) {
 /// timeline a game creates.
 ///   depthtl games.jsonl...
 fn depthtl(args: &[String], out: &mut impl Write) {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
     use std::collections::BTreeMap;
     let mut by_active: BTreeMap<i32, (f64, usize)> = BTreeMap::new();
     let mut around: BTreeMap<i32, (f64, usize)> = BTreeMap::new();
@@ -5876,9 +5884,9 @@ fn depthtl(args: &[String], out: &mut impl Write) {
 }
 
 fn matescan(args: &[String], out: &mut impl Write) {
-    use kairos::core::variants::{apply_uci_moves, position_from_uci};
-    use kairos::engine::ab::AlphaBeta;
-    use kairos::engine::{Limits, OptionValue};
+    use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+    use kairos_tools::engine::ab::AlphaBeta;
+    use kairos_tools::engine::{Limits, OptionValue};
     let mut files = Vec::new();
     let (mut max, mut threads) = (usize::MAX, 8usize);
     let mut it = args.iter();
@@ -5892,7 +5900,7 @@ fn matescan(args: &[String], out: &mut impl Write) {
     let verify = std::env::var("MATE_VERIFY").ok();
     let clock: Option<u64> = std::env::var("M1_CLOCK").ok().and_then(|v| v.parse().ok());
     if std::env::var_os("MREGION_VERIFY").is_some() {
-        kairos::engine::ab::REGION_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
+        kairos_tools::engine::ab::REGION_VERIFY.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     let back: usize = std::env::var("M1_PLY")
         .ok()
@@ -6039,10 +6047,10 @@ fn matescan(args: &[String], out: &mut impl Write) {
             .copied()
             .unwrap_or(0.0)
     };
-    write!(out, "{}", kairos::misc::prof::report()).unwrap();
-    if kairos::engine::ab::REGION_VERIFY.load(std::sync::atomic::Ordering::Relaxed) {
+    write!(out, "{}", kairos_tools::misc::prof::report()).unwrap();
+    if kairos_tools::engine::ab::REGION_VERIFY.load(std::sync::atomic::Ordering::Relaxed) {
         let st = |i: usize| {
-            kairos::engine::ab::REGION_STATS[i].load(std::sync::atomic::Ordering::Relaxed)
+            kairos_tools::engine::ab::REGION_STATS[i].load(std::sync::atomic::Ordering::Relaxed)
         };
         writeln!(
             out,

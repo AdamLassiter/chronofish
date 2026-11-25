@@ -4,8 +4,6 @@
 use super::json::Json;
 use super::pgn;
 use super::tree::{Game, ROOT, parse_lan_moves};
-use crate::core::multiverse::TimelineLayout;
-use crate::core::promotion::{PromotionOptions, format_promotions};
 use crate::core::state::State;
 use crate::core::variants::{
     Sign, VariantSetup, default_variant, position_from_uci, state_from_setup,
@@ -15,42 +13,7 @@ use crate::obj;
 /// The built-in variants (every official one whose start position is known).
 pub const VARIANTS: [&str; 44] = crate::core::variants::VARIANT_NAMES;
 
-/// The 5DUCI `position` argument for a setup.
-pub fn setup_to_uci(v: &VariantSetup) -> String {
-    let mut s = format!(
-        "size {}x{} {}",
-        v.size_x,
-        v.size_y,
-        if v.even { "even" } else { "odd" }
-    );
-    if v.promotions != PromotionOptions::QUEEN {
-        s += &format!(" promotions {}", format_promotions(v.promotions));
-    }
-    s += " fen";
-    let layout = if v.even {
-        TimelineLayout::even()
-    } else {
-        TimelineLayout::odd()
-    };
-    for b in &v.boards {
-        // Internal negative lines are written mirrored with a '-' sign.
-        let (sign, l) = match b.sign {
-            Sign::Nil if b.l < 0 => ("-", layout.mirror(b.l)),
-            Sign::Nil => ("", b.l),
-            Sign::Positive => ("+", b.l),
-            Sign::Negative => ("-", b.l),
-        };
-        s += &format!(
-            " [{}:{}{}:{}:{}]",
-            b.fen,
-            sign,
-            l,
-            b.t,
-            if b.c { "b" } else { "w" }
-        );
-    }
-    s
-}
+pub use chronofish_notation::setup_to_uci;
 
 /// 5DUCI `position` argument of a built-in variant.
 pub fn variant_position(name: &str) -> Option<String> {

@@ -1,8 +1,9 @@
 //! 5DFEN setup and 5DUCI position histories.
 
 use chronofish_5d_rules::core::{
-    action::ExtMove,
-    promotion::{PromotionOptions, parse_promotions},
+    action::{Action, ExtMove},
+    multiverse::TimelineLayout,
+    promotion::{PromotionOptions, format_promotions, parse_promotions},
     state::State,
     variants::{BoardSpec, Sign, VariantSetup, startpos, state_from_setup},
     vec4::Vec4,
@@ -178,4 +179,62 @@ pub fn replay_checked_uci(initial: &State, moves: &str) -> Result<State, String>
         }
     }
     Ok(state)
+}
+
+/// Parse a list of LAN tokens (`submit` tokens are ignored).
+pub fn parse_lan_moves(text: &str) -> Result<Vec<ExtMove>, String> {
+    text.split_whitespace()
+        .filter(|t| *t != "submit")
+        .map(ExtMove::parse)
+        .collect()
+}
+
+/// The action's LAN tokens, played in order from `s`.
+pub fn action_lan(s: &State, act: &Action) -> String {
+    let mut os = s.clone();
+    let mut parts = Vec::new();
+    for em in act.moves() {
+        parts.push(em.lan(&os));
+        if let Some(n) = os.normalize_promotion(*em) {
+            os.apply_ext::<false>(n);
+        }
+    }
+    parts.join(" ")
+}
+
+/// The 5DUCI `position` argument for a setup.
+pub fn setup_to_uci(v: &VariantSetup) -> String {
+    let mut s = format!(
+        "size {}x{} {}",
+        v.size_x,
+        v.size_y,
+        if v.even { "even" } else { "odd" }
+    );
+    if v.promotions != PromotionOptions::QUEEN {
+        s += &format!(" promotions {}", format_promotions(v.promotions));
+    }
+    s += " fen";
+    let layout = if v.even {
+        TimelineLayout::even()
+    } else {
+        TimelineLayout::odd()
+    };
+    for b in &v.boards {
+        // Internal negative lines are written mirrored with a '-' sign.
+        let (sign, l) = match b.sign {
+            Sign::Nil if b.l < 0 => ("-", layout.mirror(b.l)),
+            Sign::Nil => ("", b.l),
+            Sign::Positive => ("+", b.l),
+            Sign::Negative => ("-", b.l),
+        };
+        s += &format!(
+            " [{}:{}{}:{}:{}]",
+            b.fen,
+            sign,
+            l,
+            b.t,
+            if b.c { "b" } else { "w" }
+        );
+    }
+    s
 }

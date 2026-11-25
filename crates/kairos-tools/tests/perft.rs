@@ -1,4 +1,4 @@
-use kairos::core::perft::{parse_g_line, perft};
+use kairos_tools::core::perft::{parse_g_line, perft};
 
 fn positions() -> Vec<String> {
     std::fs::read_to_string("data/perft.g")

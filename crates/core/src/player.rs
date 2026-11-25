@@ -61,5 +61,8 @@ pub struct AiDecision {
 
 pub trait AiPlayer: Send {
     fn profile(&self) -> AiProfile;
+    fn supports_ruleset(&self, _ruleset: Ruleset) -> bool {
+        true
+    }
     fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String>;
 }

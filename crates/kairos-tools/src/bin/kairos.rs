@@ -5,5 +5,5 @@ fn main() {
         eprintln!("Usage: kairos   (then talk 5DUCI on stdin)");
         std::process::exit(2);
     }
-    kairos::engine::uci::run(kairos::engine::ab::AlphaBeta::new());
+    kairos_tools::engine::uci::run(kairos_tools::engine::ab::AlphaBeta::new());
 }

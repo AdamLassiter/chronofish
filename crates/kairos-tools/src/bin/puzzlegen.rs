@@ -26,19 +26,19 @@
 //!
 //! Output: one JSON object per line. A run resumes past the candidates in `<out>.progress`.
 
-use kairos::core::action::FullMove;
-use kairos::core::bitboard::{marked_pos, pmask};
-use kairos::core::board::Board;
-use kairos::core::check_position::CheckPosition;
-use kairos::core::hypercuboid::{Entry, HcInfo, has_physical_check};
-use kairos::core::piece::*;
-use kairos::core::promotion::{PromotionOptions, promotion_letters};
-use kairos::core::state::State;
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
-use kairos::engine::ab::AlphaBeta;
-use kairos::engine::{Limits, OptionValue};
-use kairos::obj;
-use kairos::web::json::Json;
+use kairos_tools::core::action::FullMove;
+use kairos_tools::core::bitboard::{marked_pos, pmask};
+use kairos_tools::core::board::Board;
+use kairos_tools::core::check_position::CheckPosition;
+use kairos_tools::core::hypercuboid::{Entry, HcInfo, has_physical_check};
+use kairos_tools::core::piece::*;
+use kairos_tools::core::promotion::{PromotionOptions, promotion_letters};
+use kairos_tools::core::state::State;
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::engine::ab::AlphaBeta;
+use kairos_tools::engine::{Limits, OptionValue};
+use kairos_tools::obj;
+use kairos_tools::web::json::Json;
 use std::collections::{BTreeSet, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -682,7 +682,7 @@ fn search_limit(nodes: u64) -> Duration {
 }
 
 fn score_of(internal: i32, proven: bool) -> i32 {
-    let mate = kairos::engine::ab::MATE;
+    let mate = kairos_tools::engine::ab::MATE;
     if proven && internal.abs() > mate - 1000 {
         let n = (mate - internal.abs() + 1) / 2;
         return if internal > 0 {
@@ -691,7 +691,7 @@ fn score_of(internal: i32, proven: bool) -> i32 {
             -(MATE_CP - n)
         };
     }
-    kairos::engine::report_cp(internal)
+    kairos_tools::engine::report_cp(internal)
 }
 
 /// (depth, MultiPV index (0: none), line) of an `info` line with a score and a pv.
@@ -2202,7 +2202,7 @@ fn keeps_outcome(mine: i32, reference: i32, win: bool) -> bool {
     }
 }
 
-fn texts(a: &kairos::core::action::MoveSeq) -> String {
+fn texts(a: &kairos_tools::core::action::MoveSeq) -> String {
     a.iter()
         .map(|m| m.to_string())
         .collect::<Vec<_>>()

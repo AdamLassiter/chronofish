@@ -7,9 +7,12 @@ rust-version.workspace = true
 description = "Rust port of ftxi's 5D chess search"
 
 [dependencies]
+chronofish-core = { path = "../core" }
 chronofish-5d-rules = { path = "../5d-rules" }
-chronofish-notation = { path = "../notation" }
 rand = "0.9"
+
+[dev-dependencies]
+chronofish-notation = { path = "../notation" }
 
 [lints]
 workspace = true

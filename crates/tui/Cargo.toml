@@ -10,6 +10,8 @@ name = "chronofish"
 path = "src/main.rs"
 
 [dependencies]
+kairos = { path = "../kairos" }
+chronofish-ftxi = { path = "../ftxi" }
 clap = { version = "4", features = ["derive"] }
 chronofish-alphazero = { path = "../alphazero" }
 chronofish-classic = { path = "../classic" }

@@ -350,3 +350,79 @@ impl Game {
         };
     }
 }
+
+/// A verified whole-turn decision, returned one staged action at a time.
+#[derive(Default)]
+pub struct ReferenceBotTurn {
+    pending: std::collections::VecDeque<(u64, PlayerAction)>,
+}
+
+impl ReferenceBotTurn {
+    pub fn choose(
+        &mut self,
+        game: &Game,
+        search: impl FnOnce(&State) -> Option<Vec<ExtMove>>,
+    ) -> Result<AiDecision, String> {
+        let reference = game
+            .reference
+            .as_ref()
+            .ok_or("this bot requires reference 5D rules")?;
+        if game.outcome().is_some() {
+            return Err("the game is already over".into());
+        }
+        if self
+            .pending
+            .front()
+            .is_none_or(|(hash, _)| *hash != game.position_hash())
+        {
+            self.pending.clear();
+            let state = reference.submitted(game.ruleset());
+            // Continue from authoritative choices when a draft was restored or the search ran out
+            // of time before returning a turn.
+            let moves = if reference.staged() {
+                None
+            } else {
+                search(state)
+            };
+            let Some(moves) = moves else {
+                let actions = game.legal_actions();
+                let action = if actions.contains(&PlayerAction::SubmitTurn) {
+                    Some(PlayerAction::SubmitTurn)
+                } else {
+                    actions.first().copied()
+                }
+                .ok_or("the position has no legal continuation")?;
+                return Ok(AiDecision {
+                    action,
+                    principal_variation: vec![action],
+                    root_value: None,
+                });
+            };
+            let mut probe = game.clone();
+            let mut pending = std::collections::VecDeque::new();
+            for movement in moves {
+                let action = PlayerAction::Move {
+                    movement: Move {
+                        from: position(movement.fm.from, state.player()),
+                        to: position(movement.fm.to, state.player()),
+                        promotion: piece(movement.promote_to),
+                    },
+                };
+                pending.push_back((probe.position_hash(), action));
+                probe
+                    .apply_action(action)
+                    .map_err(|error| error.to_string())?;
+            }
+            pending.push_back((probe.position_hash(), PlayerAction::SubmitTurn));
+            probe.submit_turn().map_err(|error| error.to_string())?;
+            self.pending = pending;
+        }
+        let principal_variation = self.pending.iter().map(|(_, action)| *action).collect();
+        let (_, action) = self.pending.pop_front().ok_or("missing verified action")?;
+        Ok(AiDecision {
+            action,
+            principal_variation,
+            root_value: None,
+        })
+    }
+}

@@ -2,9 +2,9 @@
 //! Uses a pinned eval net (tests/data/evalnet_406688d.bin) under which a mate in 7 was once
 //! misreported as a mate in 6.
 
-use kairos::core::perft::parse_g_line;
-use kairos::engine::ab::{AlphaBeta, MATE, score_text};
-use kairos::engine::{Limits, evalnet, internal_cp, report_cp, wdl};
+use kairos_tools::core::perft::parse_g_line;
+use kairos_tools::engine::ab::{AlphaBeta, MATE, score_text};
+use kairos_tools::engine::{Limits, evalnet, internal_cp, report_cp, wdl};
 use std::sync::atomic::AtomicBool;
 
 fn setup() {
@@ -84,7 +84,7 @@ fn threaded_searches_report_mates() {
     // Lazy SMP: helper threads share the table (and its proofs) with the reporting thread.
     setup();
     let mut e = AlphaBeta::new();
-    e.set_option("Threads", &kairos::engine::OptionValue::Int(4));
+    e.set_option("Threads", &kairos_tools::engine::OptionValue::Int(4));
     let stop = AtomicBool::new(false);
     let mut run = |g: &str, depth: u32| {
         let s = parse_g_line(g).unwrap();

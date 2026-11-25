@@ -1,10 +1,10 @@
 //! The web support code: record loading (SPRT JSON lines, 5DUCI, 5dpgn), the game tree and
 //! the JSON command interface the browser uses.
 
-use kairos::web::api::Api;
-use kairos::web::json::Json;
-use kairos::web::record;
-use kairos::web::tree::Status;
+use kairos_tools::web::api::Api;
+use kairos_tools::web::json::Json;
+use kairos_tools::web::record;
+use kairos_tools::web::tree::Status;
 
 fn call(api: &mut Api, req: &str) -> Json {
     let r = Json::parse(&api.call(req, &mut |_| {})).unwrap();
@@ -47,7 +47,7 @@ fn sprt_records_replay() {
                 let rec = evals.get(i - book).and_then(|e| e.int()).map(|e| e as i32);
                 let want = rec.map(|e| {
                     if j.get("eval_scale").is_null() && e.abs() < 20000 {
-                        kairos::engine::report_cp(e)
+                        kairos_tools::engine::report_cp(e)
                     } else {
                         e
                     }

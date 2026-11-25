@@ -6074,7 +6074,7 @@ mod tests {
                 )
                 .unwrap();
             let mut state = s.clone();
-            let lan = crate::web::tree::action_lan(&s, &a);
+            let lan = chronofish_notation::action_lan(&s, &a);
             assert!(
                 crate::core::variants::apply_uci_moves(&mut state, &lan).is_ok(),
                 "level {level}"
@@ -6315,7 +6315,7 @@ mod tests {
             lines
         );
         let s = crate::core::perft::parse_g_line(
-            include_str!("../../tests/data/mate1_deep.g")
+            include_str!("../../../kairos-tools/tests/data/mate1_deep.g")
                 .lines()
                 .next()
                 .unwrap(),
@@ -6345,7 +6345,7 @@ mod tests {
     fn mate_type_ignores_a_stop() {
         use crate::core::state::MateType;
         let s = crate::core::perft::parse_g_line(
-            include_str!("../../tests/data/mate_interrupt.g").trim(),
+            include_str!("../../../kairos-tools/tests/data/mate_interrupt.g").trim(),
         )
         .unwrap();
         let (h, ss) = HcInfo::build_hc(&s);
@@ -6362,7 +6362,8 @@ mod tests {
     /// detector does not flag it) and it creates a timeline (last in the scan's order).
     #[test]
     fn mate_in_one_by_a_lone_travel_on_the_clock() {
-        let mut lines = include_str!("../../tests/data/lone_travel_mate.txt").lines();
+        let mut lines =
+            include_str!("../../../kairos-tools/tests/data/lone_travel_mate.txt").lines();
         let mut s = crate::core::variants::position_from_uci(lines.next().unwrap()).unwrap();
         crate::core::variants::apply_uci_moves(&mut s, lines.next().unwrap()).unwrap();
         let stop = AtomicBool::new(false);

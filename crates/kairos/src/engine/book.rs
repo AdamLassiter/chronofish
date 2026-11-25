@@ -103,11 +103,11 @@ impl Book {
                     .and_then(|w| w.parse().ok())
                     .ok_or_else(|| err("bad weight".into()))?;
                 let lan = it.collect::<Vec<_>>().join(" ");
-                let moves = crate::web::tree::parse_lan_moves(&lan).map_err(err)?;
+                let moves = chronofish_notation::parse_lan_moves(&lan).map_err(err)?;
                 if moves.is_empty() {
                     return Err(err("empty action".into()));
                 }
-                crate::web::tree::play_action(s, &moves)
+                chronofish_5d_rules::core::referee::play_action(s, &moves)
                     .map_err(|e| err(format!("illegal action {}: {}", lan, e)))?;
                 let action = Action::from_vector(&moves, s);
                 // A history keeps each action once (the strongest tag wins).
@@ -230,8 +230,8 @@ impl Book {
     /// What a book move does in `s`: whether it gives check, whether it mates, and the boards in
     /// play after it (`None`: illegal there).
     fn outcome(s: &State, m: &BookMove) -> Option<(bool, bool, u64)> {
-        let moves = crate::web::tree::parse_lan_moves(&m.lan).ok()?;
-        let child = crate::web::tree::play_action(s, &moves).ok()?;
+        let moves = chronofish_notation::parse_lan_moves(&m.lan).ok()?;
+        let child = chronofish_5d_rules::core::referee::play_action(s, &moves).ok()?;
         let check = child.has_phantom_check();
         let mate = check && {
             let (info, ss) = HcInfo::build_hc(&child);
@@ -316,10 +316,10 @@ impl Book {
             {
                 continue;
             }
-            let Ok(moves) = crate::web::tree::parse_lan_moves(lan) else {
+            let Ok(moves) = chronofish_notation::parse_lan_moves(lan) else {
                 continue;
             };
-            let Ok(child) = crate::web::tree::play_action(s, &moves) else {
+            let Ok(child) = chronofish_5d_rules::core::referee::play_action(s, &moves) else {
                 continue;
             };
             let h = child.frontier_hash();
@@ -452,9 +452,9 @@ pub fn generate_tuned(src: &str, tuning: &str) -> Result<String, String> {
     let tuning = parse_tuning(tuning)?;
     let mut used: std::collections::HashSet<(u64, String)> = std::collections::HashSet::new();
     use crate::core::variants::state_from_setup;
-    use crate::web::pgn::{action_to_pgn_short, parse_5dpgn};
-    use crate::web::record::setup_to_uci;
-    use crate::web::tree::action_lan;
+    use chronofish_notation::action_lan;
+    use chronofish_notation::pgn::{action_to_pgn_short, parse_5dpgn};
+    use chronofish_notation::setup_to_uci;
 
     struct Pos {
         /// A source line marked this position `{exact}` (see `Entry`).
@@ -529,7 +529,7 @@ pub fn generate_tuned(src: &str, tuning: &str) -> Result<String, String> {
                 }
             }
             let lan = action_lan(&s, act);
-            let next = crate::web::tree::play_action(&s, act.moves())
+            let next = chronofish_5d_rules::core::referee::play_action(&s, act.moves())
                 .map_err(|e| err(format!("{}: {}", child.text, e)))?;
             let h = s.hash();
             let p = pos.entry(h).or_insert_with(|| {

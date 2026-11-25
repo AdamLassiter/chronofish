@@ -7,6 +7,8 @@ rust-version.workspace = true
 description = "Repeatable release-mode throughput regression checks for Chronofish"
 
 [dependencies]
+kairos = { path = "../kairos" }
+chronofish-ftxi = { path = "../ftxi" }
 chronofish-alphazero = { path = "../alphazero" }
 chronofish-classic = { path = "../classic" }
 chronofish-core = { path = "../core" }

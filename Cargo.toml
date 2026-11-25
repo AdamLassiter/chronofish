@@ -5,6 +5,7 @@ members = [
     "crates/benchmarks",
     "crates/classic",
     "crates/kairos",
+    "crates/kairos-tools",
     "crates/ftxi",
     "crates/core",
     "crates/neural",

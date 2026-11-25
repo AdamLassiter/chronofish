@@ -35,13 +35,15 @@ use rayon::prelude::*;
 
 use crate::uci::{Strength, UciEngine};
 
-const ROSTER: [&str; 6] = [
+const ROSTER: [&str; 8] = [
     "fissure",
     "grabablanca",
     "blueshift",
     "carlsen",
     "alpha-now",
     "cpu",
+    "kairos",
+    "loki",
 ];
 const LADDER: [&str; 5] = [
     "blueshift-1k",
@@ -88,7 +90,7 @@ impl RuleSelection {
 #[allow(clippy::struct_excessive_bools)]
 struct Arguments {
     /// Comma-separated bots: fissure, grabablanca, blueshift[-<nodes>[k]], carlsen,
-    /// alpha-now, cpu, and with --stockfish sf-<elo> (1320–3190) or sf-skill<0-20>.
+    /// alpha-now, cpu, kairos, loki, and with --stockfish sf-<elo> (1320–3190) or sf-skill<0-20>.
     #[arg(long, value_delimiter = ',', default_values_t = ROSTER.map(str::to_owned))]
     bots: Vec<String>,
     /// Random openings per ruleset; each pair plays every opening from both sides.
@@ -152,6 +154,8 @@ enum Bot {
     Carlsen,
     AlphaNow,
     Cpu,
+    Kairos,
+    Loki,
     Stockfish(Strength),
 }
 
@@ -170,6 +174,8 @@ impl Bot {
             "carlsen" => Self::Carlsen,
             "alpha-now" => Self::AlphaNow,
             "cpu" => Self::Cpu,
+            "kairos" => Self::Kairos,
+            "loki" => Self::Loki,
             _ => {
                 if let Some(budget) = name.strip_prefix("blueshift-") {
                     let (digits, scale) = budget
@@ -215,6 +221,8 @@ impl Bot {
             Self::Carlsen => "carlsen".to_owned(),
             Self::AlphaNow => "alpha-now".to_owned(),
             Self::Cpu => "cpu".to_owned(),
+            Self::Kairos => "kairos".to_owned(),
+            Self::Loki => "loki".to_owned(),
             Self::Stockfish(Strength::Elo(elo)) => format!("sf-{elo}"),
             Self::Stockfish(Strength::Skill(level)) => format!("sf-skill{level}"),
         }
@@ -235,8 +243,18 @@ impl Bot {
             Self::Carlsen => "Monte Carlsen".to_owned(),
             Self::AlphaNow => format!("AlphaNow{untrained}"),
             Self::Cpu => format!("Chronofish CPU{untrained}"),
+            Self::Kairos => "Kairos".to_owned(),
+            Self::Loki => "Loki".to_owned(),
             Self::Stockfish(Strength::Elo(elo)) => format!("Stockfish {elo}"),
             Self::Stockfish(Strength::Skill(level)) => format!("Stockfish skill {level}"),
+        }
+    }
+
+    const fn supports(self, ruleset: Ruleset) -> bool {
+        match self {
+            Self::Kairos | Self::Loki => !matches!(ruleset, Ruleset::Standard),
+            Self::Stockfish(_) => matches!(ruleset, Ruleset::Standard),
+            _ => true,
         }
     }
 
@@ -289,6 +307,8 @@ impl Context {
                 || ChronofishCpuBot::bootstrap(search, seed),
                 |model| ChronofishCpuBot::new(model.clone(), search, seed),
             )),
+            Bot::Kairos => Box::new(kairos::KairosBot::default()),
+            Bot::Loki => Box::new(chronofish_ftxi::LokiBot::new(seed)),
             Bot::Stockfish(strength) => {
                 let path = self
                     .stockfish
@@ -476,9 +496,7 @@ fn round_robin(
         for opening in 0..schedule.openings {
             for first in 0..players.len() {
                 for second in first + 1..players.len() {
-                    if ruleset != Ruleset::Standard
-                        && (players[first].standard_only() || players[second].standard_only())
-                    {
+                    if !players[first].supports(ruleset) || !players[second].supports(ruleset) {
                         continue;
                     }
                     for (white, black) in [(first, second), (second, first)] {
@@ -966,13 +984,17 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Box<dyn Er
     if arguments.calibrate {
         return calibrate(&arguments, &context, schedule, &explicit);
     }
-    let players = dedupe(parse_bots(&arguments.bots)?);
+    let rulesets = arguments.ruleset.rulesets();
+    let players = dedupe(parse_bots(&arguments.bots)?)
+        .into_iter()
+        .filter(|bot| rulesets.iter().any(|&ruleset| bot.supports(ruleset)))
+        .collect::<Vec<_>>();
     if players.len() < 2 {
         return Err("a tournament needs at least two distinct bots".into());
     }
     context.check(&players)?;
     let started = Instant::now();
-    let played = round_robin(&players, &arguments.ruleset.rulesets(), &context, schedule);
+    let played = round_robin(&players, &rulesets, &context, schedule);
     let ratings = Ratings::fit(
         players.len(),
         &played,
@@ -1030,7 +1052,14 @@ fn calibrate(
     let started = Instant::now();
 
     // Stage 1: standard chess, on the Stockfish scale.
-    let standard_players = dedupe(ladder.iter().chain(&references).chain(&bots).copied());
+    let standard_players = dedupe(
+        ladder
+            .iter()
+            .chain(&references)
+            .chain(&bots)
+            .copied()
+            .filter(|bot| bot.supports(Ruleset::Standard)),
+    );
     context.check(&standard_players)?;
     let standard_played = round_robin(&standard_players, &[Ruleset::Standard], context, schedule);
     let standard = Ratings::fit(

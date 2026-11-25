@@ -86,6 +86,8 @@ impl AppState {
             database,
             vec![
                 Box::new(BobbyFissureBot::default()),
+                Box::new(kairos::KairosBot::default()),
+                Box::new(chronofish_ftxi::LokiBot::default()),
                 Box::new(Grabablanca::default()),
                 Box::new(DeepBlueshift::level(BlueshiftLevel::Easy)),
                 Box::new(DeepBlueshift::level(BlueshiftLevel::Medium)),
@@ -134,7 +136,7 @@ impl<B: chronofish_core::AiPlayer> chronofish_core::AiPlayer for RulesetBot<B> {
 /// standard-chess calibration against Stockfish 1320/1600/2000
 /// (`chronofish-benchmarks --tournament --calibrate`, 2026-11-25, one opening per pair).
 /// Lower bounds keep new accounts from being overrated while the intervals are wide.
-/// Uncalibrated bots (the Chronofish networks) start at the default 1500.
+/// Uncalibrated bots start at the default 1500.
 pub(crate) fn seed_rating(username: &str) -> i32 {
     match username {
         "bot-bobby-fissure" => 995,

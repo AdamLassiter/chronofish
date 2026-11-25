@@ -245,14 +245,45 @@ async fn me(
     Ok(Json(authenticated_user(&state, &headers)?))
 }
 
-async fn users(State(state): State<AppState>) -> Result<Json<Vec<UserRecord>>, ApiError> {
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LobbyUser {
+    #[serde(flatten)]
+    user: UserRecord,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    supported_rulesets: Option<Vec<Ruleset>>,
+}
+
+async fn users(State(state): State<AppState>) -> Result<Json<Vec<LobbyUser>>, ApiError> {
+    let users = state.database.leaderboard().map_err(ApiError::internal)?;
+    let bots = state.bots.lock().map_err(ApiError::internal)?;
     Ok(Json(
-        state.database.leaderboard().map_err(ApiError::internal)?,
+        users
+            .into_iter()
+            .map(|user| {
+                let supported_rulesets = bots.get(&user.id).map(|bot| {
+                    [
+                        Ruleset::Standard,
+                        Ruleset::Multiverse,
+                        Ruleset::MultiverseVariant,
+                    ]
+                    .into_iter()
+                    .filter(|&ruleset| bot.supports_ruleset(ruleset))
+                    .collect()
+                });
+                LobbyUser {
+                    user,
+                    supported_rulesets,
+                }
+            })
+            .collect(),
     ))
 }
 
 async fn leaderboard(State(state): State<AppState>) -> Result<Json<Vec<UserRecord>>, ApiError> {
-    users(State(state)).await
+    Ok(Json(
+        state.database.leaderboard().map_err(ApiError::internal)?,
+    ))
 }
 
 async fn games(
@@ -294,6 +325,16 @@ async fn create_game(
             return Err(ApiError::bad_request("choose a different opponent"));
         }
         let ruleset = parse_ruleset(&body.ruleset)?;
+        if opponent.is_bot
+            && state
+                .bots
+                .lock()
+                .expect("bot mutex poisoned")
+                .get(&opponent.id)
+                .is_some_and(|bot| !bot.supports_ruleset(ruleset))
+        {
+            return Err(ApiError::bad_request("that bot does not play this ruleset"));
+        }
         let (attacker, defender) = match body.play_as.as_str() {
             "white" | "attacker" => (user.id, opponent.id),
             "black" | "defender" => (opponent.id, user.id),
@@ -1004,6 +1045,66 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
         assert!(stale_response["error"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn reference_bots_are_offered_only_for_5d_games() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![
+                Box::new(kairos::KairosBot::default()),
+                Box::new(chronofish_ftxi::LokiBot::default()),
+            ],
+        )
+        .expect("state");
+        let app = router(state);
+        let (status, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({
+                "username": "reference-player",
+                "password": "correct horse battery staple"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let token = session["token"].as_str().expect("token");
+
+        let (status, users) = request(&app, "GET", "/api/users", Some(token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        for opponent in ["bot-kairos", "bot-loki"] {
+            let bot = users
+                .as_array()
+                .expect("users")
+                .iter()
+                .find(|user| user["username"] == opponent)
+                .expect("bot account");
+            assert_eq!(
+                bot["supportedRulesets"],
+                json!(["multiverse", "multiverse-variant"])
+            );
+
+            for (ruleset, expected) in [
+                ("standard", StatusCode::BAD_REQUEST),
+                ("multiverse", StatusCode::OK),
+            ] {
+                let (status, response) = request(
+                    &app,
+                    "POST",
+                    "/api/games",
+                    Some(token),
+                    Some(json!({"opponent": opponent, "ruleset": ruleset, "playAs": "black"})),
+                )
+                .await;
+                assert_eq!(status, expected, "{opponent}: {response}");
+                if status == StatusCode::OK {
+                    assert_eq!(response["game"]["turn"], "black");
+                    assert_eq!(response["summary"]["version"], 2);
+                }
+            }
+        }
     }
 
     #[tokio::test]

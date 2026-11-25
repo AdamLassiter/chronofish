@@ -1,6 +1,6 @@
 //! The tactics suite (data/tactics.g, from data/tactics_src.txt): legal positions and actions.
 
-use kairos::misc::tactics::{generate, parse};
+use kairos_tools::misc::tactics::{generate, parse};
 
 const SRC: &str = include_str!("../data/tactics_src.txt");
 const SUITE: &str = include_str!("../data/tactics.g");
@@ -27,7 +27,7 @@ fn every_position_and_best_action_is_legal() {
         assert!(!t.best.is_empty(), "{}", t.name);
         assert_eq!(
             t.state.get_mate_type(),
-            kairos::core::state::MateType::None,
+            kairos_tools::core::state::MateType::None,
             "{} is over",
             t.name
         );

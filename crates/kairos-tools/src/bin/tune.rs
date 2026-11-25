@@ -5,9 +5,9 @@
 // Parallel per-feature arrays: indexing by feature reads clearer than zipped iterators.
 #![allow(clippy::needless_range_loop)]
 
-use kairos::core::state::State;
-use kairos::core::variants::{apply_uci_moves, position_from_uci};
-use kairos::engine::hce::{self, NF, Weights};
+use kairos_tools::core::state::State;
+use kairos_tools::core::variants::{apply_uci_moves, position_from_uci};
+use kairos_tools::engine::hce::{self, NF, Weights};
 use std::sync::{Arc, Mutex};
 
 /// Features stored compactly (they are small counts).
@@ -67,7 +67,7 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 /// No capture or promotion available to the side to move anywhere.
 fn quiet(s: &State) -> bool {
     let player = s.get_present().1;
-    let mut scratch = kairos::core::multiverse::MoveList::new();
+    let mut scratch = kairos_tools::core::multiverse::MoveList::new();
     let (l_min, l_max) = s.get_lines_range();
     (l_min..=l_max).all(|l| {
         let (t, c) = s.get_timeline_end(l);
@@ -174,9 +174,9 @@ fn game_samples(line: &str, out: &mut Vec<Sample>) -> Option<()> {
             let _ = hce::split_chess(&mut rest);
             let stm = st.get_present().1;
             let base = hce::score(&rest, W0.get_or_init(hce::tuned_weights), stm);
-            if let Some(net) = kairos::engine::evalnet::embedded() {
-                let res =
-                    net.residual(&kairos::engine::evalnet::inputs_from(&sd, &st, base)) as f32;
+            if let Some(net) = kairos_tools::engine::evalnet::embedded() {
+                let res = net.residual(&kairos_tools::engine::evalnet::inputs_from(&sd, &st, base))
+                    as f32;
                 off = if stm { -res } else { res };
             }
             full
