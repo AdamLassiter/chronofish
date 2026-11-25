@@ -14,7 +14,7 @@ clap = { version = "4", features = ["derive"] }
 chronofish-alphazero = { path = "../alphazero" }
 chronofish-classic = { path = "../classic" }
 chronofish-core = { path = "../core" }
-chronofish-random-bot = { path = "../random-bot" }
+chronofish-notation = { path = "../notation", features = ["chronofish"] }
 
 [lints]
 workspace = true

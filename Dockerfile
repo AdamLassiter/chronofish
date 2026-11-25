@@ -19,7 +19,7 @@ FROM debian:bookworm-slim AS runtime
 
 LABEL org.opencontainers.image.title="Chronofish" \
       org.opencontainers.image.description="Standard and five-dimensional chess server" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="GPL-3.0-only"
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates curl \

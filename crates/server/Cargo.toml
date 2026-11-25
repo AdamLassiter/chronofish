@@ -11,7 +11,6 @@ axum = "0.8"
 chronofish-alphazero = { path = "../alphazero" }
 chronofish-core = { path = "../core" }
 chronofish-classic = { path = "../classic" }
-chronofish-random-bot = { path = "../random-bot" }
 rand_core = { version = "0.6", features = ["getrandom"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

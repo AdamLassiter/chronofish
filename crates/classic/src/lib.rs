@@ -13,9 +13,11 @@
 mod alphabeta;
 pub mod eval;
 mod greedy;
+mod random;
+pub use random::BobbyFissureBot;
 mod uct;
 
-pub use alphabeta::{BlueshiftConfig, DeepBlueshift};
+pub use alphabeta::{BlueshiftConfig, BlueshiftLevel, DeepBlueshift};
 pub use greedy::Grabablanca;
 pub use uct::{CarlsenConfig, MonteCarlsen};
 

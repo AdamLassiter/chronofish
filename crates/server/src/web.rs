@@ -60,8 +60,9 @@ mod tests {
         assert!(INDEX.contains("Actual behaviour"));
         assert!(APP.contains("timeline-row"));
         assert!(APP.contains("present-line"));
-        assert!(APP.contains("Acceptable"));
-        assert!(APP.contains("Accepted"));
+        assert!(APP.contains("Required"));
+        assert!(APP.contains("Optional"));
+        assert!(APP.contains("Inactive"));
         assert!(APP.contains("submittedPresentTime"));
         assert!(APP.contains("undoStagedMove"));
         assert!(APP.contains("submitBugReport"));

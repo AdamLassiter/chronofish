@@ -9,16 +9,20 @@
 mod game;
 mod hash;
 mod model;
+mod move_effects;
 mod movegen;
 mod movegen_piece;
 mod notation;
 mod player;
+mod reference;
 
 pub use model::{
     BOARD_SIZE, BoardSnapshot, CastlingRights, Color, EnPassant, Game, GameOutcome, Move,
-    MoveError, Origin, OutcomeReason, Piece, PieceType, PlayerAction, Position, Ruleset, Side,
-    Timeline, TimelineOwner,
+    MoveDescription, MoveError, Origin, OutcomeReason, Piece, PieceType, PlayerAction, Position,
+    Ruleset, Side, Timeline, TimelineOwner,
 };
 pub use player::{AiDecision, AiPlayer, AiProfile, GameView};
 
 pub(crate) use model::*;
+
+pub use reference::reference_setup;

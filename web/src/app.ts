@@ -394,7 +394,7 @@ function formatMove(move: Movement): string {
   return `${formatPosition(move.from)} → ${formatPosition(move.to)}${move.promotion ? `=${move.promotion}` : ""}`;
 }
 
-type BoardStatus = "Acceptable" | "Inactive" | "Future" | "Latest" | "Past";
+type BoardStatus = "Optional" | "Required" | "Inactive" | "Future" | "Latest" | "Past";
 type SquareHighlight = "arrived" | "move-source" | "move-target" | "check";
 type HighlightMap = Map<string, Set<SquareHighlight>>;
 
@@ -432,19 +432,9 @@ function boardStatus(
   snapshot: BoardSnapshot,
   presentTime: number,
 ): BoardStatus {
-  if (!game.activeTimelines.includes(timeline.id)) {
-    const opposingOwner =
-      timeline.owner !== "neutral" && timeline.owner !== game.turn;
-    if (
-      opposingOwner &&
-      snapshot.time === latestTime(timeline) &&
-      snapshot.sideToMove === game.turn &&
-      snapshot.board.some((rank) =>
-        rank.some((piece) => piece?.color === game.turn),
-      )
-    )
-      return "Acceptable";
-    return "Inactive";
+  if (!game.activeTimelines.includes(timeline.id)) return "Inactive";
+  if (game.ruleset !== "standard" && snapshot.time === latestTime(timeline) && snapshot.sideToMove === game.turn) {
+    return snapshot.time === presentTime ? "Required" : "Optional";
   }
   if (snapshot.time > presentTime) return "Future";
   return snapshot.time === latestTime(timeline) ? "Latest" : "Past";
@@ -538,9 +528,9 @@ function renderGame(): void {
   const finished = game.outcome !== null;
   const currentPlayer = game.turn === "white" ? summary.white : summary.black;
   element<HTMLButtonElement>("#submit-turn").disabled =
-    finished || !mine || !game.canSubmit;
+    turnRequestPending || finished || !mine || !game.canSubmit;
   const undo = element<HTMLButtonElement>("#undo-staged-move");
-  undo.disabled = finished || !mine || !game.hasStagedMoves;
+  undo.disabled = turnRequestPending || finished || !mine || !game.hasStagedMoves;
   undo.title = game.hasStagedMoves
     ? "Undo the most recent move in this unsubmitted turn"
     : "There is no staged move to undo";
@@ -598,17 +588,11 @@ function renderTimeline(
   row.className = "timeline-row";
   row.dataset.owner = timeline.owner;
   row.dataset.active = String(game.activeTimelines.includes(timeline.id));
-  row.dataset.accepted = String(timeline.accepted);
   row.style.setProperty("--time-columns", String(maxTime + 1));
 
   const label = document.createElement("div");
   label.className = "timeline-label";
   label.textContent = `L${timeline.id}`;
-  if (timeline.accepted) {
-    const accepted = document.createElement("small");
-    accepted.textContent = "Accepted";
-    label.append(accepted);
-  }
   row.append(label);
 
   const marker = document.createElement("div");
@@ -793,9 +777,11 @@ function legalTargets(position: Position): Movement[] {
   return moves().filter((move) => samePosition(move.from, position));
 }
 
+let turnRequestPending = false;
+
 function chooseSquare(position: Position): void {
   const current = currentGame();
-  if (current.viewerSide !== current.game.turn) return;
+  if (turnRequestPending || current.viewerSide !== current.game.turn) return;
   if (state.selected) {
     const candidates = legalTargets(state.selected).filter((move) =>
       samePosition(move.to, position),
@@ -822,6 +808,10 @@ function chooseSquare(position: Position): void {
 }
 
 async function playMove(movement: Movement): Promise<void> {
+  if (turnRequestPending) return;
+  turnRequestPending = true;
+  notice("Checking legal continuations…");
+  renderGame();
   try {
     const current = currentGame();
     state.current = await api<GameDetail>(
@@ -836,10 +826,17 @@ async function playMove(movement: Movement): Promise<void> {
     renderGame();
   } catch (error) {
     await recoverGameAfterFailedAction(error);
+  } finally {
+    turnRequestPending = false;
+    renderGame();
   }
 }
 
 async function undoStagedMove(): Promise<void> {
+  if (turnRequestPending) return;
+  turnRequestPending = true;
+  notice("Checking legal continuations…");
+  renderGame();
   const button = element<HTMLButtonElement>("#undo-staged-move");
   button.disabled = true;
   try {
@@ -856,6 +853,9 @@ async function undoStagedMove(): Promise<void> {
     notice("Staged move undone.");
   } catch (error) {
     await recoverGameAfterFailedAction(error);
+  } finally {
+    turnRequestPending = false;
+    renderGame();
   }
 }
 
@@ -1141,6 +1141,10 @@ element<HTMLButtonElement>("#abandon-game").onclick = () => void abandonGame();
 element<HTMLButtonElement>("#raise-bug").onclick = openBugReport;
 element<HTMLButtonElement>("#submit-turn").onclick = () => {
   void (async () => {
+    if (turnRequestPending) return;
+    turnRequestPending = true;
+    notice("Checking the submitted turn…");
+    renderGame();
     try {
       const current = currentGame();
       state.current = await api<GameDetail>(
@@ -1154,6 +1158,9 @@ element<HTMLButtonElement>("#submit-turn").onclick = () => {
       renderGame();
     } catch (error) {
       await recoverGameAfterFailedAction(error);
+    } finally {
+      turnRequestPending = false;
+      renderGame();
     }
   })();
 };

@@ -99,38 +99,20 @@ If a piece is moved to a historical board (a board where a move has already been
 
 A player may have to make more than one move in a 5D turn. The turn can be submitted only when every required active board at the Present has advanced to the opponent's colour. Intermediate moves are staged until the whole turn is submitted.
 
-An active latest board with no pieces belonging to its side to move is dormant: it does not hold the Present or require a move. It can become relevant again if a piece later arrives from another board. In particular, moving a king or royal queen away from its source board does not create a stalemate merely because that board no longer contains a royal piece.
+The shared 5D reference engine decides which late or inactive fronts may
+participate in a turn. A move can be staged only if a legal completed turn
+contains that draft. An optional move can change how a later jump branches.
 
 ### Special moves
 
-Castling and en passant are local to one spatial board; neither move crosses time or timelines. In Standard Chess, castling may not begin in check, cross an attacked square, or finish in check. Check does not restrict castling in either 5D ruleset. Castling rights and the one-move en-passant window follow each resulting board history independently.
+Both 5D modes use reference castling and queen promotion. The alternate mode
+keeps its own starting army. Standard Chess retains orthodox special moves
+and the four standard promotion choices.
 
-An orthodox pawn reaching its final spatial rank promotes to queen, rook, bishop, or knight. A brawn reaching its final spatial rank promotes to royal queen, princess, dragon, or unicorn.
+## Timelines and check
 
-## Timelines
-
-When a player moves a piece to a historical board (there are boards after it in the same timeline), a new timeline is added above or below all current timelines.
-New timelines are created adjacent to the current ones.
-Timelines created by White extend in one direction, whereas timelines created by Black extend in the opposite direction.
-
-Each player is allowed to create an arbitrary number of timelines.
-However, if one player creates two or more timelines than the other, the extra timelines will be inactive.
-Such timelines are functionally optional, as shifting the Present does not demand any interaction with them.
-
-### Inactive Timelines
-
-Timelines are inactive when the player that created them has branched too much.
-Boards on inactive timelines (referred to as "inactive boards") do not affect the location of the Present and thus, usually no moves need be made on them.
-The opposing player may accept an inactive timeline at any point when its latest board is theirs to move. They may make a move from that board without waiting for it to reach the Present; the move permanently marks the timeline accepted and active. Moving onto the latest board of an inactive opposing timeline also accepts it. A player cannot accept their own inactive timeline.
-The existence of inactive timelines is a game balance concession to prevent one player from continuously branching, and also causes having timeline advantage (having less timelines created than your opponent) to be worth slightly more than a queen.
-
-## Check
-
-Check occurs when a royal piece (a king or a royal queen) is under threat of capture.
-In 5D Chess and 5D Variant Chess, check is informational: players may move into check, make moves that do not answer check, and submit a turn while a royal piece remains attacked. The game continues until a royal piece is actually captured.
-
-### Checkmate
-
-Checkmate and stalemate adjudication apply only to Standard Chess. Its king cannot be captured, and it also implements threefold repetition, the fifty-move rule, and insufficient-material draws.
-
-In a 5D game, directly capturing any royal piece ends the game immediately. Checkmate, stalemate, repetition, and move-count draws do not end a 5D game before that capture.
+The reference engine computes the active range and the Present. A complete
+5D turn must advance the Present and protect all of the mover's royals.
+A player with no legal turn loses by checkmate if checked. Otherwise the
+reference stalemate and exiled-king rules apply. Standard Chess also
+adjudicates threefold repetition, the fifty-move rule, and insufficient material.

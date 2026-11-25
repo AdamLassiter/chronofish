@@ -202,13 +202,23 @@ impl Database {
             .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)
     }
 
-    pub fn ensure_bot(&self, username: &str, display_name: &str) -> rusqlite::Result<UserRecord> {
+    /// Creates or refreshes a bot account. A new account starts at `initial_rating`; an
+    /// existing one is reseeded only while it has no rated games, so earned ratings stay.
+    pub fn ensure_bot(
+        &self,
+        username: &str,
+        display_name: &str,
+        initial_rating: i32,
+    ) -> rusqlite::Result<UserRecord> {
         let connection = self.connection.lock().expect("database mutex poisoned");
         connection.execute(
-            "INSERT INTO users (username, display_name, is_bot, created_at)
-             VALUES (?1, ?2, 1, ?3)
-             ON CONFLICT(username) DO UPDATE SET display_name = excluded.display_name, is_bot = 1",
-            params![username, display_name, now()],
+            "INSERT INTO users (username, display_name, is_bot, rating, created_at)
+             VALUES (?1, ?2, 1, ?3, ?4)
+             ON CONFLICT(username) DO UPDATE SET
+                 display_name = excluded.display_name,
+                 is_bot = 1,
+                 rating = CASE WHEN users.games_played = 0 THEN excluded.rating ELSE users.rating END",
+            params![username, display_name, initial_rating, now()],
         )?;
         Self::auth_by_username_on(&connection, username)?
             .map(|record| record.user)
@@ -776,7 +786,7 @@ mod tests {
     fn raven_is_renamed_to_bobby_fissure_keeping_its_account() {
         let database = Database::in_memory().expect("database");
         let raven = database
-            .ensure_bot("bot-raven", "Raven (baseline)")
+            .ensure_bot("bot-raven", "Raven (baseline)", 1500)
             .expect("legacy bot");
         database
             .connection
@@ -847,10 +857,30 @@ mod tests {
     }
 
     #[test]
+    fn bot_seed_ratings_apply_until_the_first_rated_game() {
+        let database = Database::in_memory().expect("database");
+        let bot = database.ensure_bot("bot-seeded", "Seeded", 1500).unwrap();
+        assert_eq!(bot.rating, 1500);
+        let reseeded = database.ensure_bot("bot-seeded", "Seeded", 1263).unwrap();
+        assert_eq!(reseeded.rating, 1263);
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE users SET rating = 1300, games_played = 1 WHERE id = ?1",
+                [bot.id],
+            )
+            .unwrap();
+        let kept = database.ensure_bot("bot-seeded", "Seeded", 900).unwrap();
+        assert_eq!((kept.id, kept.rating), (bot.id, 1300));
+    }
+
+    #[test]
     fn bot_accounts_are_normal_rated_users_without_passwords() {
         let database = Database::in_memory().expect("database");
         let bot = database
-            .ensure_bot("bot-test", "Test bot")
+            .ensure_bot("bot-test", "Test bot", 1500)
             .expect("bot account");
         let human = database
             .create_human("human", "Human", "hash")

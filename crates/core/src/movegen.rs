@@ -1,6 +1,138 @@
 use crate::*;
 
 impl Game {
+    /// Returns the complete authoritative action set for the current turn.
+    #[must_use]
+    pub fn legal_actions(&self) -> Vec<PlayerAction> {
+        if self.result.is_some() {
+            return Vec::new();
+        }
+        if let Some(reference) = &self.reference {
+            return reference.actions(self.ruleset);
+        }
+        let mut actions = Vec::new();
+        let mut standard_probe =
+            (self.ruleset == Ruleset::Standard).then(|| self.clone_for_search());
+        for timeline in &self.timelines {
+            let Some(board) = timeline.boards.last() else {
+                continue;
+            };
+            let source = Position {
+                timeline_id: timeline.id,
+                time: board.time,
+                x: 0,
+                y: 0,
+            };
+            let accepts_timeline = self.can_accept_inactive_board(source, self.turn);
+            if (!self.is_active_timeline(timeline.id) && !accepts_timeline)
+                || board.side_to_move != self.turn
+                || (!accepts_timeline && self.present_time() != Some(board.time))
+            {
+                continue;
+            }
+            for y in 0..BOARD_SIZE_I32 {
+                for x in 0..BOARD_SIZE_I32 {
+                    let from = Position {
+                        timeline_id: timeline.id,
+                        time: board.time,
+                        x,
+                        y,
+                    };
+                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
+                    else {
+                        continue;
+                    };
+                    self.for_each_piece_candidate_destination(from, piece, |to| {
+                        let Some((candidate, kind)) = self.legal_move_kind(from, to) else {
+                            return true;
+                        };
+                        if !self.allows_search_move(from, to, candidate, kind) {
+                            return true;
+                        }
+                        if self.ruleset == Ruleset::Standard
+                            && self
+                                .piece_at(to)
+                                .is_some_and(|target| Self::is_royal_piece(target.piece_type))
+                        {
+                            return true;
+                        }
+                        if let Some(probe) = &mut standard_probe {
+                            let Some(undo) = probe.make_search_move(MoveStep { from, to }) else {
+                                return true;
+                            };
+                            // All promotion choices occupy the same square for king safety.
+                            let in_check = probe.is_in_check(self.turn);
+                            probe.unmake_search_move(undo);
+                            if in_check {
+                                return true;
+                            }
+                        }
+                        let promotions: &[Option<PieceType>] =
+                            if Self::requires_promotion(piece, to) {
+                                if piece.piece_type == PieceType::Brawn {
+                                    &[
+                                        Some(PieceType::RoyalQueen),
+                                        Some(PieceType::Princess),
+                                        Some(PieceType::Dragon),
+                                        Some(PieceType::Unicorn),
+                                    ]
+                                } else {
+                                    &[
+                                        Some(PieceType::Queen),
+                                        Some(PieceType::Rook),
+                                        Some(PieceType::Bishop),
+                                        Some(PieceType::Knight),
+                                    ]
+                                }
+                            } else {
+                                &[None]
+                            };
+                        for &promotion in promotions {
+                            let movement = Move {
+                                from,
+                                to,
+                                promotion,
+                            };
+                            actions.push(PlayerAction::Move { movement });
+                        }
+                        true
+                    });
+                }
+            }
+        }
+        actions.sort_by_key(|action| match action {
+            PlayerAction::Move { movement } => (
+                0,
+                movement.from,
+                movement.to,
+                movement
+                    .promotion
+                    .map_or(0, Self::repetition_piece_type_code),
+            ),
+            PlayerAction::SubmitTurn => (
+                1,
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 0,
+                    y: 0,
+                },
+                Position {
+                    timeline_id: 0,
+                    time: 0,
+                    x: 0,
+                    y: 0,
+                },
+                0,
+            ),
+        });
+        actions.dedup();
+        if self.can_submit() {
+            actions.push(PlayerAction::SubmitTurn);
+        }
+        actions
+    }
+
     // Check is evaluated over the latest board of every timeline because royal
     // pieces may exist on multiple active branch fronts.
     pub(crate) fn is_in_check(&self, color: Color) -> bool {

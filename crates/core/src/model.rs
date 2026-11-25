@@ -149,6 +149,15 @@ impl fmt::Display for Position {
     }
 }
 
+/// Properties of a move used by notation formatters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MoveDescription {
+    pub piece: PieceType,
+    pub capture: bool,
+    pub castle: bool,
+    pub creates_timeline: bool,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub struct Move {
@@ -233,6 +242,8 @@ pub struct Game {
     pub(crate) position_hash: u64,
     #[serde(default)]
     pub(crate) repetition_history: Vec<u64>,
+    #[serde(default)]
+    pub(crate) reference: Option<crate::reference::ReferenceGame>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

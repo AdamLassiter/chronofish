@@ -1,0 +1,16 @@
+[package]
+name = "chronofish-notation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "5D chess notation and replay adapters"
+
+[features]
+chronofish = ["dep:chronofish-core"]
+
+[dependencies]
+chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-core = { path = "../core", optional = true }
+
+[lints]

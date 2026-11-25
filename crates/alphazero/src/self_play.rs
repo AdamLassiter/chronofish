@@ -558,7 +558,9 @@ impl ReplayBuffer {
     }
 
     pub fn extend_game(&mut self, game: SelfPlayGame, capacity: usize) {
-        self.format_version = 2;
+        if game.ruleset != Ruleset::Standard {
+            self.format_version = 3;
+        }
         self.games.push(ReplayGame {
             validated: std::sync::OnceLock::new(),
             ruleset: game.ruleset,
@@ -592,7 +594,7 @@ impl ReplayBuffer {
         Ok(())
     }
 
-    /// Loads a version-2 compressed replay window.
+    /// Loads a compressed replay window with compatible rule semantics.
     ///
     /// # Errors
     ///
@@ -602,7 +604,13 @@ impl ReplayBuffer {
         let decoder = zstd::stream::read::Decoder::new(reader)?;
         let replay: Self =
             rmp_serde::from_read(decoder).map_err(|error| ReplayError::Codec(error.to_string()))?;
-        if replay.format_version != 2 {
+        if !matches!(replay.format_version, 2 | 3)
+            || (replay.format_version == 2
+                && replay
+                    .games
+                    .iter()
+                    .any(|game| game.ruleset != Ruleset::Standard))
+        {
             return Err(ReplayError::Version(replay.format_version));
         }
         Ok(replay)

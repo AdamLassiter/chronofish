@@ -2,7 +2,9 @@ use chronofish_core::{AiPlayer, Game, PlayerAction, Ruleset};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 
-use crate::{BlueshiftConfig, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen};
+use crate::{
+    BlueshiftConfig, BlueshiftLevel, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
+};
 
 /// Plays the move between two squares of the present board, submitting if the turn stays open.
 fn play(game: &mut Game, from: (i32, i32), to: (i32, i32)) {
@@ -187,5 +189,31 @@ fn bots_have_distinct_accounts() {
     assert_eq!(
         names,
         ["bot-grabablanca", "bot-deep-blueshift", "bot-monte-carlsen"]
+    );
+}
+
+#[test]
+fn blueshift_levels_have_rising_budgets_and_their_own_accounts() {
+    assert_eq!(
+        BlueshiftLevel::Hard.max_nodes(),
+        BlueshiftConfig::default().max_nodes
+    );
+    assert!(
+        BlueshiftLevel::ALL
+            .windows(2)
+            .all(|pair| pair[0].max_nodes() < pair[1].max_nodes())
+    );
+    let names = BlueshiftLevel::ALL.map(|level| DeepBlueshift::level(level).profile().username);
+    assert_eq!(
+        names,
+        [
+            "bot-deep-blueshift-easy",
+            "bot-deep-blueshift-medium",
+            "bot-deep-blueshift"
+        ]
+    );
+    assert_eq!(
+        DeepBlueshift::default().profile().username,
+        "bot-deep-blueshift"
     );
 }

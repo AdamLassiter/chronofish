@@ -5,9 +5,10 @@ use std::path::PathBuf;
 use chronofish_alphazero::{
     AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot, PolicyValueNetwork, SearchConfig,
 };
-use chronofish_classic::{DeepBlueshift, Grabablanca, MonteCarlsen};
-use chronofish_core::{AiPlayer, Game, Move, PieceType, Position, Ruleset};
-use chronofish_random_bot::BobbyFissureBot;
+use chronofish_classic::{
+    BlueshiftLevel, BobbyFissureBot, DeepBlueshift, Grabablanca, MonteCarlsen,
+};
+use chronofish_core::{AiPlayer, Game, Move, PieceType, PlayerAction, Position, Ruleset};
 use clap::{Parser, ValueEnum};
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -41,6 +42,10 @@ enum Opponent {
     Grabablanca,
     /// Deep Blueshift: alpha-beta search with a handcrafted evaluation.
     Blueshift,
+    /// Deep Blueshift with a 1k-node budget.
+    BlueshiftEasy,
+    /// Deep Blueshift with a 10k-node budget.
+    BlueshiftMedium,
     /// Monte Carlsen: UCT tree search with heuristic rollouts.
     Carlsen,
     /// `AlphaNow`: the network's top policy action, no search.
@@ -62,11 +67,19 @@ struct Cli {
     /// Checkpoint for the network bots (cpu, gpu, alpha-now); untrained if omitted.
     #[arg(long)]
     model: Option<PathBuf>,
+    /// Start from a file containing a 5DUCI move history.
+    #[arg(long, conflicts_with = "pgn_history")]
+    lan_history: Option<PathBuf>,
+    /// Replay the main line of a 5DPGN file from the single-board 5D start.
+    #[arg(long)]
+    pgn_history: Option<PathBuf>,
+    /// Write the submitted main line as 5DPGN when the session ends (Multiverse mode).
+    #[arg(long)]
+    export_pgn: Option<PathBuf>,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-    let mut game = Game::new(cli.mode.into());
+/// Builds the selected computer opponent, or `None` for a human-only game.
+fn make_opponent(cli: &Cli) -> Result<Option<Box<dyn AiPlayer>>, Box<dyn std::error::Error>> {
     let search = SearchConfig {
         simulations: cli.ai_simulations,
         ..SearchConfig::default()
@@ -76,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .as_ref()
         .map(PolicyValueNetwork::load)
         .transpose()?;
-    let mut bot: Option<Box<dyn AiPlayer>> = match cli.opponent {
+    Ok(match cli.opponent {
         Opponent::Human => None,
         Opponent::Cpu => Some(Box::new(model.map_or_else(
             || ChronofishCpuBot::bootstrap(search, 0x0043_5055),
@@ -91,9 +104,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )),
         Opponent::Fissure => Some(Box::new(BobbyFissureBot::default())),
         Opponent::Grabablanca => Some(Box::new(Grabablanca::default())),
-        Opponent::Blueshift => Some(Box::new(DeepBlueshift::default())),
+        Opponent::Blueshift => Some(Box::new(DeepBlueshift::level(BlueshiftLevel::Hard))),
+        Opponent::BlueshiftEasy => Some(Box::new(DeepBlueshift::level(BlueshiftLevel::Easy))),
+        Opponent::BlueshiftMedium => Some(Box::new(DeepBlueshift::level(BlueshiftLevel::Medium))),
         Opponent::Carlsen => Some(Box::new(MonteCarlsen::default())),
-    };
+    })
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    let mut bot = make_opponent(&cli)?;
+    let mut game = Game::new(cli.mode.into());
+    if cli.export_pgn.is_some() && game.ruleset() == Ruleset::Standard {
+        return Err("--export-pgn requires a 5D mode".into());
+    }
+    let mut history = Vec::new();
+    if let Some(path) = cli.lan_history {
+        (game, history) = chronofish_notation::decode_lan(&game, &std::fs::read_to_string(path)?)?;
+    }
+    if let Some(path) = cli.pgn_history {
+        (game, history) =
+            chronofish_notation::replay_5dpgn(&game, &std::fs::read_to_string(path)?)?;
+    }
 
     println!("Chronofish — {}", game.ruleset());
     println!("Commands: move <from> <to> [promotion], submit, undo, legal, boards, help, quit");
@@ -115,6 +147,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 decision.root_value
             );
             game.apply_action(decision.action)?;
+            history.push(decision.action);
             continue;
         }
         print!("> ");
@@ -136,39 +169,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  {action:?}");
                 }
             }
-            ["submit"] => {
-                if let Err(error) = game.submit_turn() {
-                    println!("error: {error}");
+            ["submit"] => match game.submit_turn() {
+                Ok(()) => history.push(PlayerAction::SubmitTurn),
+                Err(error) => println!("error: {error}"),
+            },
+            ["undo"] => match game.undo_staged_move() {
+                Ok(()) => {
+                    history.pop();
+                }
+                Err(error) => println!("error: {error}"),
+            },
+            ["move" | "m", from, to] => {
+                if let Some(action) = play(&mut game, from, to, None) {
+                    history.push(action);
                 }
             }
-            ["undo"] => {
-                if let Err(error) = game.undo_staged_move() {
-                    println!("error: {error}");
-                }
-            }
-            ["move" | "m", from, to] => play(&mut game, from, to, None),
             ["move" | "m", from, to, promotion] => {
-                play(&mut game, from, to, Some(promotion));
+                if let Some(action) = play(&mut game, from, to, Some(promotion)) {
+                    history.push(action);
+                }
             }
             _ => println!("Unknown command. Type help."),
         }
     }
+    if let Some(path) = cli.export_pgn {
+        let text = chronofish_notation::export_5dpgn_for(game.ruleset(), &history)?;
+        let mut file = std::fs::File::create_new(path)?;
+        file.write_all(text.as_bytes())?;
+    }
     Ok(())
 }
 
-fn play(game: &mut Game, from: &str, to: &str, promotion: Option<&&str>) {
+fn play(game: &mut Game, from: &str, to: &str, promotion: Option<&&str>) -> Option<PlayerAction> {
     let result = parse_position(from).and_then(|from| {
         let to = parse_position(to)?;
         let promotion = promotion.map(|value| parse_promotion(value)).transpose()?;
-        game.apply_move(Move {
-            from,
-            to,
-            promotion,
-        })
-        .map_err(|error| error.to_string())
+        let action = PlayerAction::Move {
+            movement: Move {
+                from,
+                to,
+                promotion,
+            },
+        };
+        game.apply_action(action)
+            .map_err(|error| error.to_string())?;
+        Ok(action)
     });
-    if let Err(error) = result {
-        println!("error: {error}");
+    match result {
+        Ok(action) => Some(action),
+        Err(error) => {
+            println!("error: {error}");
+            None
+        }
     }
 }
 

@@ -10,7 +10,6 @@ description = "Repeatable release-mode throughput regression checks for Chronofi
 chronofish-alphazero = { path = "../alphazero" }
 chronofish-classic = { path = "../classic" }
 chronofish-core = { path = "../core" }
-chronofish-random-bot = { path = "../random-bot" }
 clap = { version = "4", features = ["derive"] }
 rand_chacha = "0.9"
 rayon = "1"

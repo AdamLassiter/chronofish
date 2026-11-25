@@ -1,0 +1,44 @@
+[package]
+name = "kairos"
+version = "0.1.0"
+edition = "2024"
+description = "A 5D Chess With Multiverse Time Travel engine"
+license = "GPL-3.0-only"
+
+[lib]
+name = "kairos"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kairos"
+path = "src/bin/kairos.rs"
+
+[[bin]]
+name = "ktools"
+path = "src/bin/ktools.rs"
+
+[[bin]]
+name = "sprt"
+path = "src/bin/sprt.rs"
+
+[[bin]]
+name = "tune"
+path = "src/bin/tune.rs"
+
+[features]
+prof = ["chronofish-5d-rules/prof"]
+
+[dependencies]
+chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-notation = { path = "../notation" }
+
+
+# Keep upstream kernel code and its intentional unsafe blocks intact.
+[lints.clippy]
+chunks_exact_to_as_chunks = "allow"
+collapsible_if = "allow"
+items_after_test_module = "allow"
+needless_range_loop = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+unnecessary_sort_by = "allow"

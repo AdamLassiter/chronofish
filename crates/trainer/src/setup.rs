@@ -155,6 +155,12 @@ const SPECS: &[Spec] = &[
     )
     .once(),
     field(
+        "warm_start",
+        TRAINING,
+        "Import weights into a fresh reference-rules run. Leave blank to initialize a new model.",
+    )
+    .once(),
+    field(
         "arena_games",
         ARENA,
         "Promotion games between candidate and best. Six covers each ruleset once per colour. More games make promotion less of a coin flip.",
@@ -291,7 +297,7 @@ impl Field {
             if self.value == "true" {
                 argv.push(format!("--{}", self.long));
             }
-        } else {
+        } else if self.spec.id != "warm_start" || !self.value.is_empty() {
             argv.push(format!("--{}", self.long));
             argv.push(self.value.clone());
         }

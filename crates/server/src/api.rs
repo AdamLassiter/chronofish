@@ -106,7 +106,11 @@ impl AppState {
         let mut bots = HashMap::new();
         for player in players {
             let profile = player.profile();
-            let user = database.ensure_bot(profile.username, profile.display_name)?;
+            let user = database.ensure_bot(
+                profile.username,
+                profile.display_name,
+                crate::seed_rating(profile.username),
+            )?;
             bots.insert(user.id, player);
         }
         Ok(Self {
@@ -264,34 +268,45 @@ async fn games(
     ))
 }
 
+async fn run_game_work<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
+) -> Result<T, ApiError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(ApiError::internal)?
+}
+
 async fn create_game(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<CreateGameBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let opponent_name = normalize_username(&body.opponent)?;
-    let opponent = state
-        .database
-        .auth_by_username(&opponent_name)
-        .map_err(ApiError::internal)?
-        .map(|record| record.user)
-        .ok_or_else(|| ApiError::not_found("opponent not found"))?;
-    if opponent.id == user.id {
-        return Err(ApiError::bad_request("choose a different opponent"));
-    }
-    let ruleset = parse_ruleset(&body.ruleset)?;
-    let (attacker, defender) = match body.play_as.as_str() {
-        "white" | "attacker" => (user.id, opponent.id),
-        "black" | "defender" => (opponent.id, user.id),
-        _ => return Err(ApiError::bad_request("playAs must be white or black")),
-    };
-    let game = state
-        .database
-        .create_game(ruleset, attacker, defender)
-        .map_err(ApiError::internal)?;
-    let game = advance_bots(&state, game)?;
-    Ok(Json(game_detail(&state, &game, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let opponent_name = normalize_username(&body.opponent)?;
+        let opponent = state
+            .database
+            .auth_by_username(&opponent_name)
+            .map_err(ApiError::internal)?
+            .map(|record| record.user)
+            .ok_or_else(|| ApiError::not_found("opponent not found"))?;
+        if opponent.id == user.id {
+            return Err(ApiError::bad_request("choose a different opponent"));
+        }
+        let ruleset = parse_ruleset(&body.ruleset)?;
+        let (attacker, defender) = match body.play_as.as_str() {
+            "white" | "attacker" => (user.id, opponent.id),
+            "black" | "defender" => (opponent.id, user.id),
+            _ => return Err(ApiError::bad_request("playAs must be white or black")),
+        };
+        let game = state
+            .database
+            .create_game(ruleset, attacker, defender)
+            .map_err(ApiError::internal)?;
+        let game = advance_bots(&state, game)?;
+        Ok(Json(game_detail(&state, &game, user.id)?))
+    })
+    .await
 }
 
 async fn get_game(
@@ -299,9 +314,12 @@ async fn get_game(
     headers: HeaderMap,
     Path(id): Path<i64>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let game = load_participating_game(&state, id, user.id)?;
-    Ok(Json(game_detail(&state, &game, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let game = load_participating_game(&state, id, user.id)?;
+        Ok(Json(game_detail(&state, &game, user.id)?))
+    })
+    .await
 }
 
 async fn play_move(
@@ -310,28 +328,31 @@ async fn play_move(
     Path(id): Path<i64>,
     Json(body): Json<MoveBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let mut stored = load_participating_game(&state, id, user.id)?;
-    ensure_actor(&stored, &user, body.version)?;
-    stored
-        .game
-        .apply_move(body.movement)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let action = PlayerAction::Move {
-        movement: body.movement,
-    };
-    stored.version = state
-        .database
-        .save_action(
-            stored.id,
-            stored.version,
-            user.id,
-            &serde_json::to_string(&action).map_err(ApiError::internal)?,
-            &stored.game,
-        )
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    let stored = reload_and_advance_bots(&state, stored.id)?;
-    Ok(Json(game_detail(&state, &stored, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let mut stored = load_participating_game(&state, id, user.id)?;
+        ensure_actor(&stored, &user, body.version)?;
+        stored
+            .game
+            .apply_move(body.movement)
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let action = PlayerAction::Move {
+            movement: body.movement,
+        };
+        stored.version = state
+            .database
+            .save_action(
+                stored.id,
+                stored.version,
+                user.id,
+                &serde_json::to_string(&action).map_err(ApiError::internal)?,
+                &stored.game,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        let stored = reload_and_advance_bots(&state, stored.id)?;
+        Ok(Json(game_detail(&state, &stored, user.id)?))
+    })
+    .await
 }
 
 async fn submit_turn(
@@ -340,26 +361,29 @@ async fn submit_turn(
     Path(id): Path<i64>,
     Json(body): Json<VersionBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let mut stored = load_participating_game(&state, id, user.id)?;
-    ensure_actor(&stored, &user, body.version)?;
-    stored
-        .game
-        .submit_turn()
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let action = PlayerAction::SubmitTurn;
-    stored.version = state
-        .database
-        .save_action(
-            stored.id,
-            stored.version,
-            user.id,
-            &serde_json::to_string(&action).map_err(ApiError::internal)?,
-            &stored.game,
-        )
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    let stored = reload_and_advance_bots(&state, stored.id)?;
-    Ok(Json(game_detail(&state, &stored, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let mut stored = load_participating_game(&state, id, user.id)?;
+        ensure_actor(&stored, &user, body.version)?;
+        stored
+            .game
+            .submit_turn()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        let action = PlayerAction::SubmitTurn;
+        stored.version = state
+            .database
+            .save_action(
+                stored.id,
+                stored.version,
+                user.id,
+                &serde_json::to_string(&action).map_err(ApiError::internal)?,
+                &stored.game,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        let stored = reload_and_advance_bots(&state, stored.id)?;
+        Ok(Json(game_detail(&state, &stored, user.id)?))
+    })
+    .await
 }
 
 async fn undo_staged_move(
@@ -368,27 +392,30 @@ async fn undo_staged_move(
     Path(id): Path<i64>,
     Json(body): Json<VersionBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let mut stored = load_participating_game(&state, id, user.id)?;
-    ensure_actor(&stored, &user, body.version)?;
-    if !stored.game.has_staged_moves() {
-        return Err(ApiError::bad_request("there is no staged move to undo"));
-    }
-    stored
-        .game
-        .undo_staged_move()
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    stored.version = state
-        .database
-        .save_action(
-            stored.id,
-            stored.version,
-            user.id,
-            &json!({ "type": "undoStagedMove" }).to_string(),
-            &stored.game,
-        )
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    Ok(Json(game_detail(&state, &stored, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let mut stored = load_participating_game(&state, id, user.id)?;
+        ensure_actor(&stored, &user, body.version)?;
+        if !stored.game.has_staged_moves() {
+            return Err(ApiError::bad_request("there is no staged move to undo"));
+        }
+        stored
+            .game
+            .undo_staged_move()
+            .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        stored.version = state
+            .database
+            .save_action(
+                stored.id,
+                stored.version,
+                user.id,
+                &json!({ "type": "undoStagedMove" }).to_string(),
+                &stored.game,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        Ok(Json(game_detail(&state, &stored, user.id)?))
+    })
+    .await
 }
 
 async fn retry_ai(
@@ -397,15 +424,18 @@ async fn retry_ai(
     Path(id): Path<i64>,
     Json(body): Json<VersionBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let mut stored = load_participating_game(&state, id, user.id)?;
-    ensure_current_active(&stored, body.version)?;
-    if !stored.side_user(stored.game.turn()).is_bot {
-        return Err(ApiError::conflict("the current player is not an AI"));
-    }
-    repair_failed_bot_turn(&state, &mut stored)?;
-    let stored = advance_bots(&state, stored)?;
-    Ok(Json(game_detail(&state, &stored, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let mut stored = load_participating_game(&state, id, user.id)?;
+        ensure_current_active(&stored, body.version)?;
+        if !stored.side_user(stored.game.turn()).is_bot {
+            return Err(ApiError::conflict("the current player is not an AI"));
+        }
+        repair_failed_bot_turn(&state, &mut stored)?;
+        let stored = advance_bots(&state, stored)?;
+        Ok(Json(game_detail(&state, &stored, user.id)?))
+    })
+    .await
 }
 
 async fn abandon_game(
@@ -414,34 +444,37 @@ async fn abandon_game(
     Path(id): Path<i64>,
     Json(body): Json<VersionBody>,
 ) -> Result<Json<GameDetail>, ApiError> {
-    let user = authenticated_user(&state, &headers)?;
-    let mut stored = load_participating_game(&state, id, user.id)?;
-    ensure_current_active(&stored, body.version)?;
-    let side = if stored.attacker.id == user.id {
-        Side::White
-    } else {
-        Side::Black
-    };
-    stored
-        .game
-        .concede(side)
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    stored.version = state
-        .database
-        .save_action(
-            stored.id,
-            stored.version,
-            user.id,
-            &json!({ "type": "concede" }).to_string(),
-            &stored.game,
-        )
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    let stored = state
-        .database
-        .game_by_id(stored.id)
-        .map_err(ApiError::internal)?
-        .ok_or_else(|| ApiError::not_found("game disappeared"))?;
-    Ok(Json(game_detail(&state, &stored, user.id)?))
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let mut stored = load_participating_game(&state, id, user.id)?;
+        ensure_current_active(&stored, body.version)?;
+        let side = if stored.attacker.id == user.id {
+            Side::White
+        } else {
+            Side::Black
+        };
+        stored
+            .game
+            .concede(side)
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        stored.version = state
+            .database
+            .save_action(
+                stored.id,
+                stored.version,
+                user.id,
+                &json!({ "type": "concede" }).to_string(),
+                &stored.game,
+            )
+            .map_err(|error| ApiError::conflict(error.to_string()))?;
+        let stored = state
+            .database
+            .game_by_id(stored.id)
+            .map_err(ApiError::internal)?
+            .ok_or_else(|| ApiError::not_found("game disappeared"))?;
+        Ok(Json(game_detail(&state, &stored, user.id)?))
+    })
+    .await
 }
 
 async fn create_bug_report(
@@ -544,6 +577,9 @@ fn require_bug_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiErr
 }
 
 fn ensure_current_active(stored: &StoredGame, version: i64) -> Result<(), ApiError> {
+    if !stored.game.uses_current_rules() {
+        return Err(ApiError::conflict("legacy 5D games are read-only"));
+    }
     if stored.version != version {
         return Err(ApiError::conflict("game changed; reload before acting"));
     }
@@ -774,8 +810,8 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use chronofish_classic::BobbyFissureBot;
     use chronofish_core::{AiDecision, AiProfile, Game};
-    use chronofish_random_bot::BobbyFissureBot;
 
     struct FailsOnceBot {
         failed: bool,
@@ -1175,9 +1211,12 @@ mod tests {
             .iter()
             .find(|user| user["username"] == "bot-bobby-fissure")
             .expect("bot");
-        assert_eq!(resigner["rating"], 1484);
+        // The bot is seeded at 995, so beating a 1500 newcomer is an upset worth more than 16.
+        let resigner_rating = resigner["rating"].as_i64().expect("rating");
+        let bot_rating = bot["rating"].as_i64().expect("rating");
+        assert!(resigner_rating < 1484, "{resigner_rating}");
+        assert_eq!(bot_rating - 995, 1500 - resigner_rating);
         assert_eq!(resigner["gamesPlayed"], 1);
-        assert_eq!(bot["rating"], 1516);
         assert_eq!(bot["gamesPlayed"], 1);
 
         let (status, _) = request(

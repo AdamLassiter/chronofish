@@ -54,19 +54,81 @@ fn key(game: &Game) -> TableKey {
     (game.position_hash(), game.turn())
 }
 
+/// Difficulty presets: the same engine with a smaller or larger node budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlueshiftLevel {
+    Easy,
+    Medium,
+    Hard,
+}
+
+impl BlueshiftLevel {
+    pub const ALL: [Self; 3] = [Self::Easy, Self::Medium, Self::Hard];
+
+    /// Node budget per decision. Hard is the default configuration.
+    #[must_use]
+    pub const fn max_nodes(self) -> usize {
+        match self {
+            Self::Easy => 1_000,
+            Self::Medium => 10_000,
+            Self::Hard => 80_000,
+        }
+    }
+
+    #[must_use]
+    pub const fn profile(self) -> AiProfile {
+        match self {
+            Self::Easy => AiProfile {
+                username: "bot-deep-blueshift-easy",
+                display_name: "Deep Blueshift (easy)",
+            },
+            Self::Medium => AiProfile {
+                username: "bot-deep-blueshift-medium",
+                display_name: "Deep Blueshift (medium)",
+            },
+            Self::Hard => AiProfile {
+                username: "bot-deep-blueshift",
+                display_name: "Deep Blueshift",
+            },
+        }
+    }
+}
+
 /// Iterative-deepening negamax with a transposition table and quiescence search.
 pub struct DeepBlueshift {
     config: BlueshiftConfig,
+    profile: AiProfile,
     table: HashMap<TableKey, Entry>,
 }
 
 impl DeepBlueshift {
+    /// A custom configuration, playing under the Hard account.
     #[must_use]
     pub fn new(config: BlueshiftConfig) -> Self {
         Self {
             config,
+            profile: BlueshiftLevel::Hard.profile(),
             table: HashMap::new(),
         }
+    }
+
+    /// A difficulty preset with its own account.
+    #[must_use]
+    pub fn level(level: BlueshiftLevel) -> Self {
+        Self {
+            profile: level.profile(),
+            ..Self::new(BlueshiftConfig {
+                max_nodes: level.max_nodes(),
+                ..BlueshiftConfig::default()
+            })
+        }
+    }
+
+    /// Keeps a preset's account while overriding its node budget.
+    #[must_use]
+    pub const fn with_max_nodes(mut self, max_nodes: usize) -> Self {
+        self.config.max_nodes = max_nodes;
+        self
     }
 }
 
@@ -320,10 +382,7 @@ impl DeepBlueshift {
 
 impl AiPlayer for DeepBlueshift {
     fn profile(&self) -> AiProfile {
-        AiProfile {
-            username: "bot-deep-blueshift",
-            display_name: "Deep Blueshift",
-        }
+        self.profile
     }
 
     fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String> {

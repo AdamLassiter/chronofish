@@ -1,4 +1,5 @@
 mod tournament;
+mod uci;
 
 use std::error::Error;
 use std::time::Instant;

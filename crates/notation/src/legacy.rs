@@ -1,17 +1,17 @@
-use crate::*;
+//! Parser for Chronofish’s original `TnLm` move notation.
 
-#[allow(dead_code)]
-pub(crate) struct ParsedMove {
-    pub(crate) from: Position,
-    pub(crate) to: Position,
-    pub(crate) piece: char,
-    pub(crate) captured: Option<char>,
-    pub(crate) branch_timeline_id: Option<i32>,
+use chronofish_core::{PieceType, Position};
+
+pub struct ParsedMove {
+    pub from: Position,
+    pub to: Position,
+    pub piece: char,
+    pub captured: Option<char>,
+    pub branch_timeline_id: Option<i32>,
 }
 
-#[allow(dead_code)]
 impl ParsedMove {
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+    pub fn parse(text: &str) -> Result<Self, String> {
         let chars: Vec<char> = text.trim().chars().collect();
         let mut index = 0;
         let from_time = parse_prefixed_i32(&chars, &mut index, 'T')?;
@@ -82,8 +82,7 @@ impl ParsedMove {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn strip_notation_comments(line: &str) -> String {
+pub fn strip_notation_comments(line: &str) -> String {
     let mut output = String::new();
     let mut in_comment = false;
     for character in line.chars() {
@@ -97,12 +96,7 @@ pub(crate) fn strip_notation_comments(line: &str) -> String {
     output
 }
 
-#[allow(dead_code)]
-pub(crate) fn parse_prefixed_i32(
-    chars: &[char],
-    index: &mut usize,
-    prefix: char,
-) -> Result<i32, String> {
+fn parse_prefixed_i32(chars: &[char], index: &mut usize, prefix: char) -> Result<i32, String> {
     if chars.get(*index) != Some(&prefix) {
         return Err(format!("Expected `{prefix}`"));
     }
@@ -127,8 +121,7 @@ pub(crate) fn parse_prefixed_i32(
         .map_err(|error| error.to_string())
 }
 
-#[allow(dead_code)]
-pub(crate) fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String> {
+fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i32), String> {
     let file = *chars
         .get(*index)
         .ok_or_else(|| "Missing file".to_string())?;
@@ -156,8 +149,7 @@ pub(crate) fn parse_square(chars: &[char], index: &mut usize) -> Result<(i32, i3
     Ok((x, y))
 }
 
-#[allow(dead_code)]
-pub(crate) fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
+fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
     match symbol.to_ascii_uppercase() {
         'K' => Some(PieceType::King),
         'N' => Some(PieceType::Knight),
@@ -172,5 +164,18 @@ pub(crate) fn piece_type_from_notation(symbol: char) -> Option<PieceType> {
         'C' => Some(PieceType::CommonKing),
         'Y' => Some(PieceType::RoyalQueen),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_original_branch_notation() {
+        let movement = ParsedMove::parse("T2L0f3NT0L0d3>L1+").unwrap();
+        assert_eq!(movement.piece, 'N');
+        assert_eq!((movement.from.time, movement.to.time), (2, 0));
+        assert_eq!(movement.branch_timeline_id, Some(1));
     }
 }

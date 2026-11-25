@@ -9,9 +9,8 @@ use chronofish_alphazero::{
     AlphaNowBot, ChronofishCpuBot, ChronofishGpuBot, PolicyValueNetwork, SearchConfig,
 };
 use chronofish_classic::{
-    BlueshiftConfig, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
+    BlueshiftLevel, BobbyFissureBot, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
 };
-use chronofish_random_bot::BobbyFissureBot;
 use db::Database;
 
 pub use api::AppState;
@@ -50,11 +49,31 @@ impl AppState {
             || ChronofishGpuBot::bootstrap(search, 0x4855_4749_4e4e),
             |network| ChronofishGpuBot::new(network, search, 0x4855_4749_4e4e),
         );
-        let blueshift = DeepBlueshift::new(BlueshiftConfig {
-            max_nodes: env_parse("CHRONOFISH_BLUESHIFT_NODES")?
-                .unwrap_or(BlueshiftConfig::default().max_nodes),
-            ..BlueshiftConfig::default()
-        });
+        let reference_policy = load_network(
+            std::env::var_os("CHRONOFISH_REFERENCE_AZ_MODEL"),
+            "models/training/best-reference-v3.json",
+            "Chronofish CPU and AlphaNow (5D)",
+        )?;
+        let reference_now = reference_policy.clone().map_or_else(
+            || AlphaNowBot::bootstrap(0x4e4f_5741_4c50_4841),
+            AlphaNowBot::new,
+        );
+        let reference_muninn = reference_policy.map_or_else(
+            || ChronofishCpuBot::bootstrap(search, 0x4d55_4e49_4e4e),
+            |model| ChronofishCpuBot::new(model, search, 0x4d55_4e49_4e4e),
+        );
+        let reference_accelerated = load_network(
+            std::env::var_os("CHRONOFISH_REFERENCE_GPU_MODEL"),
+            "models/training-gpu/best-reference-v3.json",
+            "Chronofish GPU (5D)",
+        )?
+        .map_or_else(
+            || ChronofishGpuBot::bootstrap(search, 0x4855_4749_4e4e),
+            |model| ChronofishGpuBot::new(model, search, 0x4855_4749_4e4e),
+        );
+        let blueshift = DeepBlueshift::level(BlueshiftLevel::Hard).with_max_nodes(
+            env_parse("CHRONOFISH_BLUESHIFT_NODES")?.unwrap_or(BlueshiftLevel::Hard.max_nodes()),
+        );
         let carlsen = MonteCarlsen::new(
             CarlsenConfig {
                 iterations: env_parse("CHRONOFISH_CARLSEN_ITERATIONS")?
@@ -68,13 +87,64 @@ impl AppState {
             vec![
                 Box::new(BobbyFissureBot::default()),
                 Box::new(Grabablanca::default()),
+                Box::new(DeepBlueshift::level(BlueshiftLevel::Easy)),
+                Box::new(DeepBlueshift::level(BlueshiftLevel::Medium)),
                 Box::new(blueshift),
                 Box::new(carlsen),
-                Box::new(alpha_now),
-                Box::new(muninn),
-                Box::new(chronofish),
+                Box::new(RulesetBot {
+                    standard: alpha_now,
+                    reference: reference_now,
+                }),
+                Box::new(RulesetBot {
+                    standard: muninn,
+                    reference: reference_muninn,
+                }),
+                Box::new(RulesetBot {
+                    standard: chronofish,
+                    reference: reference_accelerated,
+                }),
             ],
         )
+    }
+}
+
+struct RulesetBot<B> {
+    standard: B,
+    reference: B,
+}
+
+impl<B: chronofish_core::AiPlayer> chronofish_core::AiPlayer for RulesetBot<B> {
+    fn profile(&self) -> chronofish_core::AiProfile {
+        self.standard.profile()
+    }
+
+    fn choose_action(
+        &mut self,
+        game: &chronofish_core::Game,
+    ) -> Result<chronofish_core::AiDecision, String> {
+        if game.ruleset() == chronofish_core::Ruleset::Standard {
+            self.standard.choose_action(game)
+        } else {
+            self.reference.choose_action(game)
+        }
+    }
+}
+
+/// Starting Elo for each bot account: the lower bound of its 95% interval from the
+/// standard-chess calibration against Stockfish 1320/1600/2000
+/// (`chronofish-benchmarks --tournament --calibrate`, 2026-11-25, one opening per pair).
+/// Lower bounds keep new accounts from being overrated while the intervals are wide.
+/// Uncalibrated bots (the Chronofish networks) start at the default 1500.
+pub(crate) fn seed_rating(username: &str) -> i32 {
+    match username {
+        "bot-bobby-fissure" => 995,
+        "bot-alpha-now" => 1034,
+        "bot-grabablanca" => 1152,
+        "bot-monte-carlsen" => 1159,
+        "bot-deep-blueshift-easy" => 1263,
+        "bot-deep-blueshift-medium" => 1416,
+        "bot-deep-blueshift" => 1517,
+        _ => 1500,
     }
 }
 

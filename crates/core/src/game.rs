@@ -1,8 +1,7 @@
 use crate::{
     hash::{board_position_hash, timeline_position_hash},
-    notation::{
-        en_passant_after_move, piece_json, position_json, promote_if_needed, update_castling_rights,
-    },
+    move_effects::{en_passant_after_move, promote_if_needed, update_castling_rights},
+    notation::{piece_json, position_json},
     *,
 };
 
@@ -88,15 +87,25 @@ impl Game {
             last_message: "Select a white piece on a latest board.".to_string(),
             position_hash: 0,
             repetition_history: Vec::new(),
+            reference: (ruleset != Ruleset::Standard).then(crate::reference::ReferenceGame::new),
         };
         game.position_hash = game.recompute_position_hash();
         game.repetition_history.push(game.position_hash);
+        if game.reference.is_some() {
+            game.refresh_reference(None);
+        }
         game
     }
 
     #[must_use]
     pub const fn ruleset(&self) -> Ruleset {
         self.ruleset
+    }
+
+    /// Whether the game can be played with the current rules.
+    #[must_use]
+    pub fn uses_current_rules(&self) -> bool {
+        self.ruleset == Ruleset::Standard || self.reference.is_some()
     }
 
     #[must_use]
@@ -121,147 +130,46 @@ impl Game {
 
     #[must_use]
     pub fn has_staged_moves(&self) -> bool {
+        if let Some(reference) = &self.reference {
+            return reference.staged();
+        }
         !self.staged_turn.is_empty()
     }
 
     #[must_use]
     pub fn can_submit(&self) -> bool {
+        if let Some(reference) = &self.reference {
+            return self.result.is_none()
+                && reference
+                    .actions(self.ruleset)
+                    .contains(&PlayerAction::SubmitTurn);
+        }
         self.ruleset != Ruleset::Standard
             && !self.staged_turn.is_empty()
             && !self.has_pending_present_board(self.turn)
     }
 
-    /// Returns the complete authoritative action set for the current turn.
+    /// Returns the moving piece and special-move metadata for notation.
     #[must_use]
-    pub fn legal_actions(&self) -> Vec<PlayerAction> {
-        if self.result.is_some() {
-            return Vec::new();
+    pub fn describe_move(&self, movement: Move) -> Option<MoveDescription> {
+        if let Some(reference) = &self.reference {
+            return self
+                .legal_actions()
+                .contains(&PlayerAction::Move { movement })
+                .then(|| reference.describe(self.ruleset, movement))
+                .flatten();
         }
-        let mut actions = Vec::new();
-        for timeline in &self.timelines {
-            let Some(board) = timeline.boards.last() else {
-                continue;
-            };
-            let source = Position {
-                timeline_id: timeline.id,
-                time: board.time,
-                x: 0,
-                y: 0,
-            };
-            let accepts_timeline = self.can_accept_inactive_board(source, self.turn);
-            if (!self.is_active_timeline(timeline.id) && !accepts_timeline)
-                || board.side_to_move != self.turn
-                || (!accepts_timeline && self.present_time() != Some(board.time))
-            {
-                continue;
-            }
-            for y in 0..BOARD_SIZE_I32 {
-                for x in 0..BOARD_SIZE_I32 {
-                    let from = Position {
-                        timeline_id: timeline.id,
-                        time: board.time,
-                        x,
-                        y,
-                    };
-                    let Some(piece) = self.piece_at(from).filter(|piece| piece.color == self.turn)
-                    else {
-                        continue;
-                    };
-                    self.for_each_piece_candidate_destination(from, piece, |to| {
-                        let Some((candidate, kind)) = self.legal_move_kind(from, to) else {
-                            return true;
-                        };
-                        if !self.allows_search_move(from, to, candidate, kind) {
-                            return true;
-                        }
-                        if self.ruleset == Ruleset::Standard
-                            && self
-                                .piece_at(to)
-                                .is_some_and(|target| Self::is_royal_piece(target.piece_type))
-                        {
-                            return true;
-                        }
-                        let promotions: &[Option<PieceType>] =
-                            if Self::requires_promotion(piece, to) {
-                                if piece.piece_type == PieceType::Brawn {
-                                    &[
-                                        Some(PieceType::RoyalQueen),
-                                        Some(PieceType::Princess),
-                                        Some(PieceType::Dragon),
-                                        Some(PieceType::Unicorn),
-                                    ]
-                                } else {
-                                    &[
-                                        Some(PieceType::Queen),
-                                        Some(PieceType::Rook),
-                                        Some(PieceType::Bishop),
-                                        Some(PieceType::Knight),
-                                    ]
-                                }
-                            } else {
-                                &[None]
-                            };
-                        for &promotion in promotions {
-                            let movement = Move {
-                                from,
-                                to,
-                                promotion,
-                            };
-                            if self.ruleset != Ruleset::Standard
-                                || self.move_preserves_turn_legality(movement)
-                            {
-                                actions.push(PlayerAction::Move { movement });
-                            }
-                        }
-                        true
-                    });
-                }
-            }
-        }
-        actions.sort_by_key(|action| match action {
-            PlayerAction::Move { movement } => (
-                0,
-                movement.from,
-                movement.to,
-                movement
-                    .promotion
-                    .map_or(0, Self::repetition_piece_type_code),
-            ),
-            PlayerAction::SubmitTurn => (
-                1,
-                Position {
-                    timeline_id: 0,
-                    time: 0,
-                    x: 0,
-                    y: 0,
-                },
-                Position {
-                    timeline_id: 0,
-                    time: 0,
-                    x: 0,
-                    y: 0,
-                },
-                0,
-            ),
-        });
-        actions.dedup();
-        if self.can_submit() {
-            actions.push(PlayerAction::SubmitTurn);
-        }
-        actions
+        let (piece, kind) = self.legal_move_kind(movement.from, movement.to)?;
+        Some(MoveDescription {
+            piece: piece.piece_type,
+            capture: self.captured_piece(movement.to, kind).is_some(),
+            castle: matches!(kind, MoveKind::Castle { .. }),
+            creates_timeline: matches!(kind, MoveKind::Branch)
+                && !self.is_latest_board(movement.to.timeline_id, movement.to.time),
+        })
     }
 
-    fn move_preserves_turn_legality(&self, movement: Move) -> bool {
-        debug_assert_eq!(self.ruleset, Ruleset::Standard);
-        let mut probe = self.clone_for_search();
-        let mover = probe.turn;
-        if probe.apply_move_coords(movement.from, movement.to) == 0 {
-            return false;
-        }
-        !probe.is_in_check(mover)
-    }
-
-    fn requires_promotion(piece: Piece, to: Position) -> bool {
+    pub(crate) fn requires_promotion(piece: Piece, to: Position) -> bool {
         matches!(piece.piece_type, PieceType::Pawn | PieceType::Brawn)
             && ((piece.color == Color::White && to.y == 7)
                 || (piece.color == Color::Black && to.y == 0))
@@ -270,6 +178,9 @@ impl Game {
     /// Applies one move. Standard chess completes the turn immediately; 5D
     /// games retain the move until every board at the Present has advanced.
     pub fn apply_move(&mut self, movement: Move) -> Result<(), MoveError> {
+        if self.reference.is_some() {
+            return self.apply_reference(PlayerAction::Move { movement });
+        }
         if self.result.is_some() {
             return Err(MoveError::GameOver);
         }
@@ -373,12 +284,18 @@ impl Game {
     }
 
     pub fn submit_turn(&mut self) -> Result<(), MoveError> {
+        if self.reference.is_some() {
+            return self.apply_reference(PlayerAction::SubmitTurn);
+        }
         (self.submit_turn_raw() == 1)
             .then_some(())
             .ok_or(MoveError::CannotSubmit)
     }
 
     pub fn undo_staged_move(&mut self) -> Result<(), MoveError> {
+        if self.reference.is_some() {
+            return self.undo_reference();
+        }
         (self.undo_staged_move_raw() == 1)
             .then_some(())
             .ok_or(MoveError::IllegalMove)
@@ -405,6 +322,9 @@ impl Game {
 
     /// Royal pieces of either colour that are attacked on present-time boards.
     pub fn checked_royals(&self) -> Vec<Position> {
+        if let Some(reference) = &self.reference {
+            return reference.checks(self.ruleset);
+        }
         self.checked_royal_positions()
     }
 
@@ -1220,7 +1140,90 @@ impl Game {
     }
 
     pub fn present_time(&self) -> Option<i32> {
+        if let Some(reference) = &self.reference {
+            return Some(reference.present(self.ruleset, false));
+        }
         self.present_board().map(|board| board.time)
+    }
+
+    /// Forsyth–Edwards Notation for the current position of a standard chess game, for
+    /// talking to orthodox engines. `None` for 5D rulesets, which FEN cannot describe.
+    #[must_use]
+    pub fn fen(&self) -> Option<String> {
+        if self.ruleset != Ruleset::Standard {
+            return None;
+        }
+        let board = self.timelines.first()?.boards.last()?;
+        let mut placement = String::new();
+        for y in (0..8).rev() {
+            let mut empty = 0;
+            for x in 0..8 {
+                match board.board[y][x] {
+                    None => empty += 1,
+                    Some(piece) => {
+                        if empty > 0 {
+                            placement.push(char::from(b'0' + empty));
+                            empty = 0;
+                        }
+                        let letter = match piece.piece_type {
+                            PieceType::King => 'k',
+                            PieceType::Queen => 'q',
+                            PieceType::Rook => 'r',
+                            PieceType::Bishop => 'b',
+                            PieceType::Knight => 'n',
+                            PieceType::Pawn => 'p',
+                            _ => return None,
+                        };
+                        placement.push(if piece.color == Color::White {
+                            letter.to_ascii_uppercase()
+                        } else {
+                            letter
+                        });
+                    }
+                }
+            }
+            if empty > 0 {
+                placement.push(char::from(b'0' + empty));
+            }
+            if y > 0 {
+                placement.push('/');
+            }
+        }
+        let side = if self.turn() == Color::White {
+            'w'
+        } else {
+            'b'
+        };
+        let rights = board.castling;
+        let mut castling = String::new();
+        for (allowed, letter) in [
+            (rights.white_kingside, 'K'),
+            (rights.white_queenside, 'Q'),
+            (rights.black_kingside, 'k'),
+            (rights.black_queenside, 'q'),
+        ] {
+            if allowed {
+                castling.push(letter);
+            }
+        }
+        if castling.is_empty() {
+            castling.push('-');
+        }
+        let en_passant = board.en_passant.as_ref().map_or_else(
+            || "-".to_owned(),
+            |square| {
+                format!(
+                    "{}{}",
+                    char::from(b'a' + u8::try_from(square.x).unwrap_or(0)),
+                    square.y + 1
+                )
+            },
+        );
+        Some(format!(
+            "{placement} {side} {castling} {en_passant} {} {}",
+            board.halfmove_clock,
+            board.time / 2 + 1
+        ))
     }
 
     /// Returns the Present established by the last submitted turn. Staged
@@ -1228,6 +1231,9 @@ impl Game {
     /// completes a multiboard turn, but clients should keep displaying this
     /// committed boundary until submission succeeds.
     pub fn submitted_present_time(&self) -> Option<i32> {
+        if let Some(reference) = &self.reference {
+            return Some(reference.present(self.ruleset, true));
+        }
         let timelines = self
             .staged_turn
             .first()
@@ -1286,6 +1292,9 @@ impl Game {
     }
 
     pub fn is_active_timeline(&self, timeline_id: i32) -> bool {
+        if let Some(reference) = &self.reference {
+            return reference.active(self.ruleset, timeline_id);
+        }
         let Some(timeline) = self.timeline(timeline_id) else {
             return false;
         };
@@ -1337,6 +1346,27 @@ mod tests {
     }
 
     #[test]
+    fn fen_describes_standard_positions() {
+        let mut game = Game::new(Ruleset::Standard);
+        assert_eq!(
+            game.fen().as_deref(),
+            Some("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
+        );
+        play(&mut game, 0, "e2", "e4");
+        assert_eq!(
+            game.fen().as_deref(),
+            Some("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
+        );
+        play(&mut game, 1, "g8", "f6");
+        play(&mut game, 2, "e1", "e2");
+        assert_eq!(
+            game.fen().as_deref(),
+            Some("rnbqkb1r/pppppppp/5n2/8/4P3/8/PPPPKPPP/RNBQ1BNR b kq - 2 2")
+        );
+        assert_eq!(Game::new(Ruleset::Multiverse).fen(), None);
+    }
+
+    #[test]
     fn standard_opening_has_twenty_moves_and_advances_immediately() {
         let mut game = Game::new(Ruleset::Standard);
         assert_eq!(game.legal_actions().len(), 20);
@@ -1375,6 +1405,31 @@ mod tests {
             })
         );
         assert!(game.legal_actions().is_empty());
+    }
+
+    #[test]
+    fn standard_opening_perft_through_depth_three() {
+        fn perft(game: &Game, depth: u8) -> usize {
+            let actions = game.legal_actions();
+            if depth == 1 {
+                return actions.len();
+            }
+            actions
+                .into_iter()
+                .map(|action| {
+                    let mut child = game.clone();
+                    child
+                        .apply_action(action)
+                        .expect("generated action must apply");
+                    perft(&child, depth - 1)
+                })
+                .sum()
+        }
+
+        let game = Game::new(Ruleset::Standard);
+        assert_eq!(perft(&game, 1), 20);
+        assert_eq!(perft(&game, 2), 400);
+        assert_eq!(perft(&game, 3), 8_902);
     }
 
     #[test]
@@ -1490,6 +1545,7 @@ mod tests {
     #[test]
     fn opponent_can_accept_an_inactive_timeline_outside_the_present() {
         let mut game = Game::new(Ruleset::Multiverse);
+        game.reference = None; // Exercise compatibility with pre-cutover snapshots.
         let mut active_board = game.timelines[0].boards[0].clone();
         active_board.time = 6;
         active_board.side_to_move = Color::Black;
@@ -1635,6 +1691,7 @@ mod tests {
     #[test]
     fn kingless_source_front_does_not_cause_a_multiverse_stalemate() {
         let mut game = Game::new(Ruleset::Multiverse);
+        game.reference = None; // Exercise compatibility with pre-cutover snapshots.
         let mut source = game.timelines[0].boards[0].clone();
         source.board = [[None; BOARD_SIZE]; BOARD_SIZE];
         source.board[0][4] = Some(Piece {
@@ -1702,6 +1759,7 @@ mod tests {
     #[test]
     fn multiverse_check_is_informational_until_the_royal_is_captured() {
         let mut game = Game::new(Ruleset::Multiverse);
+        game.reference = None; // Exercise compatibility with pre-cutover snapshots.
         let board = game.timelines[0].boards.last_mut().expect("initial board");
         board.board = [[None; BOARD_SIZE]; BOARD_SIZE];
         board.board[0][4] = Some(Piece {
@@ -1762,7 +1820,7 @@ mod tests {
     }
 
     #[test]
-    fn multiverse_repetition_does_not_end_before_a_royal_capture() {
+    fn reference_multiverse_does_not_apply_threefold_repetition() {
         let mut game = Game::new(Ruleset::Multiverse);
         for (time, from, to) in [
             (0, "g1", "f3"),
@@ -1778,7 +1836,6 @@ mod tests {
             game.submit_turn().expect("repeated turn remains playable");
         }
 
-        assert!(game.has_threefold_repetition());
         assert_eq!(game.outcome(), None);
         assert_eq!(game.turn(), Color::White);
         assert!(!game.legal_actions().is_empty());
@@ -1797,47 +1854,45 @@ mod tests {
     }
 
     #[test]
-    fn five_d_check_does_not_filter_unrelated_moves_or_submission() {
+    fn optional_front_can_be_played_first_and_restored_mid_turn() {
         let mut game = Game::new(Ruleset::Multiverse);
-        for (time, from, to) in [
-            (0, "e2", "e4"),
-            (1, "h7", "h6"),
-            (2, "e4", "e5"),
-            (3, "h8", "h7"),
-            (4, "e5", "e6"),
-            (5, "b7", "b6"),
-            (6, "e6", "f7"),
-        ] {
-            play(&mut game, time, from, to);
-            game.submit_turn().expect("turn complete");
-        }
-
-        assert_eq!(game.turn(), Color::Black);
-        assert!(game.is_in_check(Color::Black));
-        assert!(game.has_legal_turn_completion(Color::Black));
-        let non_evasion = Move::new(position(7, 0, "h7"), position(7, 0, "h8"));
-        assert!(game.legal_actions().contains(&PlayerAction::Move {
-            movement: non_evasion
-        }));
-        game.apply_move(non_evasion)
-            .expect("moves unrelated to check remain legal");
-        assert!(game.has_staged_moves());
-        assert!(game.can_submit());
-        assert!(game.legal_actions().contains(&PlayerAction::SubmitTurn));
-        assert_eq!(
-            game.piece_at(position(8, 0, "h8")),
-            Some(Piece {
-                color: Color::Black,
-                piece_type: PieceType::Rook,
-            })
+        play(&mut game, 0, "g1", "f3");
+        game.submit_turn().unwrap();
+        play(&mut game, 1, "g8", "f6");
+        game.submit_turn().unwrap();
+        game.apply_move(Move::new(position(2, 0, "f3"), position(0, 0, "d3")))
+            .unwrap();
+        game.submit_turn().unwrap();
+        let optional = Move::new(position(3, 0, "a7"), position(3, 0, "a6"));
+        game.apply_move(optional).unwrap();
+        assert!(!game.can_submit());
+        let saved = serde_json::to_string(&game).unwrap();
+        let mut loaded: Game = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.legal_actions(), game.legal_actions());
+        let continuation = loaded.legal_actions()[0];
+        loaded.apply_action(continuation).unwrap();
+        assert!(loaded.can_submit());
+        loaded.submit_turn().unwrap();
+        assert_eq!(loaded.turn(), Color::White);
+        game.undo_staged_move().unwrap();
+        assert!(
+            game.legal_actions()
+                .contains(&PlayerAction::Move { movement: optional })
         );
-        game.undo_staged_move()
-            .expect("non-evasion remains undoable");
-        assert!(!game.has_staged_moves());
-        game.apply_move(non_evasion).expect("replay non-evasion");
-        game.submit_turn().expect("check does not block submission");
-        assert_eq!(game.outcome(), None);
-        assert_eq!(game.turn(), Color::White);
+    }
+
+    #[test]
+    fn reference_five_d_requires_a_safe_turn() {
+        let mut game = Game::new(Ruleset::Multiverse);
+        for (time, from, to) in [(0, "e2", "e4"), (1, "d7", "d5"), (2, "f1", "b5")] {
+            play(&mut game, time, from, to);
+            game.submit_turn().unwrap();
+        }
+        let bad = Move::new(position(3, 0, "a7"), position(3, 0, "a6"));
+        assert!(game.apply_move(bad).is_err());
+        play(&mut game, 3, "c7", "c6");
+        assert!(game.can_submit());
+        game.submit_turn().unwrap();
     }
 
     #[test]

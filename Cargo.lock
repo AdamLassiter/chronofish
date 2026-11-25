@@ -1113,6 +1113,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "chronofish-5d-rules"
+version = "0.6.0"
+
+[[package]]
 name = "chronofish-alphazero"
 version = "0.6.0"
 dependencies = [
@@ -1136,7 +1140,6 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
- "chronofish-random-bot",
  "clap",
  "rand_chacha 0.9.0",
  "rayon",
@@ -1155,10 +1158,20 @@ dependencies = [
 name = "chronofish-core"
 version = "0.6.0"
 dependencies = [
+ "chronofish-5d-rules",
  "pretty_assertions",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "chronofish-ftxi"
+version = "0.6.0"
+dependencies = [
+ "chronofish-5d-rules",
+ "chronofish-notation",
+ "rand 0.9.5",
 ]
 
 [[package]]
@@ -1180,9 +1193,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "chronofish-random-bot"
+name = "chronofish-notation"
 version = "0.6.0"
 dependencies = [
+ "chronofish-5d-rules",
  "chronofish-core",
 ]
 
@@ -1195,7 +1209,6 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
- "chronofish-random-bot",
  "rand_core 0.6.4",
  "rusqlite",
  "serde",
@@ -1229,7 +1242,7 @@ dependencies = [
  "chronofish-alphazero",
  "chronofish-classic",
  "chronofish-core",
- "chronofish-random-bot",
+ "chronofish-notation",
  "clap",
 ]
 
@@ -3544,6 +3557,14 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kairos"
+version = "0.1.0"
+dependencies = [
+ "chronofish-5d-rules",
+ "chronofish-notation",
 ]
 
 [[package]]

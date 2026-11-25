@@ -1,0 +1,136 @@
+//! Promotion rule sets (bitmask of allowed promotion pieces).
+
+use super::piece::*;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub struct PromotionOptions(pub u8);
+
+impl PromotionOptions {
+    pub const NONE: Self = Self(0);
+    pub const QUEEN: Self = Self(1 << 0);
+    pub const ROOK: Self = Self(1 << 1);
+    pub const BISHOP: Self = Self(1 << 2);
+    pub const KNIGHT: Self = Self(1 << 3);
+    pub const UNICORN: Self = Self(1 << 4);
+    pub const DRAGON: Self = Self(1 << 5);
+    pub const PRINCESS: Self = Self(1 << 6);
+    pub const COMMON_KING: Self = Self(1 << 7);
+    pub const ALL: Self = Self(0xff);
+}
+
+const PRIORITY: [Piece; 8] = [
+    QUEEN_W,
+    PRINCESS_W,
+    ROOK_W,
+    BISHOP_W,
+    KNIGHT_W,
+    COMMON_KING_W,
+    UNICORN_W,
+    DRAGON_W,
+];
+
+pub fn piece_to_promotion_option(p: Piece) -> PromotionOptions {
+    match p {
+        QUEEN_W => PromotionOptions::QUEEN,
+        PRINCESS_W => PromotionOptions::PRINCESS,
+        ROOK_W => PromotionOptions::ROOK,
+        BISHOP_W => PromotionOptions::BISHOP,
+        KNIGHT_W => PromotionOptions::KNIGHT,
+        COMMON_KING_W => PromotionOptions::COMMON_KING,
+        UNICORN_W => PromotionOptions::UNICORN,
+        DRAGON_W => PromotionOptions::DRAGON,
+        _ => PromotionOptions::NONE,
+    }
+}
+
+pub fn can_promote_to(options: PromotionOptions, p: Piece) -> bool {
+    let o = piece_to_promotion_option(p);
+    o != PromotionOptions::NONE && options.0 & o.0 != 0
+}
+
+/// The promotion pieces `options` allows, the default first.
+pub fn allowed_promotions(options: PromotionOptions) -> impl Iterator<Item = Piece> {
+    PRIORITY
+        .into_iter()
+        .filter(move |&p| can_promote_to(options, p))
+}
+
+/// A promotion piece as a 4-bit code (`MoveSeq` stores one per move): 0 is the position's
+/// default, otherwise 1 + its index in the default order.
+pub fn promo_code(p: Piece) -> u32 {
+    PRIORITY
+        .iter()
+        .position(|&q| q == p)
+        .map(|i| i as u32 + 1)
+        .unwrap_or(0)
+}
+
+/// The piece of a `promo_code` (`NO_PIECE` for 0, the default).
+pub fn promo_piece(code: u32) -> Piece {
+    if code == 0 {
+        NO_PIECE
+    } else {
+        PRIORITY.get(code as usize - 1).copied().unwrap_or(NO_PIECE)
+    }
+}
+
+pub fn default_promote_to(options: PromotionOptions) -> Piece {
+    for p in PRIORITY {
+        if can_promote_to(options, p) {
+            return p;
+        }
+    }
+    NO_PIECE
+}
+
+pub fn parse_promotions(value: &str) -> Result<PromotionOptions, String> {
+    let mut result = 0u8;
+    let mut wildcard = false;
+    for c in value.bytes() {
+        if c == b',' || c.is_ascii_whitespace() {
+            continue;
+        }
+        if c == b'*' {
+            wildcard = true;
+            continue;
+        }
+        let o = piece_to_promotion_option(c);
+        if o == PromotionOptions::NONE {
+            return Err(format!(
+                "parse_promotions(): Invalid promotion piece: {}",
+                c as char
+            ));
+        }
+        result |= o.0;
+    }
+    if wildcard {
+        if result != 0 {
+            return Err("parse_promotions(): '*' cannot be combined with promotion pieces".into());
+        }
+        return Ok(PromotionOptions::ALL);
+    }
+    Ok(PromotionOptions(result))
+}
+
+/// The allowed promotion pieces, one letter each in the default's order (never `*`).
+pub fn promotion_letters(o: PromotionOptions) -> String {
+    PRIORITY
+        .iter()
+        .filter(|&&p| can_promote_to(o, p))
+        .map(|&p| p as char)
+        .collect()
+}
+
+pub fn format_promotions(o: PromotionOptions) -> String {
+    if o == PromotionOptions::NONE {
+        return String::new();
+    }
+    if o == PromotionOptions::ALL {
+        return "*".into();
+    }
+    PRIORITY
+        .iter()
+        .filter(|&&p| can_promote_to(o, p))
+        .map(|&p| p as char)
+        .collect()
+}

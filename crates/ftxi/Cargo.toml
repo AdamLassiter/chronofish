@@ -1,0 +1,15 @@
+[package]
+name = "chronofish-ftxi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Rust port of ftxi's 5D chess search"
+
+[dependencies]
+chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-notation = { path = "../notation" }
+rand = "0.9"
+
+[lints]
+workspace = true
