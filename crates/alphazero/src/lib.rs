@@ -32,6 +32,6 @@ pub use search::{Mcts, SearchConfig, SearchResult};
 pub use self_play::{
     ArenaGameConfig, ArenaGameResult, ArenaProgress, ArenaReport, ReplayBuffer, ReplayError,
     ReplayStep, SampledReplay, SelfPlayConfig, SelfPlayGame, play_arena_from_position,
-    play_arena_game, play_self_play_game, run_arena, run_arena_schedule,
-    run_arena_schedule_with_progress,
+    play_arena_game, play_self_play_game, play_self_play_game_with_progress, run_arena,
+    run_arena_schedule, run_arena_schedule_with_progress,
 };

@@ -161,6 +161,18 @@ pub fn play_self_play_game<E: PolicyValueEvaluator + ?Sized>(
     config: SelfPlayConfig,
     rng: &mut impl Rng,
 ) -> SelfPlayGame {
+    play_self_play_game_with_progress(model, ruleset, config, rng, |_| {})
+}
+
+/// Plays one self-play game, reporting the number of recorded actions after each one.
+#[must_use]
+pub fn play_self_play_game_with_progress<E: PolicyValueEvaluator + ?Sized>(
+    model: &E,
+    ruleset: Ruleset,
+    config: SelfPlayConfig,
+    rng: &mut impl Rng,
+    mut progress: impl FnMut(usize),
+) -> SelfPlayGame {
     let mut game = Game::new(ruleset);
     let mut steps = Vec::new();
     for action_index in 0..config.max_actions {
@@ -186,6 +198,7 @@ pub fn play_self_play_game<E: PolicyValueEvaluator + ?Sized>(
         if game.apply_action(action).is_err() {
             break;
         }
+        progress(steps.len());
     }
     let outcome = game.outcome();
     SelfPlayGame {

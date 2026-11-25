@@ -1,3 +1,5 @@
+mod dashboard;
+
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -8,7 +10,7 @@ use chronofish_alphazero::{
     ArenaGameConfig, ArenaReport, EncodedPosition, ModelSize, NetworkConfig, PolicyValueEvaluator,
     PolicyValueNetwork, Prediction, ReplayBuffer, SearchConfig, SelfPlayConfig, SelfPlayGame,
     TrainConfig, estimate_batch_memory_from_shape, estimate_inference_batch_memory,
-    estimate_training_batch_memory, play_arena_game, play_self_play_game,
+    estimate_training_batch_memory, play_arena_game, play_self_play_game_with_progress,
 };
 use chronofish_core::{Ruleset, Side};
 use chronofish_neural::VulkanTrainingDevice;
@@ -147,6 +149,9 @@ struct Arguments {
     seed: u64,
     #[arg(long, value_enum, default_value_t = RuleSelection::All)]
     ruleset: RuleSelection,
+    /// Print plain line-oriented progress instead of the live terminal dashboard.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -187,12 +192,36 @@ enum FittingDevice {
 }
 
 fn section(title: &str) {
-    println!("\n{title}");
-    println!("{}", "-".repeat(title.chars().count()));
+    if dashboard::is_active() {
+        dashboard::section(title);
+    } else {
+        println!("\n{title}");
+        println!("{}", "-".repeat(title.chars().count()));
+    }
 }
 
 fn field(label: &str, value: impl std::fmt::Display) {
-    println!("  {label:<20} {value}");
+    if dashboard::is_active() {
+        dashboard::field(label, &value.to_string());
+    } else {
+        println!("  {label:<20} {value}");
+    }
+}
+
+fn report(text: String) {
+    if dashboard::is_active() {
+        dashboard::line(text);
+    } else {
+        println!("{text}");
+    }
+}
+
+fn warn(text: String) {
+    if dashboard::is_active() {
+        dashboard::warning(text);
+    } else {
+        eprintln!("warning: {text}");
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -262,7 +291,9 @@ const fn ruleset_label(selection: RuleSelection) -> &'static str {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let result = run();
+    dashboard::shutdown(result.is_ok());
+    if let Err(error) = result {
         eprintln!("error: {error}");
         std::process::exit(1);
     }
@@ -295,6 +326,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     if !arguments.promotion_score.is_finite() || !(0.0..=1.0).contains(&arguments.promotion_score) {
         return Err("--promotion-score must be finite and between zero and one".into());
     }
+    if !arguments.plain && !arguments.check_training_device {
+        dashboard::start();
+    }
+    dashboard::set_promotion_score(arguments.promotion_score);
     let pool = ThreadPoolBuilder::new()
         .num_threads(arguments.threads)
         .thread_name(|index| format!("chronofish-trainer-{index}"))
@@ -380,15 +415,17 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
             &mut rng,
         )?;
         candidate.save(&candidate_path)?;
-        println!(
+        report(format!(
             "fit-only complete; candidate saved to {} (arena and promotion skipped)",
             candidate_path.display()
-        );
+        ));
         return Ok(());
     }
 
     for iteration in 0..arguments.iterations {
         let iteration_started = Instant::now();
+        dashboard::set_iteration(iteration + 1, arguments.iterations);
+        dashboard::set_phase(dashboard::Phase::SelfPlay);
         section(&format!(
             "Iteration {}/{} · Self-play",
             iteration + 1,
@@ -509,8 +546,10 @@ fn prepare_fitting_device(arguments: &Arguments) -> Result<Option<FittingDevice>
         );
     }
     let resolved_model = resolved_model_size(arguments);
-    println!("Chronofish Trainer");
-    println!("==============");
+    if !dashboard::is_active() {
+        println!("Chronofish Trainer");
+        println!("==============");
+    }
     section("Configuration");
     field("Work directory", arguments.work_dir.display());
     field("Rules", ruleset_label(arguments.ruleset));
@@ -676,6 +715,7 @@ fn evaluate_and_maybe_promote(
     pool: &ThreadPool,
     fitting_device: Option<&FittingDevice>,
 ) -> Result<(), Box<dyn Error>> {
+    dashboard::set_phase(dashboard::Phase::Arena);
     section("Arena");
     let config = ArenaRunConfig {
         selection: arguments.ruleset,
@@ -708,6 +748,7 @@ fn evaluate_and_maybe_promote(
     };
     let score = report.candidate_score();
     let promoted = arguments.arena_games == 0 || score >= arguments.promotion_score;
+    dashboard::arena_result(score, promoted);
     field(
         "Match result",
         format!(
@@ -783,6 +824,7 @@ fn fit_candidate(
     candidate: &mut PolicyValueNetwork,
     rng: &mut ChaCha8Rng,
 ) -> Result<(), Box<dyn Error>> {
+    dashboard::set_phase(dashboard::Phase::Fitting);
     section("Fitting");
     let reconstruction_started = Instant::now();
     let sample = replay.sample_examples_in_pool(
@@ -875,6 +917,7 @@ fn fit_candidate(
             metrics.value_loss
         ),
     );
+    dashboard::fit_result(metrics.policy_loss, metrics.value_loss);
     field("Fitting time", format_duration(fit_started.elapsed()));
     Ok(())
 }
@@ -882,19 +925,19 @@ fn fit_candidate(
 fn warn_about_v1_files(work_dir: &Path, best_v2: &Path, replay_v2: &Path) {
     let old_best = work_dir.join("best.json");
     if !best_v2.exists() && old_best.exists() {
-        eprintln!(
-            "warning: {} is a version-1 checkpoint and cannot initialize the new multiverse network; creating {}",
+        warn(format!(
+            "{} is a version-1 checkpoint and cannot initialize the new multiverse network; creating {}",
             old_best.display(),
             best_v2.display()
-        );
+        ));
     }
     let old_replay = work_dir.join("replay.json");
     if !replay_v2.exists() && old_replay.exists() {
-        eprintln!(
-            "warning: {} is a version-1 replay and is intentionally left untouched; starting {}",
+        warn(format!(
+            "{} is a version-1 replay and is intentionally left untouched; starting {}",
             old_replay.display(),
             replay_v2.display()
-        );
+        ));
     }
 }
 
@@ -911,6 +954,15 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
             (selected_ruleset(config.selection, game_index), side)
         })
         .collect::<Vec<_>>();
+    dashboard::schedule(
+        dashboard::GameKind::Arena,
+        &schedule
+            .iter()
+            .map(|&(ruleset, side)| (ruleset, Some(side)))
+            .collect::<Vec<_>>(),
+        config.max_actions,
+    );
+    let live = dashboard::is_active();
     field(
         "Schedule",
         format!(
@@ -939,7 +991,8 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                             .par_iter()
                             .enumerate()
                             .map(|(game_index, &(ruleset, candidate_side))| {
-                                if config.verbose {
+                                dashboard::game_started(game_index);
+                                if config.verbose && !live {
                                     println!(
                                         "  [arena {}/{}] started · {ruleset} · candidate {candidate_side}",
                                         game_index + 1,
@@ -963,7 +1016,9 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                                     },
                                     &mut rng,
                                     |actions, _| {
+                                        dashboard::game_progress(game_index, actions);
                                         if config.verbose
+                                            && !live
                                             && config.progress_actions > 0
                                             && actions.is_multiple_of(config.progress_actions)
                                         {
@@ -982,17 +1037,18 @@ fn evaluate<E: PolicyValueEvaluator + ?Sized>(
                                         None => format!("draw ({:?})", outcome.reason),
                                     },
                                 );
+                                dashboard::game_finished(game_index, result.actions, result.outcome);
                                 {
                                     let mut finished = completed
                                         .lock()
                                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                                     *finished += 1;
-                                    println!(
+                                    report(format!(
                                         "  [{finished}/{}] arena game {} · {ruleset} · candidate {candidate_side} · {} · {description}",
                                         config.games,
                                         game_index + 1,
                                         counted(result.actions, "action"),
-                                    );
+                                    ));
                                 }
                                 (candidate_side, result.outcome)
                             })
@@ -1018,6 +1074,18 @@ fn generate_self_play<E: PolicyValueEvaluator + ?Sized>(
     replay_len: usize,
     pool: &ThreadPool,
 ) -> Vec<GeneratedGame> {
+    dashboard::schedule(
+        dashboard::GameKind::SelfPlay,
+        &(0..arguments.games)
+            .map(|game_index| {
+                (
+                    selected_ruleset(arguments.ruleset, iteration + game_index),
+                    None,
+                )
+            })
+            .collect::<Vec<_>>(),
+        arguments.max_actions,
+    );
     field(
         "Schedule",
         format!(
@@ -1046,7 +1114,8 @@ fn generate_self_play<E: PolicyValueEvaluator + ?Sized>(
                             usize_to_u64(iteration) ^ usize_to_u64(replay_len).rotate_left(32),
                             usize_to_u64(game_index),
                         ));
-                        let game = play_self_play_game(
+                        dashboard::game_started(game_index);
+                        let game = play_self_play_game_with_progress(
                             evaluator,
                             ruleset,
                             SelfPlayConfig {
@@ -1055,7 +1124,9 @@ fn generate_self_play<E: PolicyValueEvaluator + ?Sized>(
                                 ..SelfPlayConfig::default()
                             },
                             &mut rng,
+                            |actions| dashboard::game_progress(game_index, actions),
                         );
+                        dashboard::game_finished(game_index, game.steps.len(), game.outcome);
                         {
                             let mut finished = completed
                                 .lock()
@@ -1067,12 +1138,12 @@ fn generate_self_play<E: PolicyValueEvaluator + ?Sized>(
                                     format!("{:?} won · {:?}", outcome.winner, outcome.reason)
                                 },
                             );
-                            println!(
+                            report(format!(
                                 "  [{finished}/{}] game {} · {ruleset} · {} · {result}",
                                 arguments.games,
                                 game_index + 1,
                                 counted(game.steps.len(), "position"),
-                            );
+                            ));
                         }
                         GeneratedGame { game }
                     })
@@ -1221,15 +1292,26 @@ fn run_inference_coordinator<E: PolicyValueEvaluator + ?Sized>(
         let mut responses = Vec::with_capacity(requests.len());
         batches += 1;
         total_positions += count;
+        let mut batch_wait = Duration::ZERO;
+        let batch_requests = requests.len();
         for request in requests {
             total_requests += 1;
-            wait += request.queued.elapsed();
+            batch_wait += request.queued.elapsed();
             responses.push((request.response, request.positions.len()));
             positions.extend(request.positions);
         }
+        wait += batch_wait;
         let start = Instant::now();
         let mut predictions = model.predict_batch(&positions).into_iter();
-        compute += start.elapsed();
+        let batch_compute = start.elapsed();
+        compute += batch_compute;
+        dashboard::inference_batch(
+            count,
+            batch_requests,
+            target_batch_size,
+            batch_wait,
+            batch_compute,
+        );
         for (response, length) in responses {
             let result = predictions.by_ref().take(length).collect::<Vec<_>>();
             response
@@ -1239,11 +1321,11 @@ fn run_inference_coordinator<E: PolicyValueEvaluator + ?Sized>(
         assert!(predictions.next().is_none(), "inference result count");
     }
     if batches > 0 {
-        println!(
+        report(format!(
             "  Inference: {total_positions} positions / {batches} batches (target {target_batch_size}), mean queue wait {:?}, compute {}",
             wait / total_requests,
             format_duration(compute)
-        );
+        ));
     }
 }
 
@@ -1315,7 +1397,7 @@ const fn candidate_side(selection: RuleSelection, game_index: usize) -> Side {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use chronofish_alphazero::encode;
+    use chronofish_alphazero::{encode, play_self_play_game};
     use chronofish_core::Game;
     use clap::Parser;
 
