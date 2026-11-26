@@ -1113,10 +1113,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "chronofish-5d-rules"
+name = "chronofish-5d-movegen"
 version = "0.6.0"
 dependencies = [
- "chronofish-5d-rules-reference",
+ "chronofish-5d-turngen",
  "pretty_assertions",
  "serde",
  "serde_json",
@@ -1124,7 +1124,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "chronofish-5d-rules-reference"
+name = "chronofish-5d-turngen"
 version = "0.6.0"
 
 [[package]]
@@ -1152,6 +1152,7 @@ dependencies = [
  "chronofish-classic",
  "chronofish-core",
  "chronofish-ftxi",
+ "chronofish-notation",
  "clap",
  "kairos",
  "rand_chacha 0.9.0",
@@ -1171,14 +1172,14 @@ dependencies = [
 name = "chronofish-core"
 version = "0.6.0"
 dependencies = [
- "chronofish-5d-rules",
+ "chronofish-5d-movegen",
 ]
 
 [[package]]
 name = "chronofish-ftxi"
 version = "0.6.0"
 dependencies = [
- "chronofish-5d-rules-reference",
+ "chronofish-5d-turngen",
  "chronofish-core",
  "chronofish-notation",
  "rand 0.9.5",
@@ -1206,7 +1207,7 @@ dependencies = [
 name = "chronofish-notation"
 version = "0.6.0"
 dependencies = [
- "chronofish-5d-rules-reference",
+ "chronofish-5d-turngen",
  "chronofish-core",
 ]
 
@@ -3577,7 +3578,7 @@ dependencies = [
 name = "kairos"
 version = "0.1.0"
 dependencies = [
- "chronofish-5d-rules-reference",
+ "chronofish-5d-turngen",
  "chronofish-core",
  "chronofish-notation",
 ]
@@ -3586,7 +3587,7 @@ dependencies = [
 name = "kairos-tools"
 version = "0.6.0"
 dependencies = [
- "chronofish-5d-rules-reference",
+ "chronofish-5d-turngen",
  "chronofish-core",
  "chronofish-ftxi",
  "chronofish-notation",

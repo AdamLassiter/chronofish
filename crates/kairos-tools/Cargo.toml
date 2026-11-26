@@ -11,7 +11,7 @@ prof = ["kairos/prof"]
 
 [dependencies]
 chronofish-ftxi = { path = "../ftxi" }
-chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
+chronofish-5d-turngen = { path = "../5d-turngen" }
 rand = "0.9"
 kairos = { path = "../kairos" }
 chronofish-notation = { path = "../notation" }

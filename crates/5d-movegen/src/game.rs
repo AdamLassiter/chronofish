@@ -105,6 +105,7 @@ impl Game {
         let mut game = Self::new(ruleset);
         if ruleset != Ruleset::Standard {
             game.reference = Some(crate::reference::ReferenceGame::new());
+            game.timelines.clear();
             game.refresh_reference(None);
         }
         game

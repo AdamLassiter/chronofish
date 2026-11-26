@@ -8,7 +8,7 @@ impl Game {
             return Vec::new();
         }
         if let Some(reference) = &self.reference {
-            return reference.actions(self.ruleset);
+            return reference.actions(self.ruleset).to_vec();
         }
         let mut actions = Vec::new();
         let mut standard_probe =

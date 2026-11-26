@@ -1,14 +1,11 @@
 use std::{
     collections::BTreeMap,
     sync::{Arc, OnceLock},
-    time::Duration,
 };
 
 use chronofish_5d_rules_reference::core::{
     action::{ExtMove, FullMove},
-    referee::{
-        PositionStatus, apply_draft_move, draft_choices, play_action, position_status, submit_draft,
-    },
+    referee::{DraftSearch, PositionStatus, apply_draft_move, play_action, submit_draft},
     state::State,
     variants::{default_variant, state_from_setup},
     vec4::Vec4,
@@ -24,7 +21,9 @@ pub(crate) struct ReferenceGame {
     #[serde(skip)]
     submitted: OnceLock<Arc<State>>,
     #[serde(skip)]
-    choices: OnceLock<Vec<PlayerAction>>,
+    draft_cache: OnceLock<Arc<State>>,
+    #[serde(skip)]
+    choices: OnceLock<Arc<[PlayerAction]>>,
 }
 
 impl std::fmt::Debug for ReferenceGame {
@@ -102,10 +101,11 @@ impl ReferenceGame {
             draft: Vec::new(),
             submitted: OnceLock::new(),
             choices: OnceLock::new(),
+            draft_cache: OnceLock::new(),
         }
     }
 
-    fn submitted(&self, rules: Ruleset) -> &State {
+    fn submitted(&self, rules: Ruleset) -> &Arc<State> {
         self.submitted.get_or_init(|| {
             let mut state = state_from_setup(&reference_setup(rules).expect("5D setup"))
                 .expect("valid reference setup");
@@ -121,19 +121,41 @@ impl ReferenceGame {
         })
     }
 
-    fn draft_state(&self, rules: Ruleset) -> State {
-        let mut state = self.submitted(rules).clone();
-        for movement in &self.draft {
-            apply_draft_move(&mut state, reference_move(*movement))
-                .expect("persisted reference draft");
+    fn with_search<T>(&self, rules: Ruleset, query: impl FnOnce(&DraftSearch) -> T) -> T {
+        // Cursor scratch is local to the search thread. Sharing the immutable position
+        // across Game clones keeps consecutive drafts on the same compiled geometry.
+        thread_local! {
+            static SEARCH: std::cell::RefCell<Option<DraftSearch>> = const { std::cell::RefCell::new(None) };
         }
-        state
+        let state = self.submitted(rules);
+        SEARCH.with_borrow_mut(|slot| {
+            if slot
+                .as_ref()
+                .is_none_or(|search| !Arc::ptr_eq(search.state(), state))
+            {
+                *slot = Some(DraftSearch::new(Arc::clone(state)));
+            }
+            query(slot.as_ref().expect("initialized search"))
+        })
     }
 
-    pub(crate) fn actions(&self, rules: Ruleset) -> Vec<PlayerAction> {
+    fn draft_state(&self, rules: Ruleset) -> &State {
+        if self.draft.is_empty() {
+            return self.submitted(rules);
+        }
+        self.draft_cache.get_or_init(|| {
+            let mut state = self.submitted(rules).as_ref().clone();
+            for movement in &self.draft {
+                apply_draft_move(&mut state, reference_move(*movement))
+                    .expect("persisted reference draft");
+            }
+            Arc::new(state)
+        })
+    }
+
+    pub(crate) fn actions(&self, rules: Ruleset) -> &[PlayerAction] {
         self.choices
-            .get_or_init(|| self.compute_actions(rules))
-            .clone()
+            .get_or_init(|| self.compute_actions(rules).into())
     }
 
     fn compute_actions(&self, rules: Ruleset) -> Vec<PlayerAction> {
@@ -144,7 +166,9 @@ impl ReferenceGame {
             .copied()
             .map(reference_move)
             .collect::<Vec<_>>();
-        let choices = draft_choices(state, &draft, Duration::MAX).expect("reference draft");
+        let choices = self
+            .with_search(rules, |search| search.choices(&draft))
+            .expect("reference draft");
         let black = state.player();
         let mut actions = choices
             .moves
@@ -224,13 +248,23 @@ impl Game {
                 reference.draft.push(movement);
             }
             PlayerAction::SubmitTurn => {
-                let next = submit_draft(&reference.draft_state(self.ruleset))
+                let next = submit_draft(reference.draft_state(self.ruleset))
                     .map_err(|_| MoveError::CannotSubmit)?;
                 reference.turns.push(std::mem::take(&mut reference.draft));
                 reference.submitted = OnceLock::from(Arc::new(next));
             }
         }
         reference.choices.take();
+        reference.draft_cache.take();
+        // This prefix already has a proven completion. If every source
+        // board has advanced, that completion can only be submission.
+        if origin.is_some() {
+            let state = reference.draft_state(self.ruleset);
+            let (lo, hi) = state.get_lines_range();
+            if (lo..=hi).all(|l| state.get_timeline_end(l).1 != state.player()) {
+                reference.choices = OnceLock::from(Arc::from([PlayerAction::SubmitTurn]));
+            }
+        }
         self.refresh_reference(origin);
         Ok(())
     }
@@ -242,6 +276,7 @@ impl Game {
         let reference = self.reference.as_mut().expect("reference mode");
         reference.draft.pop().ok_or(MoveError::IllegalMove)?;
         reference.choices.take();
+        reference.draft_cache.take();
         self.refresh_reference(None);
         Ok(())
     }
@@ -250,24 +285,42 @@ impl Game {
         let reference = self.reference.as_ref().expect("reference mode");
         let state = reference.draft_state(self.ruleset);
         self.turn = color(state.player());
-        let mut timelines = BTreeMap::new();
         let (low, high) = state.get_lines_range();
-        let boards = (low..=high).flat_map(|line| {
-            (time(state.get_timeline_start(line))..=time(state.get_timeline_end(line)))
-                .map(move |ply| (line, ply))
-        });
-        for (l, new_time) in boards {
-            let black = new_time.rem_euclid(2) != 0;
-            let t = new_time.div_euclid(2) + 1;
-            let Some(board) = state.get_board_ptr(l, t, black) else {
-                continue;
-            };
+        let mut previous = std::mem::take(&mut self.timelines)
+            .into_iter()
+            .map(|timeline| (timeline.id, timeline))
+            .collect::<BTreeMap<_, _>>();
+        for l in low..=high {
+            let mut timeline = previous.remove(&l).unwrap_or_else(|| Timeline {
+                id: l,
+                row: l,
+                label: format!("T{l}"),
+                owner: match l.cmp(&0) {
+                    std::cmp::Ordering::Less => TimelineOwner::Black,
+                    std::cmp::Ordering::Greater => TimelineOwner::White,
+                    std::cmp::Ordering::Equal => TimelineOwner::Neutral,
+                },
+                accepted: false,
+                boards: Vec::new(),
+            });
+            let end = time(state.get_timeline_end(l));
+            // Reference moves append boards. Undo removes a suffix of the timeline.
+            timeline
+                .boards
+                .truncate(timeline.boards.partition_point(|b| b.time <= end));
+            let start = timeline
+                .boards
+                .last()
+                .map_or_else(|| time(state.get_timeline_start(l)), |b| b.time + 1);
+            for new_time in start..=end {
+                let black = new_time.rem_euclid(2) != 0;
+                let t = new_time.div_euclid(2) + 1;
+                let Some(board) = state.get_board_ptr(l, t, black) else {
+                    continue;
+                };
 
-            let old = self.board(l, new_time);
-            let origin = old
-                .map(|b| b.origin.clone())
-                .or_else(|| {
-                    movement.map(|m| Origin::Move {
+                let origin = movement
+                    .map(|m| Origin::Move {
                         from: m.from,
                         to: m.to,
                         move_type: if m.from.timeline_id == m.to.timeline_id
@@ -279,37 +332,21 @@ impl Game {
                         }
                         .to_owned(),
                     })
-                })
-                .unwrap_or(Origin::None);
-            let cells = std::array::from_fn(|y| {
-                std::array::from_fn(|x| {
-                    let code = board.get_piece((y * 8 + x) as i32);
-                    piece(code).map(|piece_type| Piece {
-                        color: if (code & 127).is_ascii_lowercase() {
-                            Color::Black
-                        } else {
-                            Color::White
-                        },
-                        piece_type,
+                    .unwrap_or(Origin::None);
+                let cells = std::array::from_fn(|y| {
+                    std::array::from_fn(|x| {
+                        let code = board.get_piece((y * 8 + x) as i32);
+                        piece(code).map(|piece_type| Piece {
+                            color: if (code & 127).is_ascii_lowercase() {
+                                Color::Black
+                            } else {
+                                Color::White
+                            },
+                            piece_type,
+                        })
                     })
-                })
-            });
-            timelines
-                .entry(l)
-                .or_insert_with(|| Timeline {
-                    id: l,
-                    row: l,
-                    label: format!("T{l}"),
-                    owner: match l.cmp(&0) {
-                        std::cmp::Ordering::Less => TimelineOwner::Black,
-                        std::cmp::Ordering::Greater => TimelineOwner::White,
-                        std::cmp::Ordering::Equal => TimelineOwner::Neutral,
-                    },
-                    accepted: false,
-                    boards: Vec::new(),
-                })
-                .boards
-                .push(BoardSnapshot {
+                });
+                timeline.boards.push(BoardSnapshot {
                     time: new_time,
                     side_to_move: color(black),
                     board: cells,
@@ -323,11 +360,14 @@ impl Game {
                     origin,
                     halfmove_clock: 0,
                 });
+            }
+            if !timeline.boards.is_empty() {
+                self.timelines.push(timeline);
+            }
         }
-        self.timelines = timelines.into_values().collect();
         self.position_hash = state.hash();
         if !reference.staged() {
-            self.result = match position_status(&state, Duration::MAX) {
+            self.result = match reference.with_search(self.ruleset, DraftSearch::status) {
                 PositionStatus::Checkmate => Some(GameOutcome {
                     winner: Some(self.turn.opposite()),
                     reason: OutcomeReason::Checkmate,

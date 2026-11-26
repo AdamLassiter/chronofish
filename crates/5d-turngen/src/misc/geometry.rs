@@ -46,7 +46,8 @@ impl Drop for Hc {
     fn drop(&mut self) {
         if self.w.capacity() != 0 {
             let w = std::mem::take(&mut self.w);
-            HC_POOL.with(|p| {
+            // A cached search may be destroyed after the thread-local buffer pool.
+            let _ = HC_POOL.try_with(|p| {
                 let mut p = p.borrow_mut();
                 if p.len() < HC_POOL_MAX {
                     p.push(w);

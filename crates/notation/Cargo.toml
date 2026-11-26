@@ -10,7 +10,7 @@ description = "5D chess notation and replay adapters"
 chronofish = ["dep:chronofish-core"]
 
 [dependencies]
-chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
+chronofish-5d-turngen = { path = "../5d-turngen" }
 chronofish-core = { path = "../core", optional = true }
 
 [lints]

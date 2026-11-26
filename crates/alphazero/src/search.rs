@@ -74,6 +74,8 @@ struct Node {
     side: Side,
     expanded: bool,
     edges: Vec<Edge>,
+    cached_position: Option<Box<Game>>,
+    pending_prediction: Option<usize>,
 }
 
 struct Edge {
@@ -92,6 +94,7 @@ struct PendingSimulation {
 
 enum PendingEvaluation {
     Terminal(f32),
+    SharedPrediction(usize),
     Network { actions: Vec<PlayerAction> },
 }
 
@@ -124,17 +127,31 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
             add_dirichlet_noise(&mut root.edges, self.config, rng);
         }
         let batch_size = self.config.inference_batch_size.max(1);
+        // Reference edges can require a whole-turn legality proof on every replay.
+        // Retain a bounded set of revisited positions for the duration of this search.
+        let mut cache_slots = if game.uses_reference_rules() { 8 } else { 0 };
         let mut completed = 0;
         while completed < self.config.simulations {
             let count = batch_size.min(self.config.simulations - completed);
             let mut positions = Vec::with_capacity(count);
             let pending = (0..count)
-                .map(|_| self.select(&mut root, game, &mut positions))
+                .map(|_| self.select(&mut root, game, &mut positions, &mut cache_slots))
                 .collect::<Vec<_>>();
-            let mut predictions = self.network.predict_batch(&positions).into_iter();
+            let predictions = self.network.predict_batch(&positions);
+            assert_eq!(
+                predictions.len(),
+                positions.len(),
+                "batched evaluator result count"
+            );
+            let values: Vec<_> = predictions
+                .iter()
+                .map(|prediction| prediction.value)
+                .collect();
+            let mut predictions = predictions.into_iter();
             for simulation in pending {
                 let (value, expansion) = match simulation.evaluation {
                     PendingEvaluation::Terminal(value) => (value, None),
+                    PendingEvaluation::SharedPrediction(index) => (values[index], None),
                     PendingEvaluation::Network { actions, .. } => {
                         let prediction = predictions
                             .next()
@@ -144,10 +161,6 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
                 };
                 complete_simulation(&mut root, &simulation.path, value, expansion);
             }
-            assert!(
-                predictions.next().is_none(),
-                "batched evaluator result count"
-            );
             completed += count;
         }
         let actions = root
@@ -184,25 +197,39 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
         root: &mut Node,
         game: &Game,
         positions: &mut Vec<chronofish_neural::EncodedPosition>,
+        cache_slots: &mut usize,
     ) -> PendingSimulation {
         let mut path = Vec::new();
-        let evaluation = self.select_from(root, &mut game.clone(), &mut path, positions);
+        let evaluation = self.select_from(
+            root,
+            std::borrow::Cow::Borrowed(game),
+            &mut path,
+            positions,
+            cache_slots,
+        );
         PendingSimulation { path, evaluation }
     }
 
     fn select_from(
         &self,
         node: &mut Node,
-        game: &mut Game,
+        mut game: std::borrow::Cow<Game>,
         path: &mut Vec<usize>,
         positions: &mut Vec<chronofish_neural::EncodedPosition>,
+        cache_slots: &mut usize,
     ) -> PendingEvaluation {
         if let Some(outcome) = game.outcome() {
             return PendingEvaluation::Terminal(outcome_value(outcome.winner, node.side));
         }
         if !node.expanded {
+            // Forced moves often lead several virtual visits to the same leaf
+            // before the batch returns. Each visit still backs up its value.
+            if let Some(index) = node.pending_prediction {
+                return PendingEvaluation::SharedPrediction(index);
+            }
+            node.pending_prediction = Some(positions.len());
             let actions = game.legal_actions();
-            positions.push(encode(game, &actions));
+            positions.push(encode(&game, &actions));
             return PendingEvaluation::Network { actions };
         }
         if node.edges.is_empty() {
@@ -226,7 +253,22 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
             })
             .map_or(0, |(index, _)| index);
         let edge = &mut node.edges[edge_index];
-        if game.apply_action(edge.action).is_err() {
+        if let Some(child) = edge.child.as_deref_mut()
+            && let Some(cached) = child.cached_position.take()
+        {
+            edge.virtual_visits += 1;
+            path.push(edge_index);
+            let evaluation = self.select_from(
+                child,
+                std::borrow::Cow::Borrowed(&cached),
+                path,
+                positions,
+                cache_slots,
+            );
+            child.cached_position = Some(cached);
+            return evaluation;
+        }
+        if game.to_mut().apply_action(edge.action).is_err() {
             edge.prior = 0.0;
             edge.visits += 1;
             edge.value_sum -= 1.0;
@@ -234,10 +276,24 @@ impl<'a, E: PolicyValueEvaluator + ?Sized> Mcts<'a, E> {
         }
         edge.virtual_visits += 1;
         path.push(edge_index);
+        let revisited = edge.child.is_some();
         let child = edge
             .child
             .get_or_insert_with(|| Box::new(Node::new(game.turn())));
-        self.select_from(child, game, path, positions)
+        if revisited && *cache_slots > 0 {
+            *cache_slots -= 1;
+            let evaluation = self.select_from(
+                child,
+                std::borrow::Cow::Borrowed(&game),
+                path,
+                positions,
+                cache_slots,
+            );
+            child.cached_position = Some(Box::new(game.into_owned()));
+            evaluation
+        } else {
+            self.select_from(child, game, path, positions, cache_slots)
+        }
     }
 
     fn expand(&self, node: &mut Node, game: &Game) -> f32 {
@@ -279,6 +335,8 @@ impl Node {
             side,
             expanded: false,
             edges: Vec::new(),
+            cached_position: None,
+            pending_prediction: None,
         }
     }
 }
@@ -302,6 +360,7 @@ fn complete_simulation(
 ) -> f32 {
     let Some((&edge_index, remainder)) = path.split_first() else {
         if let Some((actions, policy)) = expansion {
+            node.pending_prediction = None;
             node.expanded = true;
             node.edges = actions
                 .into_iter()
@@ -453,6 +512,25 @@ mod tests {
         )
         .search(&game, false, &mut rng);
         assert!(result.best_action().is_some());
+    }
+
+    #[test]
+    fn repeated_visits_to_a_forced_leaf_share_one_prediction() {
+        let evaluator = CountingEvaluator::default();
+        let mut game = Game::new_reference(Ruleset::Multiverse);
+        game.apply_action(game.legal_actions()[0]).unwrap();
+        assert_eq!(game.legal_actions(), [PlayerAction::SubmitTurn]);
+        let result = Mcts::new(
+            &evaluator,
+            SearchConfig {
+                simulations: 8,
+                inference_batch_size: 8,
+                ..SearchConfig::default()
+            },
+        )
+        .search(&game, false, &mut ChaCha8Rng::seed_from_u64(23));
+        assert_eq!(result.visits, [8]);
+        assert_eq!(evaluator.largest_batch.load(Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -6,7 +6,7 @@ license.workspace = true
 description = "Reusable orthodox and multiverse chess rules API"
 
 [dependencies]
-chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-5d-movegen = { path = "../5d-movegen" }
 
 [lints]
 workspace = true

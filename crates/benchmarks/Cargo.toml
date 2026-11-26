@@ -16,5 +16,8 @@ clap = { version = "4", features = ["derive"] }
 rand_chacha = "0.9"
 rayon = "1"
 
+[dev-dependencies]
+chronofish-notation = { path = "../notation", features = ["chronofish"] }
+
 [lints]
 workspace = true

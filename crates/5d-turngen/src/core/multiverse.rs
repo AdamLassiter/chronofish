@@ -509,6 +509,17 @@ impl Multiverse {
     }
 
     /// (l, t, c, fen) for every board, timelines in u order.
+    pub(crate) fn same_boards(&self, other: &Self) -> bool {
+        fn stored(lines: &[Timeline]) -> impl Iterator<Item = (usize, i32, &[Board])> {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| !l.boards.is_empty())
+                .map(|(axis, l)| (axis, l.start, l.boards.as_slice()))
+        }
+        stored(&self.lines).eq(stored(&other.lines))
+    }
+
     pub fn get_boards(&self, show_umove: bool) -> Vec<(i32, i32, bool, String)> {
         let mut out = Vec::new();
         for (u, tl) in self.lines.iter().enumerate() {

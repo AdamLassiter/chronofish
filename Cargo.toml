@@ -1,7 +1,7 @@
 [workspace]
 members = [
-    "crates/5d-rules",
-    "crates/5d-rules-reference",
+    "crates/5d-movegen",
+    "crates/5d-turngen",
     "crates/alphazero",
     "crates/benchmarks",
     "crates/classic",

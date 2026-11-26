@@ -2,7 +2,7 @@
 
 Kairos searches complete 5D chess turns with iterative deepening, principal
 variation search, a transposition table, move ordering and tactical quiescence.
-It shares the [reference rules](../5d-rules-reference/README.md) with Loki. The engine
+It shares the [reference rules](../5d-turngen/README.md) with Loki. The engine
 embeds its evaluation networks and Turn Zero opening book from `data/`.
 
 `KairosBot` implements `chronofish_core::AiPlayer` and supports both 5D modes.

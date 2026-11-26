@@ -1,12 +1,12 @@
 [package]
-name = "chronofish-5d-rules"
+name = "chronofish-5d-movegen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Chronofish move-first standard and 5D rules"
 
 [dependencies]
-chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
+chronofish-5d-turngen = { path = "../5d-turngen" }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 

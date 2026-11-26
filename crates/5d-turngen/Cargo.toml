@@ -1,5 +1,5 @@
 [package]
-name = "chronofish-5d-rules-reference"
+name = "chronofish-5d-turngen"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

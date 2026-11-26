@@ -7,6 +7,20 @@ Run commands from the workspace root.
 cargo run --release -p chronofish-benchmarks -- --check
 ```
 
+## Comparing 5D generators
+
+Run both engines on the same LAN history and checkpoint. The comparison reports
+the legal action count, the time to list those actions and the median of five
+48-simulation CPU searches. Omit the history to use the branched opening.
+
+```sh
+cargo run --release -p chronofish-benchmarks --example compare_rules -- models/training/best-v2.json
+cargo run --release -p kairos-tools --example reference_choices
+```
+
+The second command times legal choices on each reference timeline fixture
+with a two-second budget and reports whether enumeration finished.
+
 ## Tournaments
 
 Compare bots with a round-robin tournament. Every pair plays each random opening from both sides. The tournament prints standings with W/D/L, Elo and time per action, followed by a crosstable:

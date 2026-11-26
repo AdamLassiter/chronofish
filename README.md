@@ -24,10 +24,10 @@ to train a model.
 ## Workspace
 
 | Crate | Purpose |
-|---|---|
+| --- | --- |
 | [core](crates/core/README.md) | Game API and orthodox rules |
-| [5d-rules](crates/5d-rules/README.md) | Default move generation and game state |
-| [5d-rules-reference](crates/5d-rules-reference/README.md) | Kairos-derived whole-turn engine and referee |
+| [5d-movegen](crates/5d-movegen/README.md) | Default move generation and game state |
+| [5d-turngen](crates/5d-turngen/README.md) | Kairos-derived whole-turn engine and referee |
 | [notation](crates/notation/README.md) | 5DPGN, 5DFEN, and move histories |
 | [classic](crates/classic/README.md) | Classical Chronofish bots |
 | [neural](crates/neural/README.md) | Model, encoding, and inference |
