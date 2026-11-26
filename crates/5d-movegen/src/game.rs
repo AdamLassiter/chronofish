@@ -1936,4 +1936,54 @@ mod tests {
         assert!(Game::is_royal_piece(PieceType::RoyalQueen));
         assert!(!Game::is_royal_piece(PieceType::CommonKing));
     }
+
+    #[test]
+    fn reference_single_action_checks_match_the_full_listing() {
+        // Walk seeded random reference games. At every position a fresh clone (no cached
+        // choices) must accept exactly what `legal_actions` lists, including near misses.
+        for ruleset in [Ruleset::Multiverse, Ruleset::MultiverseVariant] {
+            let mut seed = 0x5eed_u64;
+            let mut game = Game::new_reference(ruleset);
+            for _ in 0..60 {
+                if game.outcome().is_some() {
+                    break;
+                }
+                let listed = game.legal_actions();
+                let mut probes = listed.clone();
+                for action in &listed {
+                    if let PlayerAction::Move { movement } = *action {
+                        let mut parity = movement;
+                        parity.from.time ^= 1;
+                        parity.to.time ^= 1;
+                        probes.push(PlayerAction::Move { movement: parity });
+                        let mut promoted = movement;
+                        promoted.promotion = match movement.promotion {
+                            Some(_) => None,
+                            None => Some(PieceType::Queen),
+                        };
+                        probes.push(PlayerAction::Move { movement: promoted });
+                    }
+                }
+                probes.push(PlayerAction::SubmitTurn);
+                for probe in probes {
+                    let fresh = game.clone_without_reference_cache();
+                    assert_eq!(
+                        fresh.reference.as_ref().unwrap().allows(ruleset, probe),
+                        listed.contains(&probe),
+                        "{probe:?}"
+                    );
+                }
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let submit = listed.contains(&PlayerAction::SubmitTurn) && seed % 3 != 0;
+                let action = if submit {
+                    PlayerAction::SubmitTurn
+                } else {
+                    listed[usize::try_from(seed % listed.len() as u64).unwrap()]
+                };
+                game.apply_action(action).unwrap();
+            }
+        }
+    }
 }

@@ -1,4 +1,4 @@
-use chronofish_5d_rules_reference::core::action::Action;
+use chronofish_5d_turngen::core::action::Action;
 use chronofish_core::{AiDecision, AiPlayer, AiProfile, Game, ReferenceBotTurn, Ruleset};
 use rand::{SeedableRng, rngs::StdRng};
 

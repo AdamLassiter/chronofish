@@ -17,9 +17,10 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::File;
-use std::io::{BufWriter, Write as _};
+use std::io::{BufWriter, IsTerminal as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use chronofish_alphazero::{AlphaNowBot, ChronofishBot, PolicyValueNetwork, SearchConfig};
@@ -28,20 +29,25 @@ use chronofish_classic::{
     BlueshiftConfig, BobbyFissureBot, CarlsenConfig, DeepBlueshift, Grabablanca, MonteCarlsen,
 };
 use chronofish_core::{AiPlayer, Color, Game, Ruleset};
-use clap::{Parser, ValueEnum};
+use clap::{CommandFactory, FromArgMatches, Parser, ValueEnum};
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::{RngCore, SeedableRng};
 use rayon::prelude::*;
 
 use crate::uci::{Strength, UciEngine};
 
-const ROSTER: [&str; 6] = [
+mod dashboard;
+mod setup;
+
+const ROSTER: [&str; 8] = [
     "fissure",
     "grabablanca",
     "blueshift",
     "carlsen",
     "alpha-now",
     "chronofish",
+    "kairos",
+    "loki",
 ];
 const LADDER: [&str; 5] = [
     "blueshift-1k",
@@ -147,6 +153,9 @@ struct Arguments {
     /// Games played at once, one worker thread each; capped at the machine's cores.
     #[arg(long, default_value_t = DEFAULT_THREADS)]
     threads: usize,
+    /// Start immediately with these arguments, without the setup screen or dashboard.
+    #[arg(long)]
+    skip_setup: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -286,9 +295,105 @@ struct Context {
     movetime_ms: u64,
     /// Per-game CSV rows, written as each game finishes so an interrupted run keeps them.
     csv: Option<Mutex<BufWriter<File>>>,
+    /// Live events for the dashboard; without it progress goes to stderr.
+    progress: Option<Mutex<Sender<Progress>>>,
+}
+
+/// What the dashboard hears about a running tournament.
+pub(crate) enum Progress {
+    /// A round robin begins: its players, their anchors and how many games it holds.
+    Stage {
+        title: String,
+        labels: Vec<String>,
+        anchors: Vec<Option<f64>>,
+        games: usize,
+    },
+    Started {
+        index: usize,
+        pairing: Pairing,
+    },
+    Finished {
+        index: usize,
+        pairing: Pairing,
+        white_score: f64,
+        actions: usize,
+        reason: String,
+        thinking: [Duration; 2],
+        moves: [usize; 2],
+    },
+    /// Final ratings of the current stage, with bootstrap intervals when requested.
+    Rated {
+        values: Vec<f64>,
+        intervals: Option<Vec<(f64, f64)>>,
+    },
+    /// The whole run is over; the report is printed once the terminal is restored.
+    Done(Result<String, String>),
 }
 
 impl Context {
+    fn send(&self, event: Progress) {
+        if let Some(progress) = &self.progress {
+            let sender = progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = sender.send(event);
+        }
+    }
+
+    /// Reports a finished game to the dashboard or stderr, and appends its CSV row.
+    fn finished(
+        &self,
+        players: &[Bot],
+        index: usize,
+        pairing: Pairing,
+        result: &GameResult,
+        (done, total): (usize, usize),
+    ) {
+        if self.progress.is_some() {
+            self.send(Progress::Finished {
+                index,
+                pairing,
+                white_score: result.white_score,
+                actions: result.actions,
+                reason: result.reason.clone(),
+                thinking: result.thinking,
+                moves: result.moves,
+            });
+        } else {
+            eprintln!(
+                "  [{done}/{total}] {} · opening {} · {} vs {} · {}-{} · {} actions · {}",
+                pairing.ruleset,
+                pairing.opening + 1,
+                self.label(players[pairing.white]),
+                self.label(players[pairing.black]),
+                format_score(result.white_score),
+                format_score(1.0 - result.white_score),
+                result.actions,
+                result.reason
+            );
+        }
+        if let Some(csv) = &self.csv {
+            let mut file = csv
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let row = writeln!(
+                file,
+                "{},{},{},{},{},{},{}",
+                pairing.ruleset,
+                pairing.opening + 1,
+                players[pairing.white].key(),
+                players[pairing.black].key(),
+                result.white_score,
+                result.actions,
+                result.reason
+            )
+            .and_then(|()| file.flush());
+            if let Err(error) = row {
+                eprintln!("warning: could not write the CSV row: {error}");
+            }
+        }
+    }
+
     fn make_bot(&self, bot: Bot, seed: u64) -> Result<Box<dyn AiPlayer>, String> {
         let search = SearchConfig {
             simulations: self.simulations,
@@ -364,7 +469,7 @@ fn random_opening(mut game: Game, actions: usize, seed: u64) -> Game {
 }
 
 #[derive(Clone, Copy)]
-struct Pairing {
+pub(crate) struct Pairing {
     ruleset: Ruleset,
     opening: usize,
     white: usize,
@@ -500,7 +605,9 @@ fn adjudicate(game: &Game, threshold_cp: i32) -> (f64, String) {
 
 /// Plays every pair from both sides of each opening. Orthodox engines sit out 5D rulesets.
 fn round_robin(
+    title: &str,
     players: &[Bot],
+    anchors: &[Option<f64>],
     rulesets: &[Ruleset],
     context: &Context,
     schedule: Schedule,
@@ -525,13 +632,22 @@ fn round_robin(
             }
         }
     }
-    eprintln!(
-        "{} games · {} bots · {} openings per ruleset · {} action limit",
-        pairings.len(),
-        players.len(),
-        schedule.openings,
-        schedule.max_actions
-    );
+    if context.progress.is_some() {
+        context.send(Progress::Stage {
+            title: title.to_owned(),
+            labels: players.iter().map(|&bot| context.label(bot)).collect(),
+            anchors: anchors.to_vec(),
+            games: pairings.len(),
+        });
+    } else {
+        eprintln!(
+            "{title}: {} games · {} bots · {} openings per ruleset · {} action limit",
+            pairings.len(),
+            players.len(),
+            schedule.openings,
+            schedule.max_actions
+        );
+    }
     let finished = std::sync::atomic::AtomicUsize::new(0);
     pairings
         .par_iter()
@@ -547,6 +663,7 @@ fn round_robin(
                 schedule.opening_actions,
                 schedule.seed ^ (ruleset_tag << 48) ^ (pairing.opening as u64) << 8,
             );
+            context.send(Progress::Started { index, pairing });
             let game_seed = schedule.seed.rotate_left(17) ^ index as u64;
             let white = context.make_bot(players[pairing.white], game_seed);
             let black = context.make_bot(players[pairing.black], game_seed ^ 1);
@@ -567,38 +684,7 @@ fn round_robin(
                 },
             };
             let done = finished.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            eprintln!(
-                "  [{done}/{}] {} · opening {} · {} vs {} · {}-{} · {} actions · {}",
-                pairings.len(),
-                pairing.ruleset,
-                pairing.opening + 1,
-                context.label(players[pairing.white]),
-                context.label(players[pairing.black]),
-                format_score(result.white_score),
-                format_score(1.0 - result.white_score),
-                result.actions,
-                result.reason
-            );
-            if let Some(csv) = &context.csv {
-                let mut file = csv
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let row = writeln!(
-                    file,
-                    "{},{},{},{},{},{},{}",
-                    pairing.ruleset,
-                    pairing.opening + 1,
-                    players[pairing.white].key(),
-                    players[pairing.black].key(),
-                    result.white_score,
-                    result.actions,
-                    result.reason
-                )
-                .and_then(|()| file.flush());
-                if let Err(error) = row {
-                    eprintln!("warning: could not write the CSV row: {error}");
-                }
-            }
+            context.finished(players, index, pairing, &result, (done, pairings.len()));
             Played { pairing, result }
         })
         .collect()
@@ -762,6 +848,13 @@ impl Ratings {
             values: ratings,
             intervals,
             anchors,
+        }
+    }
+
+    fn progress(&self) -> Progress {
+        Progress::Rated {
+            values: self.values.clone(),
+            intervals: self.intervals.clone(),
         }
     }
 
@@ -953,10 +1046,11 @@ fn dedupe(players: impl IntoIterator<Item = Bot>) -> Vec<Bot> {
 }
 
 pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Box<dyn Error>> {
-    let arguments = match Arguments::try_parse_from(
-        std::iter::once("tournament".to_owned()).chain(arguments),
-    ) {
-        Ok(arguments) => arguments,
+    let argv = std::iter::once("tournament".to_owned())
+        .chain(arguments)
+        .collect::<Vec<_>>();
+    let matches = match Arguments::command().try_get_matches_from(&argv) {
+        Ok(matches) => matches,
         Err(error)
             if matches!(
                 error.kind(),
@@ -968,19 +1062,67 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Box<dyn Er
         }
         Err(error) => return Err(error.into()),
     };
+    let mut arguments = Arguments::from_arg_matches(&matches)?;
+    let interactive =
+        !arguments.skip_setup && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    if interactive {
+        match setup::run(&matches)? {
+            Some(chosen) => arguments = chosen,
+            None => return Ok(()),
+        }
+    }
     let available = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
     let threads = arguments.threads.clamp(1, available);
-    eprintln!("using {threads} worker threads");
     // A local pool, not the global one, so the cap holds however `run` is called.
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|index| format!("tournament-{index}"))
         .build()?;
-    pool.install(|| tournament(&arguments).map_err(|error| error.to_string()))
-        .map_err(Into::into)
+    if !interactive {
+        eprintln!("using {threads} worker threads");
+        let report =
+            pool.install(|| tournament(&arguments, None).map_err(|error| error.to_string()))?;
+        print!("{report}");
+        return Ok(());
+    }
+    let rulesets = if arguments.calibrate {
+        "calibration: standard, then 5D".to_owned()
+    } else {
+        arguments
+            .ruleset
+            .to_possible_value()
+            .map_or_else(String::new, |value| value.get_name().to_owned())
+    };
+    let summary = format!(
+        "{threads} threads · {rulesets} · {} opening(s) · {} action limit",
+        arguments.openings, arguments.max_actions,
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let finished = sender.clone();
+    let worker = std::thread::spawn(move || {
+        let result = pool
+            .install(|| tournament(&arguments, Some(sender)).map_err(|error| error.to_string()));
+        let _ = finished.send(Progress::Done(result));
+    });
+    match dashboard::run(&receiver, &summary)? {
+        dashboard::Exit::Finished(report) => {
+            let _ = worker.join();
+            print!("{}", report?);
+            Ok(())
+        }
+        dashboard::Exit::Stopped(partial) => {
+            // Running games cannot be interrupted; the process exits without them.
+            print!("{partial}");
+            eprintln!("Tournament stopped early; games still in progress were discarded.");
+            std::process::exit(130);
+        }
+    }
 }
 
-fn tournament(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
+fn tournament(
+    arguments: &Arguments,
+    progress: Option<Sender<Progress>>,
+) -> Result<String, Box<dyn Error>> {
     let context = Context {
         model: arguments
             .model
@@ -999,6 +1141,7 @@ fn tournament(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
             .map(csv_file)
             .transpose()?
             .map(Mutex::new),
+        progress: progress.map(Mutex::new),
     };
     let schedule = Schedule {
         openings: arguments.openings,
@@ -1021,36 +1164,42 @@ fn tournament(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     }
     context.check(&players)?;
     let started = Instant::now();
-    let played = round_robin(&players, &rulesets, &context, schedule);
+    let anchors = anchors_for(&players, &explicit);
+    let played = round_robin(
+        "Tournament",
+        &players,
+        &anchors,
+        &rulesets,
+        &context,
+        schedule,
+    );
     let ratings = Ratings::fit(
         players.len(),
         &played,
-        anchors_for(&players, &explicit),
+        anchors,
         arguments.bootstrap,
         arguments.seed,
     );
+    context.send(ratings.progress());
     let labels = players
         .iter()
         .map(|&bot| context.label(bot))
         .collect::<Vec<_>>();
     let keys = players.iter().map(|bot| bot.key()).collect::<Vec<_>>();
-    print!(
-        "{}",
-        standings(
-            &format!("Standings ({:.1?})", started.elapsed()),
-            &labels,
-            &played,
-            &ratings
-        )?
-    );
+    let mut report = standings(
+        &format!("Standings ({:.1?})", started.elapsed()),
+        &labels,
+        &played,
+        &ratings,
+    )?;
     if let Some(path) = &arguments.csv {
-        eprintln!("wrote {}", path.display());
+        writeln!(report, "wrote {}", path.display())?;
     }
     if let Some(path) = &arguments.save_ratings {
         std::fs::write(path, format!("{{\"ratings\": {}}}\n", ratings.json(&keys)))?;
-        eprintln!("wrote {}", path.display());
+        writeln!(report, "wrote {}", path.display())?;
     }
-    Ok(())
+    Ok(report)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1059,7 +1208,7 @@ fn calibrate(
     context: &Context,
     schedule: Schedule,
     explicit: &HashMap<String, f64>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<String, Box<dyn Error>> {
     let ladder = dedupe(parse_bots(&arguments.ladder)?);
     if ladder.len() < 2 || ladder.iter().any(|bot| bot.standard_only()) {
         return Err("--ladder needs at least two rungs that can play 5D chess".into());
@@ -1088,27 +1237,33 @@ fn calibrate(
             .filter(|bot| bot.supports(Ruleset::Standard)),
     );
     context.check(&standard_players)?;
-    let standard_played = round_robin(&standard_players, &[Ruleset::Standard], context, schedule);
+    let standard_anchors = anchors_for(&standard_players, explicit);
+    let standard_played = round_robin(
+        "Stage 1 · standard chess, anchored to Stockfish",
+        &standard_players,
+        &standard_anchors,
+        &[Ruleset::Standard],
+        context,
+        schedule,
+    );
     let standard = Ratings::fit(
         standard_players.len(),
         &standard_played,
-        anchors_for(&standard_players, explicit),
+        standard_anchors,
         arguments.bootstrap,
         arguments.seed,
     );
+    context.send(standard.progress());
     let standard_labels = standard_players
         .iter()
         .map(|&bot| context.label(bot))
         .collect::<Vec<_>>();
-    print!(
-        "{}",
-        standings(
-            "Stage 1 · standard chess, anchored to Stockfish",
-            &standard_labels,
-            &standard_played,
-            &standard
-        )?
-    );
+    let mut report = standings(
+        "Stage 1 · standard chess, anchored to Stockfish",
+        &standard_labels,
+        &standard_played,
+        &standard,
+    )?;
 
     // Stage 2: 5D chess, with the ladder held at its standard-chess ratings.
     let rated = |players: &[Bot], bot: &Bot| {
@@ -1123,15 +1278,6 @@ fn calibrate(
             .chain(bots.iter().filter(|bot| !bot.standard_only()))
             .copied(),
     );
-    let multiverse_played = round_robin(
-        &multiverse_players,
-        &[Ruleset::Multiverse, Ruleset::MultiverseVariant],
-        context,
-        Schedule {
-            seed: schedule.seed ^ 0x5d,
-            ..schedule
-        },
-    );
     let ladder_anchors = multiverse_players
         .iter()
         .map(|bot| {
@@ -1141,6 +1287,17 @@ fn calibrate(
                 .flatten()
         })
         .collect::<Vec<_>>();
+    let multiverse_played = round_robin(
+        "Stage 2 · 5D chess, anchored to the ladder's standard-chess ratings",
+        &multiverse_players,
+        &ladder_anchors,
+        &[Ruleset::Multiverse, Ruleset::MultiverseVariant],
+        context,
+        Schedule {
+            seed: schedule.seed ^ 0x5d,
+            ..schedule
+        },
+    );
     let multiverse = Ratings::fit(
         multiverse_players.len(),
         &multiverse_played,
@@ -1148,21 +1305,19 @@ fn calibrate(
         arguments.bootstrap,
         arguments.seed,
     );
+    context.send(multiverse.progress());
     let multiverse_labels = multiverse_players
         .iter()
         .map(|&bot| context.label(bot))
         .collect::<Vec<_>>();
-    print!(
-        "{}",
-        standings(
-            "Stage 2 · 5D chess, anchored to the ladder's standard-chess ratings",
-            &multiverse_labels,
-            &multiverse_played,
-            &multiverse
-        )?
-    );
+    report.push_str(&standings(
+        "Stage 2 · 5D chess, anchored to the ladder's standard-chess ratings",
+        &multiverse_labels,
+        &multiverse_played,
+        &multiverse,
+    )?);
 
-    let (report, ratio) = transfer_check(
+    let (transfer_report, ratio) = transfer_check(
         &ladder,
         context,
         &standard_players,
@@ -1171,9 +1326,9 @@ fn calibrate(
         &multiverse_played,
         arguments.seed,
     )?;
-    let mut output = report;
-    writeln!(output, "\nCalibration took {:.1?}.", started.elapsed())?;
-    print!("{output}");
+    let (transfer, ratio) = (transfer_report, ratio);
+    report.push_str(&transfer);
+    writeln!(report, "\nCalibration took {:.1?}.", started.elapsed())?;
 
     let standard_keys = standard_players
         .iter()
@@ -1184,7 +1339,7 @@ fn calibrate(
         .map(|bot| bot.key())
         .collect::<Vec<_>>();
     if let Some(path) = &arguments.csv {
-        eprintln!("wrote {}", path.display());
+        writeln!(report, "wrote {}", path.display())?;
     }
     if let Some(path) = &arguments.save_ratings {
         std::fs::write(
@@ -1195,9 +1350,9 @@ fn calibrate(
                 multiverse.json(&multiverse_keys)
             ),
         )?;
-        eprintln!("wrote {}", path.display());
+        writeln!(report, "wrote {}", path.display())?;
     }
-    Ok(())
+    Ok(report)
 }
 
 /// Refits 5D with only the middle rung fixed and compares the ladder's spacing with
@@ -1429,6 +1584,7 @@ mod tests {
     #[test]
     fn a_tiny_tournament_completes() {
         run([
+            "--skip-setup",
             "--bots",
             "fissure,grabablanca",
             "--openings",
@@ -1446,9 +1602,10 @@ mod tests {
 
     #[test]
     fn unknown_bots_and_missing_engines_are_rejected() {
-        assert!(run(["--bots", "fissure,kasparov"].map(str::to_owned)).is_err());
+        assert!(run(["--skip-setup", "--bots", "fissure,kasparov"].map(str::to_owned)).is_err());
         assert!(
             run([
+                "--skip-setup",
                 "--bots",
                 "fissure,sf-1500",
                 "--stockfish",

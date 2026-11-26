@@ -1156,6 +1156,7 @@ dependencies = [
  "clap",
  "kairos",
  "rand_chacha 0.9.0",
+ "ratatui",
  "rayon",
 ]
 

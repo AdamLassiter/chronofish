@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chronofish_5d_rules_reference::core::{action::Action, state::State, variants::startpos};
+use chronofish_5d_turngen::core::{action::Action, state::State, variants::startpos};
 use rand::{SeedableRng, rngs::StdRng};
 
 fn output(message: &str) {

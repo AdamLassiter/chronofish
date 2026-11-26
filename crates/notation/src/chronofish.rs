@@ -1,5 +1,5 @@
 use crate::{decode_lan, pgn::parse_5dpgn};
-use chronofish_5d_rules_reference::core::variants::state_from_setup;
+use chronofish_5d_turngen::core::variants::state_from_setup;
 use chronofish_core::{Game, PlayerAction};
 
 pub fn replay_5dpgn(initial: &Game, text: &str) -> Result<(Game, Vec<PlayerAction>), String> {

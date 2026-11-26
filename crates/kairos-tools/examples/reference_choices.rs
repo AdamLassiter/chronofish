@@ -1,4 +1,4 @@
-use chronofish_5d_rules_reference::core::referee::draft_choices;
+use chronofish_5d_turngen::core::referee::draft_choices;
 use std::time::{Duration, Instant};
 fn main() {
     println!("fixture active elapsed complete moves");

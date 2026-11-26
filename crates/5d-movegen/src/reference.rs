@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use chronofish_5d_rules_reference::core::{
+use chronofish_5d_turngen::core::{
     action::{ExtMove, FullMove},
     referee::{DraftSearch, PositionStatus, apply_draft_move, play_action, submit_draft},
     state::State,
@@ -82,7 +82,7 @@ fn reference_move(movement: Move) -> ExtMove {
 #[must_use]
 pub fn reference_setup(
     rules: Ruleset,
-) -> Option<chronofish_5d_rules_reference::core::variants::VariantSetup> {
+) -> Option<chronofish_5d_turngen::core::variants::VariantSetup> {
     if rules == Ruleset::Standard {
         return None;
     }
@@ -153,6 +153,42 @@ impl ReferenceGame {
         })
     }
 
+    /// Whether `action` is among [`Self::actions`]. Uses the cached choices when they exist;
+    /// otherwise proves only this action, which is far cheaper than every choice.
+    pub(crate) fn allows(&self, rules: Ruleset, action: PlayerAction) -> bool {
+        if let Some(actions) = self.choices.get() {
+            return actions.contains(&action);
+        }
+        let draft = self
+            .draft
+            .iter()
+            .copied()
+            .map(reference_move)
+            .collect::<Vec<_>>();
+        match action {
+            PlayerAction::SubmitTurn => self
+                .with_search(rules, |search| search.allows_submit(&draft))
+                .unwrap_or(false),
+            PlayerAction::Move { movement } => {
+                let candidate = reference_move(movement);
+                // Only the exact spelling `actions` would list: the side's ply parity and
+                // an explicit promotion piece where one is required.
+                let black = self.submitted(rules).player();
+                if position(candidate.fm.from, black) != movement.from
+                    || position(candidate.fm.to, black) != movement.to
+                    || self
+                        .draft_state(rules)
+                        .normalize_promotion(candidate)
+                        .is_none_or(|normalized| normalized != candidate)
+                {
+                    return false;
+                }
+                self.with_search(rules, |search| search.allows_move(&draft, candidate))
+                    .unwrap_or(false)
+            }
+        }
+    }
+
     pub(crate) fn actions(&self, rules: Ruleset) -> &[PlayerAction] {
         self.choices
             .get_or_init(|| self.compute_actions(rules).into())
@@ -191,7 +227,7 @@ impl ReferenceGame {
         let state = self.draft_state(rules);
         let fm = reference_move(movement).fm;
         let kind = fm.move_type(&state);
-        use chronofish_5d_rules_reference::core::action::special as flags;
+        use chronofish_5d_turngen::core::action::special as flags;
         Some(MoveDescription {
             piece: piece(fm.moved_piece(&state))?,
             capture: fm.captured_piece(&state) != 0,
@@ -230,17 +266,34 @@ impl ReferenceGame {
 }
 
 impl Game {
+    /// A copy whose reference choices must be recomputed, for testing uncached paths.
+    #[cfg(test)]
+    pub(crate) fn clone_without_reference_cache(&self) -> Self {
+        let mut copy = self.clone();
+        if let Some(reference) = copy.reference.as_mut() {
+            reference.choices.take();
+        }
+        copy
+    }
+
     pub(crate) fn apply_reference(&mut self, action: PlayerAction) -> Result<(), MoveError> {
         if self.result.is_some() {
             return Err(MoveError::GameOver);
         }
-        let reference = self.reference.as_mut().expect("reference mode");
-        if !reference.actions(self.ruleset).contains(&action) {
+        let reference = self.reference.as_ref().expect("reference mode");
+        if !reference.allows(self.ruleset, action) {
             return Err(match action {
                 PlayerAction::SubmitTurn => MoveError::CannotSubmit,
                 _ => MoveError::IllegalMove,
             });
         }
+        self.stage_reference(action)
+    }
+
+    /// Applies `action` without proving it is a listed choice. The referee still
+    /// rejects a submission that does not advance the Present or leaves a royal in check.
+    fn stage_reference(&mut self, action: PlayerAction) -> Result<(), MoveError> {
+        let reference = self.reference.as_mut().expect("reference mode");
         let mut origin = None;
         match action {
             PlayerAction::Move { movement } => {
@@ -449,12 +502,28 @@ impl ReferenceBotTurn {
                     },
                 };
                 pending.push_back((probe.position_hash(), action));
+                // The game proves each action when the bot plays it; the probe only
+                // records the positions in between.
+                if let PlayerAction::Move { movement } = action {
+                    apply_draft_move(
+                        &mut probe
+                            .reference
+                            .as_ref()
+                            .expect("reference mode")
+                            .draft_state(game.ruleset())
+                            .clone(),
+                        reference_move(movement),
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
                 probe
-                    .apply_action(action)
+                    .stage_reference(action)
                     .map_err(|error| error.to_string())?;
             }
             pending.push_back((probe.position_hash(), PlayerAction::SubmitTurn));
-            probe.submit_turn().map_err(|error| error.to_string())?;
+            probe
+                .stage_reference(PlayerAction::SubmitTurn)
+                .map_err(|error| error.to_string())?;
             self.pending = pending;
         }
         let principal_variation = self.pending.iter().map(|(_, action)| *action).collect();

@@ -107,7 +107,7 @@ impl Book {
                 if moves.is_empty() {
                     return Err(err("empty action".into()));
                 }
-                chronofish_5d_rules_reference::core::referee::play_action(s, &moves)
+                chronofish_5d_turngen::core::referee::play_action(s, &moves)
                     .map_err(|e| err(format!("illegal action {}: {}", lan, e)))?;
                 let action = Action::from_vector(&moves, s);
                 // A history keeps each action once (the strongest tag wins).
@@ -231,7 +231,7 @@ impl Book {
     /// play after it (`None`: illegal there).
     fn outcome(s: &State, m: &BookMove) -> Option<(bool, bool, u64)> {
         let moves = chronofish_notation::parse_lan_moves(&m.lan).ok()?;
-        let child = chronofish_5d_rules_reference::core::referee::play_action(s, &moves).ok()?;
+        let child = chronofish_5d_turngen::core::referee::play_action(s, &moves).ok()?;
         let check = child.has_phantom_check();
         let mate = check && {
             let (info, ss) = HcInfo::build_hc(&child);
@@ -319,8 +319,7 @@ impl Book {
             let Ok(moves) = chronofish_notation::parse_lan_moves(lan) else {
                 continue;
             };
-            let Ok(child) = chronofish_5d_rules_reference::core::referee::play_action(s, &moves)
-            else {
+            let Ok(child) = chronofish_5d_turngen::core::referee::play_action(s, &moves) else {
                 continue;
             };
             let h = child.frontier_hash();
@@ -530,7 +529,7 @@ pub fn generate_tuned(src: &str, tuning: &str) -> Result<String, String> {
                 }
             }
             let lan = action_lan(&s, act);
-            let next = chronofish_5d_rules_reference::core::referee::play_action(&s, act.moves())
+            let next = chronofish_5d_turngen::core::referee::play_action(&s, act.moves())
                 .map_err(|e| err(format!("{}: {}", child.text, e)))?;
             let h = s.hash();
             let p = pos.entry(h).or_insert_with(|| {

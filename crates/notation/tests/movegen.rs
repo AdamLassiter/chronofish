@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use chronofish_5d_rules_reference::core::{
+use chronofish_5d_turngen::core::{
     action::FullMove,
     hypercuboid::HcInfo,
     state::State,
@@ -100,7 +100,7 @@ fn reference_history_rejects_royal_exposure_at_submission() {
 
 #[test]
 fn reference_draft_offers_only_moves_with_a_safe_completion() {
-    use chronofish_5d_rules_reference::core::{action::ExtMove, referee::draft_choices};
+    use chronofish_5d_turngen::core::{action::ExtMove, referee::draft_choices};
     use std::time::Duration;
 
     let (_, state) = states("(0T1)e2e4 submit (0T1)d7d5 submit (0T2)f1b5 submit");

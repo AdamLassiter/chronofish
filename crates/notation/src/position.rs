@@ -1,6 +1,6 @@
 //! 5DFEN setup and 5DUCI position histories.
 
-use chronofish_5d_rules_reference::core::{
+use chronofish_5d_turngen::core::{
     action::{Action, ExtMove},
     multiverse::TimelineLayout,
     promotion::{PromotionOptions, format_promotions, parse_promotions},
@@ -168,7 +168,7 @@ pub fn parse_g_line(line: &str) -> Result<State, String> {
 ///
 /// A trailing draft is permitted. The original state is preserved on error.
 pub fn replay_checked_uci(initial: &State, moves: &str) -> Result<State, String> {
-    use chronofish_5d_rules_reference::core::referee::{apply_draft_move, submit_draft};
+    use chronofish_5d_turngen::core::referee::{apply_draft_move, submit_draft};
 
     let mut state = initial.clone();
     for token in moves.split_whitespace() {

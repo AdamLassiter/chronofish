@@ -3,18 +3,18 @@
 //! notation, so SAN-like moves, LAN and castling share one path.
 
 use crate::position::parse_board_fen_metadata;
-use chronofish_5d_rules_reference::core::action::{Action, ExtMove, FullMove};
-use chronofish_5d_rules_reference::core::check_position::CheckPosition;
-use chronofish_5d_rules_reference::core::multiverse::{Turn, next_turn, previous_turn, show_turn};
-use chronofish_5d_rules_reference::core::piece::*;
-use chronofish_5d_rules_reference::core::promotion::{
+use chronofish_5d_turngen::core::action::{Action, ExtMove, FullMove};
+use chronofish_5d_turngen::core::check_position::CheckPosition;
+use chronofish_5d_turngen::core::multiverse::{Turn, next_turn, previous_turn, show_turn};
+use chronofish_5d_turngen::core::piece::*;
+use chronofish_5d_turngen::core::promotion::{
     PromotionOptions, default_promote_to, format_promotions, parse_promotions,
 };
-use chronofish_5d_rules_reference::core::state::{MateType, State};
-use chronofish_5d_rules_reference::core::variants::{
+use chronofish_5d_turngen::core::state::{MateType, State};
+use chronofish_5d_turngen::core::variants::{
     BoardSpec, Sign, VariantSetup, default_variant, state_from_setup,
 };
-use chronofish_5d_rules_reference::core::vec4::Vec4;
+use chronofish_5d_turngen::core::vec4::Vec4;
 
 /// A parsed 5dpgn game.
 #[derive(Clone, Debug)]
@@ -1526,7 +1526,7 @@ pub fn action_to_pgn_both(
     (texts.join(" "), fulls.join(" "))
 }
 
-const BUILTIN: [&str; 44] = chronofish_5d_rules_reference::core::variants::VARIANT_NAMES;
+const BUILTIN: [&str; 44] = chronofish_5d_turngen::core::variants::VARIANT_NAMES;
 
 /// Whether two setups have the same boards (promotions aside).
 fn same_boards(a: &VariantSetup, b: &VariantSetup) -> bool {

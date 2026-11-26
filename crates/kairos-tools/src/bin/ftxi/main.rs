@@ -3,7 +3,7 @@ mod protocol;
 
 use std::process::ExitCode;
 
-use chronofish_5d_rules_reference::core::{
+use chronofish_5d_turngen::core::{
     action::{Action, MoveSeq},
     referee::play_action,
     state::State,

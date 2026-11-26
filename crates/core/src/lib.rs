@@ -2,5 +2,5 @@
 
 mod player;
 
-pub use chronofish_5d_rules::*;
+pub use chronofish_5d_movegen::*;
 pub use player::{AiPlayer, AiProfile};

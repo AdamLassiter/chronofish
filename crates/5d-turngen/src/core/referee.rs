@@ -123,13 +123,59 @@ impl DraftSearch {
     }
 
     pub fn choices(&self, draft: &[ExtMove]) -> Result<DraftChoices, String> {
+        self.query(draft, Query::All)
+    }
+
+    /// Whether `movement` is among [`Self::choices`] for `draft`, proving only that move.
+    pub fn allows_move(&self, draft: &[ExtMove], movement: ExtMove) -> Result<bool, String> {
+        let normalized = {
+            let mut position = self.state.as_ref().clone();
+            for &m in draft {
+                apply_draft_move(&mut position, m)?;
+            }
+            position.normalize_promotion(movement)
+        };
+        let Some(normalized) = normalized else {
+            return Ok(false);
+        };
+        Ok(self
+            .query(draft, Query::Move(normalized))?
+            .moves
+            .contains(&normalized))
+    }
+
+    /// Whether [`Self::choices`] for `draft` allows submitting it, proving only that.
+    pub fn allows_submit(&self, draft: &[ExtMove]) -> Result<bool, String> {
+        Ok(self.query(draft, Query::Submit)?.can_submit)
+    }
+
+    fn query(&self, draft: &[ExtMove], query: Query) -> Result<DraftChoices, String> {
         collect_draft_choices(
             &self.state,
             draft,
             std::time::Duration::MAX,
             Some(DIRECT_SEARCH_LIMIT),
             Some((&self.context, &self.space)),
+            query,
         )
+    }
+}
+
+/// What a draft search must decide: every choice, one move, or submission.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Query {
+    All,
+    Move(ExtMove),
+    Submit,
+}
+
+impl Query {
+    fn settled(self, moves: &std::collections::BTreeSet<ExtMove>, can_submit: bool) -> bool {
+        match self {
+            Self::All => false,
+            Self::Move(movement) => moves.contains(&movement),
+            Self::Submit => can_submit,
+        }
     }
 }
 
@@ -150,7 +196,14 @@ pub fn draft_choices(
     draft: &[ExtMove],
     budget: std::time::Duration,
 ) -> Result<DraftChoices, String> {
-    collect_draft_choices(submitted, draft, budget, Some(DIRECT_SEARCH_LIMIT), None)
+    collect_draft_choices(
+        submitted,
+        draft,
+        budget,
+        Some(DIRECT_SEARCH_LIMIT),
+        None,
+        Query::All,
+    )
 }
 
 fn collect_draft_choices(
@@ -159,6 +212,7 @@ fn collect_draft_choices(
     budget: std::time::Duration,
     direct_limit: Option<usize>,
     prepared: Option<(&HcInfo, &SearchSpace)>,
+    query: Query,
 ) -> Result<DraftChoices, String> {
     use super::action::Action;
     use std::collections::BTreeSet;
@@ -297,6 +351,9 @@ fn collect_draft_choices(
     {
         for seq in context.search(submitted, space) {
             inspect(&seq, &mut moves, &mut can_submit)?;
+            if query.settled(&moves, can_submit) {
+                break;
+            }
         }
     } else {
         // A large product of candidate coordinates can still contain only
@@ -311,6 +368,13 @@ fn collect_draft_choices(
                 });
             };
             inspect(&seq, &mut moves, &mut can_submit)?;
+            if query.settled(&moves, can_submit) {
+                return Ok(DraftChoices {
+                    moves: moves.into_iter().collect(),
+                    can_submit,
+                    complete: !hypercuboid::interrupted(),
+                });
+            }
         }
         let coordinate_move = |axis, i| {
             let raw = match context.entry(axis, i) {
@@ -330,21 +394,32 @@ fn collect_draft_choices(
             }
         }
         finished.prune_empty();
+        if matches!(query, Query::Move(_)) {
+            finished.hcs.clear();
+        }
         for seq in context.search(submitted, finished) {
             inspect(&seq, &mut moves, &mut can_submit)?;
             if can_submit {
                 break;
             }
         }
-        for axis in 0..context.dimension() {
+        let axes = if query == Query::Submit {
+            0
+        } else {
+            context.dimension()
+        };
+        for axis in 0..axes {
             for i in context.get_universe()[axis].iter() {
-                if hypercuboid::interrupted() {
+                if hypercuboid::interrupted() || query.settled(&moves, can_submit) {
                     break;
                 }
                 let Some(choice) = coordinate_move(axis, i) else {
                     continue;
                 };
                 if moves.contains(&choice) || normalized_draft.contains(&choice) {
+                    continue;
+                }
+                if matches!(query, Query::Move(target) if target != choice) {
                     continue;
                 }
                 let mut next = position.clone();
@@ -481,8 +556,10 @@ mod tests {
         }
         let check = |prefix: &[ExtMove]| {
             let budget = std::time::Duration::MAX;
-            let full = collect_draft_choices(&state, prefix, budget, None, None).unwrap();
-            let fast = collect_draft_choices(&state, prefix, budget, Some(0), None).unwrap();
+            let full =
+                collect_draft_choices(&state, prefix, budget, None, None, Query::All).unwrap();
+            let fast =
+                collect_draft_choices(&state, prefix, budget, Some(0), None, Query::All).unwrap();
             assert!(full.complete && fast.complete);
             assert_eq!(
                 (fast.can_submit, &fast.moves),
@@ -549,16 +626,72 @@ mod tests {
         for seed in [3, 11, 29, 47] {
             for state in branching_positions(seed, 24, 3000) {
                 let check = |prefix: &[ExtMove]| {
-                    let full = collect_draft_choices(&state, prefix, budget, None, None).unwrap();
-                    for limit in [0, DIRECT_SEARCH_LIMIT, usize::MAX] {
-                        let fast = collect_draft_choices(&state, prefix, budget, Some(limit), None)
+                    let full =
+                        collect_draft_choices(&state, prefix, budget, None, None, Query::All)
                             .unwrap();
+                    for limit in [0, DIRECT_SEARCH_LIMIT, usize::MAX] {
+                        let fast = collect_draft_choices(
+                            &state,
+                            prefix,
+                            budget,
+                            Some(limit),
+                            None,
+                            Query::All,
+                        )
+                        .unwrap();
                         assert_eq!(
                             (fast.can_submit, &fast.moves),
                             (full.can_submit, &full.moves),
                             "limit {limit} prefix {prefix:?} at {}",
                             state.show_fen()
                         );
+                    }
+                    // Single-move and submit queries must agree with the full set,
+                    // including for pseudo-legal moves the full set rejects.
+                    let search = DraftSearch::new(Arc::new(state.clone()));
+                    assert_eq!(search.allows_submit(prefix).unwrap(), full.can_submit);
+                    let witness_submit =
+                        collect_draft_choices(&state, prefix, budget, Some(0), None, Query::Submit)
+                            .unwrap()
+                            .can_submit;
+                    assert_eq!(witness_submit, full.can_submit, "witness submit");
+                    let mut staged = state.clone();
+                    for &m in prefix {
+                        apply_draft_move(&mut staged, m).unwrap();
+                    }
+                    let mut targets = Vec::new();
+                    for from in staged.get_movable_pieces() {
+                        targets.clear();
+                        staged.gen_piece_move(from, &mut targets);
+                        for &to in &targets {
+                            let movement =
+                                ExtMove::new(super::super::action::FullMove::new(from, to), 0);
+                            let Some(movement) = staged.normalize_promotion(movement) else {
+                                continue;
+                            };
+                            let witness = collect_draft_choices(
+                                &state,
+                                prefix,
+                                budget,
+                                Some(0),
+                                None,
+                                Query::Move(movement),
+                            )
+                            .unwrap()
+                            .moves
+                            .contains(&movement);
+                            assert_eq!(
+                                witness,
+                                full.moves.contains(&movement),
+                                "witness {movement}"
+                            );
+                            assert_eq!(
+                                search.allows_move(prefix, movement).unwrap(),
+                                full.moves.contains(&movement),
+                                "{movement} after {prefix:?} at {}",
+                                state.show_fen()
+                            );
+                        }
                     }
                     full.moves
                 };

@@ -26,11 +26,21 @@ with a two-second budget and reports whether enumeration finished.
 Compare bots with a round-robin tournament. Every pair plays each random opening from both sides. The tournament prints standings with W/D/L, Elo and time per action, followed by a crosstable:
 
 ```sh
-cargo run --release -p chronofish-benchmarks -- --tournament \
+cargo run --release -p chronofish-benchmarks -- --tournament
+```
+
+In a terminal this opens a setup screen. Toggle the bots, review every setting with its description and default, and press F5 to start. The Outlook pane shows the game count, a rough duration and which rating scale the run will produce. Arguments given on the command line pre-fill the form. Settings that differ from the defaults are saved in `~/.config/chronofish/tournament-settings.txt` and pre-filled next time.
+
+A live dashboard follows. It shows progress with an ETA, standings with an Elo fit that updates after every game, the games in play and recent results. When a stage finishes, its standings switch to the final ratings with 95% intervals. Press q twice to stop early; finished games stay in the CSV. Leaving the dashboard prints the full report.
+
+Pass `--skip-setup` to start straight from the command line with plain progress lines, as in scripts:
+
+```sh
+cargo run --release -p chronofish-benchmarks -- --tournament --skip-setup \
   --openings 2 --ruleset all --max-actions 80 --model models/training/best-v2.json
 ```
 
-Pairings against Kairos or Loki use reference rules. Use `--bots kairos,loki --ruleset multiverse` for a head-to-head match. Use `--bots` to choose a subset and `--csv` to save one row per game. `blueshift-<nodes>` (for example `blueshift-10k`) adds Deep Blueshift with a different node budget.
+The default roster is every built-in bot: Bobby Fissure, Grabablanca, Deep Blueshift, Monte Carlsen, AlphaNow, Chronofish, Kairos and Loki. Kairos and Loki play only 5D chess, and their pairings use the reference rules. Use `--bots kairos,loki --ruleset multiverse` for a head-to-head match. Use `--bots` to choose a subset and `--csv` to save one row per game. `blueshift-<nodes>` (for example `blueshift-10k`) adds Deep Blueshift with a different node budget.
 
 The Elo column has a ± value: half the 95% bootstrap interval, from resampling colour-reversed opening pairs (`--bootstrap N`, default 200). Treat two bots whose intervals overlap as unresolved, and add openings to separate them. When a game reaches the action limit, the handcrafted evaluation scores it. If one side leads by `--adjudicate-cp` centipawns (default 400), that side wins; otherwise the game is a draw. `--adjudicate-cp 0` scores every unfinished game as a draw.
 

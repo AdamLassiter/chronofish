@@ -1,6 +1,6 @@
 //! Port of the 64-feature evaluator in ftxi's linear.cpp and statistics.cpp.
 
-use chronofish_5d_rules_reference::core::{hypercuboid::HcInfo, state::State};
+use chronofish_5d_turngen::core::{hypercuboid::HcInfo, state::State};
 
 #[derive(Clone, Copy, Debug)]
 pub enum LinearProfile {
@@ -201,7 +201,7 @@ fn features(state: &State, context: &HcInfo) -> [f32; 64] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chronofish_5d_rules_reference::core::variants::startpos;
+    use chronofish_5d_turngen::core::variants::startpos;
     use chronofish_notation::apply_uci_moves;
 
     #[test]
