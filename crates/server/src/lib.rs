@@ -74,11 +74,11 @@ impl AppState {
                 Box::new(blueshift),
                 Box::new(carlsen),
                 Box::new(RulesetBot {
-                    standard: alpha_now,
+                    legacy: alpha_now,
                     reference: reference_now,
                 }),
                 Box::new(RulesetBot {
-                    standard: chronofish,
+                    legacy: chronofish,
                     reference: reference_chronofish,
                 }),
             ],
@@ -87,23 +87,23 @@ impl AppState {
 }
 
 struct RulesetBot<B> {
-    standard: B,
+    legacy: B,
     reference: B,
 }
 
 impl<B: chronofish_core::AiPlayer> chronofish_core::AiPlayer for RulesetBot<B> {
     fn profile(&self) -> chronofish_core::AiProfile {
-        self.standard.profile()
+        self.legacy.profile()
     }
 
     fn choose_action(
         &mut self,
         game: &chronofish_core::Game,
     ) -> Result<chronofish_core::AiDecision, String> {
-        if game.ruleset() == chronofish_core::Ruleset::Standard {
-            self.standard.choose_action(game)
-        } else {
+        if game.uses_reference_rules() {
             self.reference.choose_action(game)
+        } else {
+            self.legacy.choose_action(game)
         }
     }
 }

@@ -13,10 +13,10 @@ Compare bots with a round-robin tournament. Every pair plays each random opening
 
 ```sh
 cargo run --release -p chronofish-benchmarks -- --tournament \
-  --openings 2 --ruleset all --max-actions 80 --model models/training/best-reference-v3.json
+  --openings 2 --ruleset all --max-actions 80 --model models/training/best-v2.json
 ```
 
-Kairos and Loki join the 5D pairings by default. Use `--bots kairos,loki --ruleset multiverse` for a head-to-head match. Use `--bots` to choose a subset and `--csv` to save one row per game. `blueshift-<nodes>` (for example `blueshift-10k`) adds Deep Blueshift with a different node budget.
+Pairings against Kairos or Loki use reference rules. Use `--bots kairos,loki --ruleset multiverse` for a head-to-head match. Use `--bots` to choose a subset and `--csv` to save one row per game. `blueshift-<nodes>` (for example `blueshift-10k`) adds Deep Blueshift with a different node budget.
 
 The Elo column has a ± value: half the 95% bootstrap interval, from resampling colour-reversed opening pairs (`--bootstrap N`, default 200). Treat two bots whose intervals overlap as unresolved, and add openings to separate them. When a game reaches the action limit, the handcrafted evaluation scores it. If one side leads by `--adjudicate-cp` centipawns (default 400), that side wins; otherwise the game is a draw. `--adjudicate-cp 0` scores every unfinished game as a draw.
 
@@ -35,7 +35,7 @@ Stockfish's Elo calibration was made at a longer time control against a CCRL-sty
 
 ```sh
 cargo run --release -p chronofish-benchmarks -- --tournament --calibrate \
-  --stockfish /usr/games/stockfish --openings 4 --model models/training/best-reference-v3.json \
+  --stockfish /usr/games/stockfish --openings 4 --model models/training/best-v2.json \
   --save-ratings ratings.json
 ```
 

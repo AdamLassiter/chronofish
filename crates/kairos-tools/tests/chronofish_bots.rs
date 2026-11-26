@@ -27,7 +27,7 @@ fn both_bots_emit_verified_reference_turns() {
         assert!(bot.choose_action(&Game::new(Ruleset::Standard)).is_err());
         for ruleset in [Ruleset::Multiverse, Ruleset::MultiverseVariant] {
             assert!(bot.supports_ruleset(ruleset));
-            let mut game = Game::new(ruleset);
+            let mut game = Game::new_reference(ruleset);
             if ruleset == Ruleset::Multiverse {
                 play(&mut game, 0, (6, 0), (0, 5, 2));
                 play(&mut game, 1, (6, 7), (1, 5, 5));

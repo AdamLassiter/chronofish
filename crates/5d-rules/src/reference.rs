@@ -4,7 +4,7 @@ use std::{
     time::Duration,
 };
 
-use chronofish_5d_rules::core::{
+use chronofish_5d_rules_reference::core::{
     action::{ExtMove, FullMove},
     referee::{
         PositionStatus, apply_draft_move, draft_choices, play_action, position_status, submit_draft,
@@ -83,7 +83,7 @@ fn reference_move(movement: Move) -> ExtMove {
 #[must_use]
 pub fn reference_setup(
     rules: Ruleset,
-) -> Option<chronofish_5d_rules::core::variants::VariantSetup> {
+) -> Option<chronofish_5d_rules_reference::core::variants::VariantSetup> {
     if rules == Ruleset::Standard {
         return None;
     }
@@ -167,7 +167,7 @@ impl ReferenceGame {
         let state = self.draft_state(rules);
         let fm = reference_move(movement).fm;
         let kind = fm.move_type(&state);
-        use chronofish_5d_rules::core::action::special as flags;
+        use chronofish_5d_rules_reference::core::action::special as flags;
         Some(MoveDescription {
             piece: piece(fm.moved_piece(&state))?,
             capture: fm.captured_piece(&state) != 0,
@@ -425,4 +425,13 @@ impl ReferenceBotTurn {
             root_value: None,
         })
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiDecision {
+    pub action: PlayerAction,
+    #[serde(default)]
+    pub principal_variation: Vec<PlayerAction>,
+    pub root_value: Option<f32>,
 }

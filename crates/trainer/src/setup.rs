@@ -157,7 +157,7 @@ const SPECS: &[Spec] = &[
     field(
         "warm_start",
         TRAINING,
-        "Import weights into a fresh reference-rules run. Leave blank to initialize a new model.",
+        "Import weights into a fresh training run. Leave blank to initialize a new model.",
     )
     .once(),
     field(

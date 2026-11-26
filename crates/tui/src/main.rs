@@ -113,7 +113,14 @@ fn make_opponent(cli: &Cli) -> Result<Option<Box<dyn AiPlayer>>, Box<dyn std::er
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     let mut bot = make_opponent(&cli)?;
-    let mut game = Game::new(cli.mode.into());
+    let mut game = if bot
+        .as_ref()
+        .is_some_and(|bot| bot.requires_reference_rules())
+    {
+        Game::new_reference(cli.mode.into())
+    } else {
+        Game::new(cli.mode.into())
+    };
     if let Some(player) = &bot
         && !player.supports_ruleset(game.ruleset())
     {
@@ -202,10 +209,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(path) = cli.export_pgn {
-        let text = chronofish_notation::export_5dpgn_for(game.ruleset(), &history)?;
-        let mut file = std::fs::File::create_new(path)?;
-        file.write_all(text.as_bytes())?;
+        save_pgn(path, &game, &history)?;
     }
+    Ok(())
+}
+
+fn save_pgn(
+    path: std::path::PathBuf,
+    game: &Game,
+    history: &[PlayerAction],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let initial = if game.uses_reference_rules() {
+        Game::new_reference(game.ruleset())
+    } else {
+        Game::new(game.ruleset())
+    };
+    let text = chronofish_notation::export_5dpgn_from(initial, history)?;
+    let mut file = std::fs::File::create_new(path)?;
+    file.write_all(text.as_bytes())?;
     Ok(())
 }
 

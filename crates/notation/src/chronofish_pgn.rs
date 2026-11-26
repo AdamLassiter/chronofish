@@ -14,9 +14,17 @@ pub fn export_5dpgn(actions: &[PlayerAction]) -> Result<String, String> {
 
 /// Write the submitted main line for the selected 5D ruleset.
 pub fn export_5dpgn_for(rules: Ruleset, actions: &[PlayerAction]) -> Result<String, String> {
+    export_5dpgn_from(Game::new(rules), actions)
+}
+
+/// Write the submitted main line using the supplied starting game and its rules.
+///
+/// # Errors
+/// Returns an error for a non-5D start or an action that cannot be applied.
+pub fn export_5dpgn_from(mut game: Game, actions: &[PlayerAction]) -> Result<String, String> {
+    let rules = game.ruleset();
     let setup =
         chronofish_core::reference_setup(rules).ok_or("5DPGN export requires a 5D ruleset")?;
-    let mut game = Game::new(rules);
     let mut out = if rules == Ruleset::Multiverse {
         String::from("[Board \"Standard\"]\n[Mode \"5D\"]\n\n")
     } else {

@@ -1,4 +1,6 @@
-use chronofish_5d_rules::core::{action::Action, hypercuboid::HcInfo, variants::startpos};
+use chronofish_5d_rules_reference::core::{
+    action::Action, hypercuboid::HcInfo, variants::startpos,
+};
 use chronofish_ftxi::{LeafEvaluation, flat_ucb, monkey, search};
 use chronofish_notation::apply_uci_moves;
 use rand::{SeedableRng, rngs::StdRng};

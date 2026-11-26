@@ -1,4 +1,4 @@
-use chronofish_5d_rules::core::action::Action;
+use chronofish_5d_rules_reference::core::action::Action;
 use chronofish_core::{AiDecision, AiPlayer, AiProfile, Game, ReferenceBotTurn, Ruleset};
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -35,6 +35,10 @@ impl AiPlayer for LokiBot {
 
     fn supports_ruleset(&self, ruleset: Ruleset) -> bool {
         ruleset != Ruleset::Standard
+    }
+
+    fn requires_reference_rules(&self) -> bool {
+        true
     }
 
     fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String> {

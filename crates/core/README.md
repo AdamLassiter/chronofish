@@ -1,9 +1,7 @@
 # Chronofish Core
 
-Owns the application-facing `Game`, `PlayerAction`, `GameView`, and `AiPlayer`
-interfaces. Standard Chess uses the native move generator. New 5D games
-delegate legality and adjudication to [the reference rules crate](../5d-rules/README.md)
-and expose staged moves, undo, submission, and board views through the same API.
+Defines the player interfaces and re-exports application-facing game types
+and views from [5d-rules](../5d-rules/README.md).
 
 For interchange formats, use [chronofish-notation](../notation/README.md).
 See the [rules guide](../../RULES.md) for gameplay.

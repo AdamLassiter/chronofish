@@ -22,6 +22,7 @@ interface User {
   rating: number;
   gamesPlayed: number;
   supportedRulesets?: Ruleset[];
+  referenceRules?: boolean;
 }
 
 interface Position {
@@ -297,7 +298,7 @@ function updateOpponents(): void {
       .map((candidate) => {
         const option = document.createElement("option");
         option.value = candidate.username;
-        option.textContent = `${candidate.displayName}${candidate.isBot ? " · bot" : ""} (${candidate.rating})`;
+        option.textContent = `${candidate.displayName}${candidate.isBot ? " · bot" : ""}${candidate.referenceRules ? " · reference rules" : ""} (${candidate.rating})`;
         return option;
       }),
   );

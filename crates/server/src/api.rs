@@ -252,6 +252,8 @@ struct LobbyUser {
     user: UserRecord,
     #[serde(skip_serializing_if = "Option::is_none")]
     supported_rulesets: Option<Vec<Ruleset>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    reference_rules: bool,
 }
 
 async fn users(State(state): State<AppState>) -> Result<Json<Vec<LobbyUser>>, ApiError> {
@@ -276,6 +278,9 @@ async fn users(State(state): State<AppState>) -> Result<Json<Vec<LobbyUser>>, Ap
                     })
                 });
                 LobbyUser {
+                    reference_rules: bots
+                        .get(&user.id)
+                        .is_some_and(|bot| bot.requires_reference_rules()),
                     user,
                     supported_rulesets,
                 }
@@ -329,16 +334,23 @@ async fn create_game(
             return Err(ApiError::bad_request("choose a different opponent"));
         }
         let ruleset = parse_ruleset(&body.ruleset)?;
-        if opponent.is_bot
-            && state
-                .bots
-                .lock()
-                .expect("bot mutex poisoned")
+        let reference = if opponent.is_bot {
+            let bots = state.bots.lock().map_err(ApiError::internal)?;
+            let bot = bots
                 .get(&opponent.id)
-                .is_none_or(|bot| !bot.supports_ruleset(ruleset))
-        {
-            return Err(ApiError::bad_request("that bot does not play this ruleset"));
-        }
+                .ok_or_else(|| ApiError::bad_request("that bot is unavailable"))?;
+            if !bot.supports_ruleset(ruleset) {
+                return Err(ApiError::bad_request("that bot does not play this ruleset"));
+            }
+            bot.requires_reference_rules()
+        } else {
+            false
+        };
+        let initial = if reference {
+            chronofish_core::Game::new_reference(ruleset)
+        } else {
+            chronofish_core::Game::new(ruleset)
+        };
         let (attacker, defender) = match body.play_as.as_str() {
             "white" | "attacker" => (user.id, opponent.id),
             "black" | "defender" => (opponent.id, user.id),
@@ -346,7 +358,7 @@ async fn create_game(
         };
         let game = state
             .database
-            .create_game(ruleset, attacker, defender)
+            .create_game(&initial, attacker, defender)
             .map_err(ApiError::internal)?;
         let game = advance_bots(&state, game)?;
         Ok(Json(game_detail(&state, &game, user.id)?))
@@ -622,9 +634,6 @@ fn require_bug_admin(state: &AppState, headers: &HeaderMap) -> Result<(), ApiErr
 }
 
 fn ensure_current_active(stored: &StoredGame, version: i64) -> Result<(), ApiError> {
-    if !stored.game.uses_current_rules() {
-        return Err(ApiError::conflict("legacy 5D games are read-only"));
-    }
     if stored.version != version {
         return Err(ApiError::conflict("game changed; reload before acting"));
     }
@@ -1085,6 +1094,7 @@ mod tests {
                 .iter()
                 .find(|user| user["username"] == opponent)
                 .expect("bot account");
+            assert_eq!(bot["referenceRules"], true);
             assert_eq!(
                 bot["supportedRulesets"],
                 json!(["multiverse", "multiverse-variant"])

@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn replay_rejects_exposing_a_royal() {
-        let initial = Game::new(Ruleset::Multiverse);
+        let initial = Game::new_reference(Ruleset::Multiverse);
         let history =
             "(0T1)e2(0T1)e4 submit (0T1)d7d5 submit (0T2)f1b5 submit (0T2)a7a6 submit (0T3)b5e8";
         assert!(replay_lan(&initial, history).is_err());

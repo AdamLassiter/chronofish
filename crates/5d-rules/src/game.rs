@@ -87,13 +87,10 @@ impl Game {
             last_message: "Select a white piece on a latest board.".to_string(),
             position_hash: 0,
             repetition_history: Vec::new(),
-            reference: (ruleset != Ruleset::Standard).then(crate::reference::ReferenceGame::new),
+            reference: None,
         };
         game.position_hash = game.recompute_position_hash();
         game.repetition_history.push(game.position_hash);
-        if game.reference.is_some() {
-            game.refresh_reference(None);
-        }
         game
     }
 
@@ -102,10 +99,21 @@ impl Game {
         self.ruleset
     }
 
-    /// Whether the game can be played with the current rules.
+    /// Starts an explicitly selected reference-engine match.
     #[must_use]
-    pub fn uses_current_rules(&self) -> bool {
-        self.ruleset == Ruleset::Standard || self.reference.is_some()
+    pub fn new_reference(ruleset: Ruleset) -> Self {
+        let mut game = Self::new(ruleset);
+        if ruleset != Ruleset::Standard {
+            game.reference = Some(crate::reference::ReferenceGame::new());
+            game.refresh_reference(None);
+        }
+        game
+    }
+
+    /// Whether this match uses the reference engine.
+    #[must_use]
+    pub const fn uses_reference_rules(&self) -> bool {
+        self.reference.is_some()
     }
 
     #[must_use]
@@ -1820,8 +1828,17 @@ mod tests {
     }
 
     #[test]
+    fn new_5d_games_use_move_first_rules() {
+        for ruleset in [Ruleset::Multiverse, Ruleset::MultiverseVariant] {
+            let game = Game::new(ruleset);
+            assert!(!game.uses_reference_rules());
+            assert!(Game::new_reference(ruleset).uses_reference_rules());
+        }
+    }
+
+    #[test]
     fn reference_multiverse_does_not_apply_threefold_repetition() {
-        let mut game = Game::new(Ruleset::Multiverse);
+        let mut game = Game::new_reference(Ruleset::Multiverse);
         for (time, from, to) in [
             (0, "g1", "f3"),
             (1, "g8", "f6"),
@@ -1843,7 +1860,7 @@ mod tests {
 
     #[test]
     fn staged_five_d_turn_survives_persistence() {
-        let mut game = Game::new(Ruleset::Multiverse);
+        let mut game = Game::new_reference(Ruleset::Multiverse);
         play(&mut game, 0, "e2", "e4");
         let json = serde_json::to_string(&game).expect("serialize game");
         let mut loaded: Game = serde_json::from_str(&json).expect("deserialize game");
@@ -1855,7 +1872,7 @@ mod tests {
 
     #[test]
     fn optional_front_can_be_played_first_and_restored_mid_turn() {
-        let mut game = Game::new(Ruleset::Multiverse);
+        let mut game = Game::new_reference(Ruleset::Multiverse);
         play(&mut game, 0, "g1", "f3");
         game.submit_turn().unwrap();
         play(&mut game, 1, "g8", "f6");
@@ -1883,7 +1900,7 @@ mod tests {
 
     #[test]
     fn reference_five_d_requires_a_safe_turn() {
-        let mut game = Game::new(Ruleset::Multiverse);
+        let mut game = Game::new_reference(Ruleset::Multiverse);
         for (time, from, to) in [(0, "e2", "e4"), (1, "d7", "d5"), (2, "f1", "b5")] {
             play(&mut game, time, from, to);
             game.submit_turn().unwrap();

@@ -54,8 +54,8 @@ The compose example persists SQLite state in a named volume. GitHub and Gitea wo
 
 A new bot account starts at the lower bound of its 95% interval from the [standard-chess calibration against Stockfish](../benchmarks/README.md#ratings-on-a-recognised-scale). Using the lower bound keeps new accounts from being overrated while the intervals are still wide. A bot account is reseeded each time the server starts, but only until it plays its first rated game; after that it keeps the rating it has earned. Uncalibrated bots, including Kairos, Loki and Chronofish, start at 1500. The seeds live in `seed_rating` in [the server library](src/lib.rs).
 
-Chronofish and AlphaNow share one network. Standard chess uses
-`models/training/best-v2.json` (`CHRONOFISH_AZ_MODEL`) and 5D uses
+Chronofish and AlphaNow share checkpoint weights for each engine. Kairos and Loki start explicit reference-rules matches. Saved reference matches keep their engine. Default matches use
+`models/training/best-v2.json` (`CHRONOFISH_AZ_MODEL`) and reference matches use
 `models/training/best-reference-v3.json` (`CHRONOFISH_REFERENCE_AZ_MODEL`). A
 network trained on either the CPU or the GPU backend works, since a checkpoint
 carries its architecture; the server always runs inference on the CPU.

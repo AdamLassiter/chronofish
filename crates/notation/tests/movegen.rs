@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use chronofish_5d_rules::core::{
+use chronofish_5d_rules_reference::core::{
     action::FullMove,
     hypercuboid::HcInfo,
     state::State,
@@ -12,7 +12,7 @@ use chronofish_core::{Game, PlayerAction, Ruleset};
 use chronofish_notation::{apply_uci_moves, format_lan, replay_lan};
 
 fn states(history: &str) -> (Game, State) {
-    let game = replay_lan(&Game::new(Ruleset::Multiverse), history).unwrap();
+    let game = replay_lan(&Game::new_reference(Ruleset::Multiverse), history).unwrap();
     let setup = default_variant("Standard").unwrap();
     let mut reference = state_from_setup(&setup).unwrap();
     apply_uci_moves(&mut reference, history).unwrap();
@@ -100,7 +100,7 @@ fn reference_history_rejects_royal_exposure_at_submission() {
 
 #[test]
 fn reference_draft_offers_only_moves_with_a_safe_completion() {
-    use chronofish_5d_rules::core::{action::ExtMove, referee::draft_choices};
+    use chronofish_5d_rules_reference::core::{action::ExtMove, referee::draft_choices};
     use std::time::Duration;
 
     let (_, state) = states("(0T1)e2e4 submit (0T1)d7d5 submit (0T2)f1b5 submit");

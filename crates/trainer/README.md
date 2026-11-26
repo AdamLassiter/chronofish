@@ -42,10 +42,10 @@ Add `--persistent-adam` to experiment with retaining optimizer moments and updat
 
 ## Checkpoints and compatibility
 
-Training runs that include 5D use `best-reference-v3.json`,
-`candidate-reference-v3.json`, and `replay-reference-v3.bin.zst`. Standard-only
-runs use the corresponding v2 filenames. A fresh reference run can import
-weights explicitly with `--warm-start PATH`. It starts with a fresh replay
-buffer and optimizer.
+All trainer modes use `best-v2.json`, `candidate-v2.json`, and
+`replay-v2.bin.zst` with Chronofish’s move-first generator. The
+`reference-v3` files belong to the reference-rules run. To reuse its model
+weights, pass `--warm-start PATH` in a fresh work directory. The optimizer and
+replay start fresh.
 
 For tournament evaluation and equal-time experiments, see the [benchmark guide](../benchmarks/README.md).

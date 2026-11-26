@@ -4,7 +4,7 @@ The Rust engine follows [ftxi/5dchess_engine at 664277d](https://github.com/ftxi
 See the accompanying LICENSE for the BSD-2-Clause notice.
 
 The port uses the Rust state and hypercuboid cursor extracted from Kairos
-into `chronofish-5d-rules` for legal complete turns. It implements adversarial UCT across coordinate prefixes, progressive
+into `chronofish-5d-rules-reference` for legal complete turns. It implements adversarial UCT across coordinate prefixes, progressive
 widening, flat UCB, random and weighted rollouts, the default and frozen
 linear evaluators, and uniform random play. Its RNG and cursor differ from
 the upstream C++ implementations, so the same seed can select different

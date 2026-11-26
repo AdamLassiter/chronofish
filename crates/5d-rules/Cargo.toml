@@ -3,12 +3,16 @@ name = "chronofish-5d-rules"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
-description = "Whole-turn 5D chess rules and hypercuboid move generation"
+description = "Chronofish move-first standard and 5D rules"
 
-[features]
-prof = []
+[dependencies]
+chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
 
-[lints.clippy]
-manual_isolate_lowest_one = "allow"
-needless_range_loop = "allow"
+[dev-dependencies]
+pretty_assertions = "1"
+serde_json = "1"
+
+[lints]
+workspace = true

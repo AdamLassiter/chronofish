@@ -137,7 +137,7 @@ struct Arguments {
     /// Discard accumulated candidate progress and fit from the incumbent this run.
     #[arg(long)]
     reset_candidate: bool,
-    /// Initialize a fresh reference checkpoint from existing weights.
+    /// Initialize a fresh checkpoint from existing weights.
     #[arg(long)]
     warm_start: Option<PathBuf>,
     /// Carry Adam moments between fits in the candidate checkpoint.
@@ -346,23 +346,14 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
         return Ok(());
     }
     let mut rng = ChaCha8Rng::seed_from_u64(arguments.seed);
-    let tag = if matches!(arguments.ruleset, RuleSelection::Standard) {
-        "v2"
-    } else {
-        "reference-v3"
-    };
-    let best_path = arguments.work_dir.join(format!("best-{tag}.json"));
-    let candidate_path = arguments.work_dir.join(format!("candidate-{tag}.json"));
-    let replay_path = arguments.work_dir.join(format!("replay-{tag}.bin.zst"));
+    let best_path = arguments.work_dir.join("best-v2.json");
+    let candidate_path = arguments.work_dir.join("candidate-v2.json");
+    let replay_path = arguments.work_dir.join("replay-v2.bin.zst");
     warn_about_v1_files(&arguments.work_dir, &best_path, &replay_path);
     let network_config = NetworkConfig::from(resolved_model_size(arguments));
     let mut best = if let Some(source) = &arguments.warm_start {
-        if tag != "reference-v3"
-            || best_path.exists()
-            || candidate_path.exists()
-            || replay_path.exists()
-        {
-            return Err("--warm-start requires a fresh reference training directory".into());
+        if best_path.exists() || candidate_path.exists() || replay_path.exists() {
+            return Err("--warm-start requires a fresh training directory".into());
         }
         let mut model = PolicyValueNetwork::load(source)?;
         if model.config() != network_config {

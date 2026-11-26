@@ -1,16 +1,12 @@
-# Chronofish 5D Rules
+# Chronofish 5D rules
 
-Shared reference rules for Chronofish, Kairos, and ftxi. The crate owns bitboard
-state, timeline activity, move generation, and lazy hypercuboid enumeration of
-complete turns. The referee checks that a submitted turn advances the Present
-and protects the mover's royals. Its draft API finds individually playable
-moves with legal completions.
+Owns the game state and move-first generator used by default in Standard Chess,
+both 5D modes, and AlphaZero training. It handles staged moves, timeline
+creation and acceptance, submission, undo, and game outcomes.
 
-The `prof` feature instruments rules search. See [upstream attribution](NOTICE)
-and [Chronofish's rules](../../RULES.md).
+Explicit reference matches and previously saved reference games use the
+[Kairos-derived rules](../5d-rules-reference/README.md).
 
 ```sh
 cargo test -p chronofish-5d-rules
 ```
-
-The [Kairos perft tests](../kairos/tests/perft.rs) also cover this crate.

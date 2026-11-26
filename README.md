@@ -1,7 +1,7 @@
 # Chronofish
 
 Chronofish is a Rust chess engine and web app for orthodox chess and 5D chess
-with time travel and branching timelines. The two 5D modes share the reference
+with time travel and branching timelines. The two 5D modes use Chronofish’s move-first
 rules engine and offer an orthodox or alternate starting army. See the
 [game rules](RULES.md).
 
@@ -26,7 +26,8 @@ to train a model.
 | Crate | Purpose |
 |---|---|
 | [core](crates/core/README.md) | Game API and orthodox rules |
-| [5d-rules](crates/5d-rules/README.md) | Shared 5D reference rules and referee |
+| [5d-rules](crates/5d-rules/README.md) | Default move generation and game state |
+| [5d-rules-reference](crates/5d-rules-reference/README.md) | Kairos-derived whole-turn engine and referee |
 | [notation](crates/notation/README.md) | 5DPGN, 5DFEN, and move histories |
 | [classic](crates/classic/README.md) | Classical Chronofish bots |
 | [neural](crates/neural/README.md) | Model, encoding, and inference |

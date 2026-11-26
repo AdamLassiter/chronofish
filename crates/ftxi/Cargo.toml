@@ -8,7 +8,7 @@ description = "Rust port of ftxi's 5D chess search"
 
 [dependencies]
 chronofish-core = { path = "../core" }
-chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
 rand = "0.9"
 
 [dev-dependencies]

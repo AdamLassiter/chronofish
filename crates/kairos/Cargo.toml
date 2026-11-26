@@ -10,11 +10,11 @@ name = "kairos"
 path = "src/lib.rs"
 
 [features]
-prof = ["chronofish-5d-rules/prof"]
+prof = ["chronofish-5d-rules-reference/prof"]
 
 [dependencies]
 chronofish-core = { path = "../core" }
-chronofish-5d-rules = { path = "../5d-rules" }
+chronofish-5d-rules-reference = { path = "../5d-rules-reference" }
 chronofish-notation = { path = "../notation" }
 
 

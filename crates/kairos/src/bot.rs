@@ -22,6 +22,10 @@ impl AiPlayer for KairosBot {
         ruleset != Ruleset::Standard
     }
 
+    fn requires_reference_rules(&self) -> bool {
+        true
+    }
+
     fn choose_action(&mut self, game: &Game) -> Result<AiDecision, String> {
         self.turn.choose(game, |state| {
             self.engine

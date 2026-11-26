@@ -35,15 +35,13 @@ use rayon::prelude::*;
 
 use crate::uci::{Strength, UciEngine};
 
-const ROSTER: [&str; 8] = [
+const ROSTER: [&str; 6] = [
     "fissure",
     "grabablanca",
     "blueshift",
     "carlsen",
     "alpha-now",
     "chronofish",
-    "kairos",
-    "loki",
 ];
 const LADDER: [&str; 5] = [
     "blueshift-1k",
@@ -54,6 +52,8 @@ const LADDER: [&str; 5] = [
 ];
 const REFERENCES: [&str; 3] = ["sf-1320", "sf-1600", "sf-2000"];
 const STOCKFISH_ELO: std::ops::RangeInclusive<u32> = 1320..=3190;
+/// Default cap on concurrent games, leaving headroom for the rest of the machine.
+const DEFAULT_THREADS: usize = 15;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum RuleSelection {
@@ -144,6 +144,9 @@ struct Arguments {
     save_ratings: Option<PathBuf>,
     #[arg(long, default_value_t = 0x544f_5552_4e45_59)]
     seed: u64,
+    /// Games played at once, one worker thread each; capped at the machine's cores.
+    #[arg(long, default_value_t = DEFAULT_THREADS)]
+    threads: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,7 +166,7 @@ impl Bot {
     fn parse(name: &str) -> Result<Self, String> {
         let unknown = || {
             format!(
-                "unknown bot {name}; choose from {}, blueshift-<nodes>, sf-<elo>, sf-skill<level>",
+                "unknown bot {name}; choose from {}, kairos, loki, blueshift-<nodes>, sf-<elo>, sf-skill<level>",
                 ROSTER.join(", ")
             )
         };
@@ -343,9 +346,8 @@ struct Schedule {
 }
 
 /// Plays up to `actions` random legal actions, stopping before any that ends the game.
-fn random_opening(ruleset: Ruleset, actions: usize, seed: u64) -> Game {
+fn random_opening(mut game: Game, actions: usize, seed: u64) -> Game {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut game = Game::new(ruleset);
     for _ in 0..actions {
         let legal = game.legal_actions();
         if legal.is_empty() {
@@ -370,6 +372,17 @@ struct Pairing {
 }
 
 impl Pairing {
+    fn initial_game(self, players: &[Bot]) -> Game {
+        if [players[self.white], players[self.black]]
+            .iter()
+            .any(|bot| matches!(bot, Bot::Kairos | Bot::Loki))
+        {
+            Game::new_reference(self.ruleset)
+        } else {
+            Game::new(self.ruleset)
+        }
+    }
+
     /// Both colours of one opening between one pair: the independent unit for resampling.
     fn group(self) -> Group {
         (
@@ -530,7 +543,7 @@ fn round_robin(
                 Ruleset::MultiverseVariant => 2,
             };
             let opening = random_opening(
-                pairing.ruleset,
+                pairing.initial_game(players),
                 schedule.opening_actions,
                 schedule.seed ^ (ruleset_tag << 48) ^ (pairing.opening as u64) << 8,
             );
@@ -955,6 +968,19 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Box<dyn Er
         }
         Err(error) => return Err(error.into()),
     };
+    let available = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let threads = arguments.threads.clamp(1, available);
+    eprintln!("using {threads} worker threads");
+    // A local pool, not the global one, so the cap holds however `run` is called.
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .thread_name(|index| format!("tournament-{index}"))
+        .build()?;
+    pool.install(|| tournament(&arguments).map_err(|error| error.to_string()))
+        .map_err(Into::into)
+}
+
+fn tournament(arguments: &Arguments) -> Result<(), Box<dyn Error>> {
     let context = Context {
         model: arguments
             .model
@@ -983,7 +1009,7 @@ pub fn run(arguments: impl IntoIterator<Item = String>) -> Result<(), Box<dyn Er
     };
     let explicit = parse_anchors(&arguments.anchor)?;
     if arguments.calibrate {
-        return calibrate(&arguments, &context, schedule, &explicit);
+        return calibrate(arguments, &context, schedule, &explicit);
     }
     let rulesets = arguments.ruleset.rulesets();
     let players = dedupe(parse_bots(&arguments.bots)?)

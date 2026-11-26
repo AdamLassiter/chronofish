@@ -14,7 +14,7 @@ mod position;
 #[cfg(feature = "chronofish")]
 pub use chronofish::replay_5dpgn;
 #[cfg(feature = "chronofish")]
-pub use chronofish_pgn::{export_5dpgn, export_5dpgn_for};
+pub use chronofish_pgn::{export_5dpgn, export_5dpgn_for, export_5dpgn_from};
 #[cfg(feature = "chronofish")]
 pub use lan::{decode_lan, format_lan, replay_lan};
 pub use position::{

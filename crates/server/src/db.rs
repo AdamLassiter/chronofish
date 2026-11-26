@@ -309,12 +309,12 @@ impl Database {
 
     pub fn create_game(
         &self,
-        ruleset: Ruleset,
+        game: &Game,
         attacker_id: i64,
         defender_id: i64,
     ) -> Result<StoredGame, Box<dyn std::error::Error>> {
-        let game = Game::new(ruleset);
-        let state_json = serde_json::to_string(&game)?;
+        let ruleset = game.ruleset();
+        let state_json = serde_json::to_string(game)?;
         let timestamp = now();
         let connection = self.connection.lock().expect("database mutex poisoned");
         connection.execute(
@@ -844,7 +844,7 @@ mod tests {
             .create_human("defender", "Defender", "hash")
             .expect("defender");
         let stored = database
-            .create_game(Ruleset::Standard, attacker.id, defender.id)
+            .create_game(&Game::new(Ruleset::Standard), attacker.id, defender.id)
             .expect("game");
 
         let mut game = Game::new(Ruleset::Standard);
@@ -921,7 +921,7 @@ mod tests {
         assert!(auth.password_hash.is_none());
 
         let stored = database
-            .create_game(Ruleset::Standard, human.id, bot.id)
+            .create_game(&Game::new(Ruleset::Standard), human.id, bot.id)
             .expect("game");
         let mut won = Game::new(Ruleset::Standard);
         won.concede(Side::White).expect("concession");

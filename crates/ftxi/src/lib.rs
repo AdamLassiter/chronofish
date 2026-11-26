@@ -8,7 +8,7 @@ pub use bot::LokiBot;
 mod linear;
 pub use linear::LinearProfile;
 
-use chronofish_5d_rules::core::{
+use chronofish_5d_rules_reference::core::{
     action::{MoveSeq, special},
     bitboard::{bishop_copy_mask, knight_jump1_attack, rook_copy_mask},
     check_position::{BoardOverlay, CheckKind, CheckPosition},
@@ -16,9 +16,9 @@ use chronofish_5d_rules::core::{
     piece::{NO_PIECE, piece_name, to_white},
     state::State,
 };
-use chronofish_5d_rules::misc::geometry::{Point, Slice};
-use chronofish_5d_rules::misc::integer_set::{Index, IntegerSet};
-use chronofish_5d_rules::misc::ordering::{AxisOrders, HcOrdering};
+use chronofish_5d_rules_reference::misc::geometry::{Point, Slice};
+use chronofish_5d_rules_reference::misc::integer_set::{Index, IntegerSet};
+use chronofish_5d_rules_reference::misc::ordering::{AxisOrders, HcOrdering};
 use rand::{Rng, seq::SliceRandom};
 
 /// Static evaluation or a bounded random rollout at a newly explored node.
@@ -585,7 +585,7 @@ mod prefix_tests {
 
     #[test]
     fn upstream_check_profile_counts_cross_board_threats() {
-        use chronofish_5d_rules::core::variants::startpos;
+        use chronofish_5d_rules_reference::core::variants::startpos;
         use chronofish_notation::apply_uci_moves;
 
         let mut state = startpos();
@@ -629,7 +629,7 @@ mod prefix_tests {
 
     #[test]
     fn restricted_frontier_preserves_sibling_turns() {
-        use chronofish_5d_rules::core::variants::startpos;
+        use chronofish_5d_rules_reference::core::variants::startpos;
         use chronofish_notation::apply_uci_moves;
         use std::collections::BTreeSet;
 
