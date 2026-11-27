@@ -65,6 +65,7 @@ mod tests {
         assert!(APP.contains("Inactive"));
         assert!(APP.contains("submittedPresentTime"));
         assert!(APP.contains("undoStagedMove"));
+        assert!(APP.contains("Turn submitted."));
         assert!(APP.contains("submitBugReport"));
         assert!(APP.contains("expectedBehavior"));
         assert!(APP.contains("move-arrows"));

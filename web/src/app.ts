@@ -1169,6 +1169,7 @@ element<HTMLButtonElement>("#submit-turn").onclick = () => {
         },
       );
       state.selected = null;
+      notice(state.current.game.outcome ? "Game over." : "Turn submitted.");
       renderGame();
     } catch (error) {
       await recoverGameAfterFailedAction(error);

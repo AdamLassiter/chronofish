@@ -53,6 +53,13 @@ pub trait PolicyValueEvaluator: Send + Sync {
     fn predict(&self, position: &EncodedPosition) -> Prediction;
 
     fn predict_batch(&self, positions: &[EncodedPosition]) -> Vec<Prediction>;
+
+    /// Returns device memory cached for the calling thread to the driver.
+    ///
+    /// GPU runtimes give each thread its own allocation pools and never shrink them on
+    /// their own. Call this before a thread that ran inference exits, or its pool
+    /// outlives it.
+    fn release_thread_memory(&self) {}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -467,6 +474,10 @@ impl PolicyValueEvaluator for VulkanPolicyValueEvaluator {
             &self.device,
         )
     }
+
+    fn release_thread_memory(&self) {
+        <burn::backend::Vulkan as Backend>::memory_cleanup(&self.device);
+    }
 }
 
 #[cfg(all(feature = "training", feature = "vulkan"))]
@@ -722,6 +733,9 @@ impl PolicyValueNetwork {
         .map_err(|payload| ModelError::VulkanExecution(panic_message(payload.as_ref())))?;
         let (model, metrics, updates, adam) = trained?;
         let bytes = record_bytes(model)?;
+        // The fit's activations, gradients and Adam moments are all dropped now. Hand
+        // their pages back so they don't stay reserved through self-play and arena.
+        <Vulkan as Backend>::memory_cleanup(&device.device);
         self.model = model_from_bytes(self.config, bytes, &NdArrayDevice::default())?;
         self.adam = adam.map(Arc::new);
         self.training_steps += updates;

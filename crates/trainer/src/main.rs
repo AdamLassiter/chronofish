@@ -1349,6 +1349,9 @@ fn run_inference_coordinator<E: PolicyValueEvaluator + ?Sized>(
         }
         assert!(predictions.next().is_none(), "inference result count");
     }
+    // Each coordinator is a fresh thread, and GPU runtimes key allocation pools by
+    // thread. Without this, every self-play and arena pass strands its working set.
+    model.release_thread_memory();
     if batches > 0 {
         report(format!(
             "  Inference: {total_positions} positions / {batches} batches (target {target_batch_size}), mean queue wait {:?}, compute {}",
