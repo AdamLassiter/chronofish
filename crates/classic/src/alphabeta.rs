@@ -169,7 +169,7 @@ impl Search<'_> {
         self.nodes += 1;
         // Reading the clock every node would cost more than a cheap node.
         if self.nodes > self.config.max_nodes
-            || (self.nodes % 64 == 0 && self.deadline.is_some_and(|end| Instant::now() >= end))
+            || (self.nodes.is_multiple_of(64) && self.deadline.is_some_and(|end| Instant::now() >= end))
         {
             self.aborted = true;
         }
