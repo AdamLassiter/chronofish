@@ -217,3 +217,22 @@ fn blueshift_levels_have_rising_budgets_and_their_own_accounts() {
         "bot-deep-blueshift"
     );
 }
+
+#[test]
+fn time_limit_bounds_an_unbounded_node_budget_and_still_scores() {
+    let game = random_opening(Ruleset::Multiverse, 7, 8);
+    let started = std::time::Instant::now();
+    let score = DeepBlueshift::new(BlueshiftConfig {
+        max_nodes: usize::MAX,
+        max_depth: 64,
+        ..BlueshiftConfig::default()
+    })
+    .with_time_limit(std::time::Duration::from_millis(100))
+    .evaluate(&game);
+    assert!(score.is_some(), "an unfinished game always gets a score");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "search ran for {:?}",
+        started.elapsed()
+    );
+}

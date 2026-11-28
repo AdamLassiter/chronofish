@@ -140,9 +140,9 @@ struct Arguments {
     /// Initialize a fresh checkpoint from existing weights.
     #[arg(long)]
     warm_start: Option<PathBuf>,
-    /// Carry Adam moments between fits in the candidate checkpoint.
-    #[arg(long)]
-    persistent_adam: bool,
+    /// Experimental: carry Adam moments between fits in the candidate checkpoint.
+    #[arg(long, alias = "persistent-adam")]
+    persistent: bool,
     /// Network preset. Auto preserves the large CPU model and uses balanced for Vulkan.
     #[arg(long, value_enum, default_value_t = ModelSizeArgument::Auto)]
     model_size: ModelSizeArgument,
@@ -403,7 +403,7 @@ fn train(arguments: &Arguments, pool: &ThreadPool) -> Result<(), Box<dyn Error>>
     if arguments.reset_candidate {
         candidate.clear_optimizer();
     }
-    if arguments.persistent_adam {
+    if arguments.persistent {
         field(
             "Adam state",
             if candidate.has_optimizer() {
@@ -883,7 +883,7 @@ fn fit_candidate(
     );
     let fit_started = Instant::now();
     let train_config = TrainConfig {
-        persistent_adam: arguments.persistent_adam,
+        persistent_adam: arguments.persistent,
         epochs: arguments.epochs,
         batch_size: arguments.batch_size,
         batch_token_budget: arguments.batch_token_budget,

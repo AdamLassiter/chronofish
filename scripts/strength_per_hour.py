@@ -17,7 +17,7 @@ def train(binary, directory, args, seed, persistent):
                "1000000", "--training-device", args.device, "--model-size", args.model_size,
                "--threads", str(args.threads)]
     if persistent:
-        command.append("--persistent-adam")
+        command.append("--persistent")
     command.extend(args.trainer_args)
     with (directory / "training.log").open("w") as log:
         start = time.monotonic()

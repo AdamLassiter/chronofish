@@ -413,6 +413,27 @@ impl Database {
             .collect()
     }
 
+    /// The most recent recorded position with no staged moves, and the move sequence
+    /// that produced it. `None` means no action has completed a turn yet.
+    pub fn latest_submitted_state(
+        &self,
+        game_id: i64,
+    ) -> Result<Option<(i64, Game)>, Box<dyn std::error::Error>> {
+        let connection = self.connection.lock().expect("database mutex poisoned");
+        let mut statement = connection.prepare(
+            "SELECT sequence, state_json FROM moves WHERE game_id = ?1 ORDER BY sequence DESC",
+        )?;
+        let mut rows = statement.query([game_id])?;
+        // A 5D turn stages only a handful of moves, so this stops within a few rows.
+        while let Some(row) = rows.next()? {
+            let game: Game = serde_json::from_str(&row.get::<_, String>(1)?)?;
+            if !game.has_staged_moves() {
+                return Ok(Some((row.get(0)?, game)));
+            }
+        }
+        Ok(None)
+    }
+
     pub fn moves_for_game(
         &self,
         game_id: i64,

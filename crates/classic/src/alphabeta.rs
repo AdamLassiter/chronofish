@@ -5,6 +5,7 @@
 //! is negated only when an action hands the turn to the opponent.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use chronofish_core::{AiDecision, AiPlayer, AiProfile, Color, Game, PlayerAction};
 
@@ -21,6 +22,9 @@ pub struct BlueshiftConfig {
     pub max_depth: u32,
     /// Extra capture-only actions searched beyond the nominal depth.
     pub quiescence_depth: u32,
+    /// Optional wall-clock cap per decision, for interactive callers. Bots leave it
+    /// unset so that their play stays deterministic.
+    pub time_limit: Option<Duration>,
 }
 
 impl Default for BlueshiftConfig {
@@ -29,6 +33,7 @@ impl Default for BlueshiftConfig {
             max_nodes: 80_000,
             max_depth: 8,
             quiescence_depth: 4,
+            time_limit: None,
         }
     }
 }
@@ -130,6 +135,13 @@ impl DeepBlueshift {
         self.config.max_nodes = max_nodes;
         self
     }
+
+    /// Also stops each search once `limit` has elapsed, keeping the deepest finished result.
+    #[must_use]
+    pub const fn with_time_limit(mut self, limit: Duration) -> Self {
+        self.config.time_limit = Some(limit);
+        self
+    }
 }
 
 impl Default for DeepBlueshift {
@@ -143,6 +155,7 @@ struct Search<'a> {
     table: &'a mut HashMap<TableKey, Entry>,
     nodes: usize,
     aborted: bool,
+    deadline: Option<Instant>,
 }
 
 #[derive(Clone, Copy)]
@@ -154,7 +167,10 @@ enum Mode {
 impl Search<'_> {
     fn tick(&mut self) -> bool {
         self.nodes += 1;
-        if self.nodes > self.config.max_nodes {
+        // Reading the clock every node would cost more than a cheap node.
+        if self.nodes > self.config.max_nodes
+            || (self.nodes % 64 == 0 && self.deadline.is_some_and(|end| Instant::now() >= end))
+        {
             self.aborted = true;
         }
         self.aborted
@@ -391,11 +407,39 @@ impl AiPlayer for DeepBlueshift {
             .first()
             .copied()
             .ok_or_else(|| "no legal action is available".to_owned())?;
+        let (action, score, depth) = self.search(game).unwrap_or((fallback, 0, 1));
+        Ok(AiDecision {
+            action,
+            principal_variation: self.principal_variation(game, action, depth),
+            root_value: Some(squash(score)),
+        })
+    }
+}
+
+impl DeepBlueshift {
+    /// Searches `game` and scores it in centipawns for the side to move.
+    ///
+    /// Scores at or beyond [`MATE_THRESHOLD`] in magnitude are forced results. If the
+    /// budget runs out before the first iteration finishes, this falls back to the
+    /// static evaluation. A finished game scores `None`.
+    pub fn evaluate(&mut self, game: &Game) -> Option<i32> {
+        if game.outcome().is_some() {
+            return None;
+        }
+        Some(
+            self.search(game)
+                .map_or_else(|| relative(game, game.turn()), |(_, score, _)| score),
+        )
+    }
+
+    /// Iterative deepening up to the configured depth and node budget.
+    fn search(&mut self, game: &Game) -> Option<(PlayerAction, i32, u32)> {
         let mut search = Search {
             config: self.config,
             table: &mut self.table,
             nodes: 0,
             aborted: false,
+            deadline: self.config.time_limit.map(|limit| Instant::now() + limit),
         };
         let mut best: Option<(PlayerAction, i32, u32)> = None;
         for depth in 1..=self.config.max_depth.max(1) {
@@ -409,11 +453,6 @@ impl AiPlayer for DeepBlueshift {
                 None => break,
             }
         }
-        let (action, score, depth) = best.unwrap_or((fallback, 0, 1));
-        Ok(AiDecision {
-            action,
-            principal_variation: self.principal_variation(game, action, depth),
-            root_value: Some(squash(score)),
-        })
+        best
     }
 }

@@ -68,6 +68,7 @@ const SELF_PLAY: &str = "Self-play";
 const TRAINING: &str = "Training";
 const ARENA: &str = "Arena";
 const HARDWARE: &str = "Hardware";
+const EXPERIMENTAL: &str = "Experimental";
 const MODE: &str = "Mode";
 
 const SPECS: &[Spec] = &[
@@ -142,11 +143,6 @@ const SPECS: &[Spec] = &[
         "learning_rate",
         TRAINING,
         "Adam learning rate. Lower it if losses oscillate, and raise it carefully if fits barely move.",
-    ),
-    field(
-        "persistent_adam",
-        TRAINING,
-        "Carry Adam's moment estimates in the candidate checkpoint between fits, instead of restarting the optimiser each iteration.",
     ),
     field(
         "reset_candidate",
@@ -247,6 +243,11 @@ const SPECS: &[Spec] = &[
         "reconstruction_memory_budget_mib",
         HARDWARE,
         "Host memory budget for replay positions expanded for a fit, in MiB.",
+    ),
+    field(
+        "persistent",
+        EXPERIMENTAL,
+        "Carry Adam's moment estimates in the candidate checkpoint between fits, instead of restarting the optimiser each iteration.",
     ),
     field(
         "arena_only",
@@ -419,7 +420,14 @@ fn load_saved(work_dir: &Path) -> HashMap<String, String> {
         .lines()
         .filter(|line| !line.trim_start().starts_with('#'))
         .filter_map(|line| line.split_once('='))
-        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+        .map(|(key, value)| {
+            // Settings saved before the experimental flag was renamed.
+            let key = match key.trim() {
+                "persistent_adam" => "persistent",
+                key => key,
+            };
+            (key.to_owned(), value.trim().to_owned())
+        })
         .collect()
 }
 
@@ -1077,7 +1085,7 @@ mod tests {
 
     #[test]
     fn command_line_values_prefill_and_suggestions_apply() {
-        let mut app = app_from(&["chronofish-trainer", "--games", "12", "--persistent-adam"]);
+        let mut app = app_from(&["chronofish-trainer", "--games", "12", "--persistent"]);
         let games = app
             .fields
             .iter()
@@ -1089,7 +1097,7 @@ mod tests {
         let arguments = app.build().unwrap();
         assert_eq!(arguments.games, 64);
         assert_eq!(arguments.epochs, 1);
-        assert!(arguments.persistent_adam);
+        assert!(arguments.persistent);
         assert!((arguments.promotion_score - 0.55).abs() < f32::EPSILON);
     }
 
@@ -1139,5 +1147,20 @@ mod tests {
             .unwrap();
         assert!(field.value == next && field.source == Source::Saved);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_persistent_adam_setting_and_flag_still_apply() {
+        let directory =
+            std::env::temp_dir().join(format!("chronofish-legacy-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(SETTINGS_FILE), "persistent_adam=true\n").unwrap();
+        let saved = load_saved(&directory);
+        assert_eq!(saved.get("persistent").map(String::as_str), Some("true"));
+        fs::remove_dir_all(directory).unwrap();
+        let arguments = app_from(&["chronofish-trainer", "--persistent-adam"])
+            .build()
+            .unwrap();
+        assert!(arguments.persistent);
     }
 }

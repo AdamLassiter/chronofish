@@ -26,6 +26,28 @@ pub struct AppState {
     database: Database,
     bots: Arc<Mutex<BotMap>>,
     bug_admin_token: Option<String>,
+    /// Latest evaluation per game. Held while searching, so one search runs at a time.
+    evaluations: Arc<Mutex<HashMap<i64, Evaluation>>>,
+}
+
+/// Engine verdict on a game's last submitted position. Staged moves are ignored.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Evaluation {
+    /// Move sequence that produced the evaluated position; zero is the start.
+    sequence: i64,
+    /// White's advantage on [-1, 1]: +1 is a won game for White, -1 for Black.
+    white_score: f32,
+    /// Material-style score in centipawns for White, absent for forced or final results.
+    centipawns: Option<i32>,
+    /// Side that has won, or that the search found a forced win for.
+    winner: Option<Side>,
+    /// Whether the game is over rather than merely forced.
+    finished: bool,
+    engine: &'static str,
+    /// Cache key from [`position_key`], so an undone turn reuses its earlier search.
+    #[serde(skip)]
+    position: (u64, Side, bool),
 }
 
 #[derive(Debug)]
@@ -116,6 +138,7 @@ impl AppState {
         Ok(Self {
             database,
             bots: Arc::new(Mutex::new(bots)),
+            evaluations: Arc::new(Mutex::new(HashMap::new())),
             bug_admin_token: std::env::var("CHRONOFISH_BUG_ADMIN_TOKEN")
                 .ok()
                 .map(|token| token.trim().to_owned())
@@ -134,9 +157,10 @@ pub(crate) fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(web::index))
         .route("/app", get(web::index))
-        .route("/assets/app.js", get(web::app))
         .route("/assets/styles.css", get(web::styles))
         .route("/assets/favicon.svg", get(web::favicon))
+        .route("/assets/rules.md", get(web::rules))
+        .route("/assets/{file}", get(web::script))
         .route("/api/health", get(health))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -146,6 +170,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/api/leaderboard", get(leaderboard))
         .route("/api/games", get(games).post(create_game))
         .route("/api/games/{id}", get(get_game))
+        .route("/api/games/{id}/evaluation", get(get_evaluation))
         .route("/api/games/{id}/moves", post(play_move))
         .route("/api/games/{id}/undo", post(undo_staged_move))
         .route("/api/games/{id}/submit", post(submit_turn))
@@ -377,6 +402,130 @@ async fn get_game(
         Ok(Json(game_detail(&state, &game, user.id)?))
     })
     .await
+}
+
+async fn get_evaluation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<Evaluation>, ApiError> {
+    run_game_work(move || {
+        let user = authenticated_user(&state, &headers)?;
+        let stored = load_participating_game(&state, id, user.id)?;
+        Ok(Json(evaluate_submitted(&state, &stored)?))
+    })
+    .await
+}
+
+/// Search budget for the evaluation bar. Node budgets alone don't bound time: on a
+/// large 5D position even the medium budget takes about ten seconds. So search with the
+/// hard node budget, but stop at a fixed time and keep the deepest finished result.
+const EVALUATION_NODES: usize = chronofish_classic::BlueshiftLevel::Hard.max_nodes();
+const EVALUATION_TIME: std::time::Duration = std::time::Duration::from_millis(1500);
+
+fn evaluate_submitted(state: &AppState, stored: &StoredGame) -> Result<Evaluation, ApiError> {
+    let (sequence, game) = if stored.game.has_staged_moves() {
+        state
+            .database
+            .latest_submitted_state(stored.id)
+            .map_err(ApiError::internal)?
+            .unwrap_or_else(|| {
+                (
+                    0,
+                    if stored.game.uses_reference_rules() {
+                        chronofish_core::Game::new_reference(stored.ruleset)
+                    } else {
+                        chronofish_core::Game::new(stored.ruleset)
+                    },
+                )
+            })
+    } else {
+        (stored.version, stored.game.clone())
+    };
+    let mut cache = state.evaluations.lock().expect("evaluation mutex poisoned");
+    let position = position_key(stored, &game);
+    if let Some(cached) = cache
+        .get(&stored.id)
+        .filter(|cached| cached.position == position)
+    {
+        return Ok(Evaluation {
+            sequence,
+            ..cached.clone()
+        });
+    }
+    let evaluation = evaluate_position(stored, sequence, &game);
+    cache.insert(stored.id, evaluation.clone());
+    Ok(evaluation)
+}
+
+fn evaluate_position(
+    stored: &StoredGame,
+    sequence: i64,
+    game: &chronofish_core::Game,
+) -> Evaluation {
+    use chronofish_classic::eval::MATE_THRESHOLD;
+
+    let engine = "Deep Blueshift";
+    let final_winner = if let Some(outcome) = game.outcome() {
+        Some(outcome.winner)
+    } else if stored.status != "active" {
+        Some(stored.winner_id.map(|winner| {
+            if winner == stored.attacker.id {
+                Side::White
+            } else {
+                Side::Black
+            }
+        }))
+    } else {
+        None
+    };
+    if let Some(winner) = final_winner {
+        return Evaluation {
+            sequence,
+            white_score: winner.map_or(0.0, white_sign),
+            centipawns: None,
+            winner,
+            finished: true,
+            engine,
+            position: position_key(stored, game),
+        };
+    }
+    let score = chronofish_classic::DeepBlueshift::level(chronofish_classic::BlueshiftLevel::Hard)
+        .with_max_nodes(EVALUATION_NODES)
+        .with_time_limit(EVALUATION_TIME)
+        .evaluate(game)
+        .unwrap_or(0);
+    let white = if game.turn() == Side::White {
+        score
+    } else {
+        -score
+    };
+    let forced = white.abs() >= MATE_THRESHOLD;
+    Evaluation {
+        sequence,
+        white_score: chronofish_classic::eval::squash(white),
+        centipawns: (!forced).then_some(white),
+        winner: forced.then_some(if white > 0 { Side::White } else { Side::Black }),
+        finished: false,
+        engine,
+        position: position_key(stored, game),
+    }
+}
+
+/// Position hash, side to move, and whether the game is still being played.
+fn position_key(stored: &StoredGame, game: &chronofish_core::Game) -> (u64, Side, bool) {
+    (
+        game.position_hash(),
+        game.turn(),
+        stored.status == "active" && game.outcome().is_none(),
+    )
+}
+
+const fn white_sign(side: Side) -> f32 {
+    match side {
+        Side::White => 1.0,
+        Side::Black => -1.0,
+    }
 }
 
 async fn play_move(
@@ -925,6 +1074,30 @@ mod tests {
         (status, value)
     }
 
+    #[tokio::test]
+    async fn rules_document_is_served_for_the_help_dialog() {
+        let state =
+            AppState::new(Database::in_memory().expect("database"), Vec::new()).expect("state");
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/assets/rules.md")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "text/markdown; charset=utf-8"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert!(body.starts_with(b"# Rules"));
+    }
+
     fn assert_bug_report_capture(
         report: &Value,
         game_id: i64,
@@ -1313,6 +1486,64 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response["error"], "there is no staged move to undo");
+    }
+
+    #[tokio::test]
+    async fn evaluation_ignores_staged_moves_and_reports_white_advantage() {
+        let state = AppState::new(
+            Database::in_memory().expect("database"),
+            vec![Box::new(BobbyFissureBot::default())],
+        )
+        .expect("state");
+        let app = router(state);
+        let (_, session) = request(
+            &app,
+            "POST",
+            "/api/auth/register",
+            None,
+            Some(json!({ "username": "eval-user", "password": "eval-password" })),
+        )
+        .await;
+        let token = session["token"].as_str().expect("token");
+        let (_, created) = request(
+            &app,
+            "POST",
+            "/api/games",
+            Some(token),
+            Some(json!({
+                "opponent": "bot-bobby-fissure",
+                "ruleset": "multiverse",
+                "playAs": "white"
+            })),
+        )
+        .await;
+        let game_id = created["summary"]["id"].as_i64().expect("game id");
+        let path = format!("/api/games/{game_id}/evaluation");
+
+        let (status, start) = request(&app, "GET", &path, Some(token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(start["sequence"], 0);
+        assert_eq!(start["finished"], false);
+        assert_eq!(start["engine"], "Deep Blueshift");
+        let score = start["whiteScore"].as_f64().expect("white score");
+        assert!((-1.0..=1.0).contains(&score));
+
+        let movement = created["game"]["legalActions"][0]["movement"].clone();
+        let (_, staged) = request(
+            &app,
+            "POST",
+            &format!("/api/games/{game_id}/moves"),
+            Some(token),
+            Some(json!({ "version": 0, "movement": movement })),
+        )
+        .await;
+        assert_eq!(staged["game"]["hasStagedMoves"], true);
+        let (status, during) = request(&app, "GET", &path, Some(token), None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(during, start, "a staged move must not move the bar");
+
+        let (status, _) = request(&app, "GET", &path, None, None).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

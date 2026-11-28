@@ -38,7 +38,7 @@ The default `--promotion-score 0.5` accepts tied scores so draw-heavy early trai
 
 Use multiple iterations in one invocation to reuse validated replay trajectories. The first fit checks the full replay, validating independent games on the trainer’s worker pool. Later fits reconstruct only the positions needed for sampling. The trainer reports replay and checkpoint write times, inference batch occupancy, queue wait, and compute time. CPU fitting encodes each distinct board layout once per batch. The “Spatial boards” line totals the layouts encoded, real board occurrences, and padded board slots across optimizer updates. These counts show how much work repeated 5D history saves on your replay.
 
-Add `--persistent-adam` to experiment with retaining optimizer moments and update counts between fits. The candidate checkpoint stores the moments atomically alongside the weights and verifies their weight digest on load. Older candidates start with fresh moments. Fitting without the flag drops saved moments, and `--reset-candidate` starts a fresh optimizer from the incumbent.
+Add `--persistent` to experiment with retaining optimizer moments and update counts between fits. The candidate checkpoint stores the moments atomically alongside the weights and verifies their weight digest on load. Older candidates start with fresh moments. Fitting without the flag drops saved moments, and `--reset-candidate` starts a fresh optimizer from the incumbent.
 
 ## Checkpoints and compatibility
 

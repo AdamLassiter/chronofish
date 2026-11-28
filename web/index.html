@@ -103,8 +103,9 @@
       <section id="game-view" hidden>
         <div class="game-toolbar panel">
           <button id="back-to-lobby" type="button">← Lobby</button>
-          <div>
+          <div class="game-heading">
             <strong id="game-title"></strong><span id="game-status"></span>
+            <p id="game-notice" class="notice" role="status"></p>
           </div>
           <div class="toolbar-actions">
             <button id="undo-staged-move" type="button">Undo move</button>
@@ -113,33 +114,101 @@
             <button id="refresh-game" type="button">Refresh</button>
             <button id="raise-bug" type="button">Raise a bug</button>
             <button id="abandon-game" type="button">Abandon game</button>
+            <button
+              id="toggle-history"
+              type="button"
+              aria-controls="history-drawer"
+              aria-expanded="false"
+            >
+              History
+            </button>
+            <button id="open-help" type="button" aria-controls="help-dialog">
+              Help
+            </button>
           </div>
         </div>
-        <p id="game-notice" class="notice" role="status"></p>
-        <section class="legend" aria-label="Timeline legend">
-          <span><i class="swatch selected"></i>Selected piece</span>
-          <span><i class="swatch target"></i>Legal target</span>
-          <span><i class="swatch present-line-swatch"></i>Present line</span>
-          <span><i class="swatch move-source"></i>Move source</span>
-          <span><i class="swatch move-target"></i>Move target</span>
-          <span><i class="swatch arrived"></i>Piece arrived</span>
-          <span><i class="swatch check"></i>Royal in check</span>
-        </section>
-        <!-- Preserve the horizontal timeline play surface established in aa6a9bea. -->
-        <section
-          id="multiverse"
-          class="multiverse"
-          aria-label="5D chess multiverse"
+        <div class="board-stage">
+          <div
+            id="eval-bar"
+            class="eval-bar"
+            role="meter"
+            aria-label="Engine evaluation of the last submitted turn"
+            aria-valuemin="-1"
+            aria-valuemax="1"
+            aria-valuenow="0"
+            data-pending="true"
+          >
+            <div class="eval-fill"></div>
+            <span class="eval-score"></span>
+          </div>
+          <!-- Preserve the horizontal timeline play surface established in aa6a9bea. -->
+          <section
+            id="multiverse"
+            class="multiverse"
+            aria-label="5D chess multiverse"
+          >
+            <div id="timeline-grid" class="timeline-grid"></div>
+          </section>
+        </div>
+        <aside
+          id="history-drawer"
+          class="panel history-drawer"
+          aria-labelledby="history-title"
+          hidden
         >
-          <div id="timeline-grid" class="timeline-grid"></div>
-        </section>
-        <article class="panel history-panel">
-          <h2>History</h2>
+          <div class="drawer-heading">
+            <h2 id="history-title">History</h2>
+            <button
+              id="close-history"
+              class="dialog-close"
+              type="button"
+              aria-label="Close history"
+            >
+              ×
+            </button>
+          </div>
           <ol id="move-history"></ol>
-        </article>
+        </aside>
       </section>
     </main>
-    <dialog id="bug-report-dialog" aria-labelledby="bug-report-title">
+    <dialog id="help-dialog" class="app-dialog" aria-labelledby="help-title">
+      <div class="dialog-heading">
+        <h2 id="help-title">Help</h2>
+        <button
+          id="close-help"
+          class="dialog-close"
+          type="button"
+          aria-label="Close help"
+        >
+          ×
+        </button>
+      </div>
+      <section aria-labelledby="colours-title">
+        <h3 id="colours-title">Board colours</h3>
+        <ul class="legend">
+          <li><i class="swatch selected"></i>Selected piece</li>
+          <li><i class="swatch target"></i>Legal target</li>
+          <li><i class="swatch present-line-swatch"></i>Present line</li>
+          <li><i class="swatch move-source"></i>Move source</li>
+          <li><i class="swatch move-target"></i>Move target</li>
+          <li><i class="swatch arrived"></i>Piece arrived</li>
+          <li><i class="swatch check"></i>Royal in check</li>
+        </ul>
+        <p class="help-note">
+          The bar left of the boards is the engine's evaluation of the last
+          submitted turn: White's share fills from White's side. Staged moves
+          don't change it until you submit.
+        </p>
+      </section>
+      <section id="rules" class="rules" aria-label="Rules">
+        <p class="help-note">Loading the rules…</p>
+      </section>
+    </dialog>
+    <dialog
+      id="bug-report-dialog"
+      class="app-dialog"
+      aria-labelledby="bug-report-title"
+    >
       <form id="bug-report-form" class="bug-report-form">
         <div class="bug-report-heading">
           <div>
